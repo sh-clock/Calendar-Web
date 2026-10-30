@@ -1123,12 +1123,14 @@ function openEventPopover(ev, anchor) {
   head.append(bar, headMain);
   const actions = el('div', 'eventpopover-actions');
   const btnEdit = el('button', 'button button-ghost icon-only', {
-    type: 'button', title: 'Edit', 'aria-label': 'Edit', text: '✎',
+    type: 'button', title: 'Edit', 'aria-label': 'Edit',
   });
+  btnEdit.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 13.5l.9-3.2 7.4-7.4 2.3 2.3-7.4 7.4-3.2.9zM10 4l2 2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   btnEdit.addEventListener('click', () => { closePopover(); beginEdit(ev); });
   const btnDel = el('button', 'button button-ghost icon-only button-danger', {
-    type: 'button', title: 'Delete', 'aria-label': 'Delete', text: '🗑',
+    type: 'button', title: 'Delete', 'aria-label': 'Delete',
   });
+  btnDel.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5M6.7 7v3.7M9.3 7v3.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   btnDel.addEventListener('click', () => { closePopover(); beginDelete(ev); });
   actions.append(btnEdit, btnDel);
   head.appendChild(actions);
@@ -1360,7 +1362,13 @@ function openEditor(form) {
   const backdrop = $('#editor-backdrop');
   const close = () => closeModalSurface(modal, backdrop);
   const box = el('div', 'eventform');
-  box.appendChild(el('h1', { text: editor.mode === 'create' ? 'Add event' : 'Edit event' }));
+  const headRow = el('div', 'modal-head');
+  headRow.appendChild(el('h1', { text: editor.mode === 'create' ? 'Add event' : 'Edit event' }));
+  const closeX = el('button', 'button button-ghost icon-only', { type: 'button', 'aria-label': 'Close', title: 'Close' });
+  closeX.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8" stroke-linecap="round"/></svg>';
+  closeX.addEventListener('click', close);
+  headRow.appendChild(closeX);
+  box.appendChild(headRow);
 
   const f = { ...form };
   const val = () => ({

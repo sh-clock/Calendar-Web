@@ -487,3 +487,6 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
   .eventpopover { width: calc(100vw - 24px); }
 }
 .calendar-daygrid-days .day-shortname { display: none; }
+
+/* modal-head h1 (editor): tighter inside the head row */
+.modal-head h1 { margin: 0; }
