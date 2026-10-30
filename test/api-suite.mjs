@@ -281,7 +281,7 @@ console.log('PHASE S2 — token-class × route matrix (WORKLOG D15)');
     ['ADMIN on GET /version', 'GET', '/version', ADMIN, undefined, 404, ''],
     ['ADMIN on GET /status', 'GET', '/status', ADMIN, undefined, 404, ''],
     ['ADMIN on GET /rows/{id}', 'GET', '/rows/cal:20261105', ADMIN, undefined, 404, ''],
-    ['INTERNAL on POST /internal/backup', 'POST', '/internal/backup', ADMIN, undefined, 404, ''],
+    ['ADMIN on POST /internal/backup', 'POST', '/internal/backup', ADMIN, undefined, 404, ''],
     ['no token /version', 'GET', '/version', undefined, undefined, 404, ''],
     ['no token /status', 'GET', '/status', undefined, undefined, 404, ''],
     ['no token /rows/{id}', 'GET', '/rows/cal:20261105', undefined, undefined, 404, ''],

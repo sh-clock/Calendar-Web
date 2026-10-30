@@ -88,7 +88,7 @@ function d1Query(sql) {
     encoding: 'utf8',
     env: { ...process.env, CI: 'true', WRANGLER_SEND_ANALYTICS: 'false' },
   });
-  if (res.status !== 0) throw new Error('d1 execute failed: ' + res.stderr);
+  if (res.status !== 0) throw new Error('d1 execute failed: ' + (res.stderr || res.stdout));
   const out = res.stdout;
   const i = out.indexOf('[');
   if (i < 0) throw new Error('no JSON array in d1 output: ' + out.slice(0, 300));
@@ -146,6 +146,7 @@ async function main() {
     console.log('== port :8787 busy — killing stale wrangler/workerd processes ==');
     try {
       run('pkill', ['-f', 'wrangler dev']);
+      run('pkill', ['-f', 'wrangler.js dev']); // matches `node …/wrangler.js dev`
       run('pkill', ['-f', 'workerd']);
     } catch {}
     await sleep(2500);
@@ -257,9 +258,11 @@ async function main() {
 
     console.log('\n== §19 retention prune (7-day boundary) ==');
     // today-7 must be RETAINED (cutoff is exclusive); today-8 must be pruned.
-    d1Query(`INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(7)}', 'boundary-keep', 1, x'00', x'00')`);
-    d1Query(`INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(8)}', 'boundary-drop', 1, x'00', x'00')`);
-    d1Query("INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('2020-01-01', 'stale-row', 1, x'00', x'00')");
+    // INSERT OR REPLACE keeps these idempotent across same-day re-runs (the
+    // PRIMARY KEY (day,id) would otherwise make the second run FATAL).
+    d1Query(`INSERT OR REPLACE INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(7)}', 'boundary-keep', 1, x'00', x'00')`);
+    d1Query(`INSERT OR REPLACE INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(8)}', 'boundary-drop', 1, x'00', x'00')`);
+    d1Query("INSERT OR REPLACE INTO backup (day, id, ver, nonce, ct) VALUES ('2020-01-01', 'stale-row', 1, x'00', x'00')");
     const sched2 = await fetch(`${BASE}/__scheduled?cron=0+3+*+*+*`);
     const sched2Text = await sched2.text();
     ok('second __scheduled trigger -> 200', sched2.status === 200, sched2.status + ' ' + sched2Text);
@@ -370,6 +373,7 @@ async function main() {
     } catch {}
     try {
       run('pkill', ['-f', 'wrangler dev']);
+      run('pkill', ['-f', 'wrangler.js dev']);
       run('pkill', ['-f', 'workerd']);
     } catch {}
   }
