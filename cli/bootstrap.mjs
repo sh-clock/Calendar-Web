@@ -27,15 +27,38 @@ export const WRAPPED_LEN = 60;
 
 const hex = (b) => Buffer.from(b).toString('hex');
 
+const B64_STRICT_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+const HEX_STRICT_RE = /^[0-9a-f]+$/;
+
+/** Strict base64 decode (standard alphabet, padded, canonical) — mirrors the
+ *  browser's b64ToBytes and the server's b64Decode (§5). Node's built-in
+ *  Buffer.from(x,'base64') is LENIENT, so the mirror needs its own decoder. */
+export function strictB64(s) {
+  if (typeof s !== 'string' || s.length === 0 || s.length % 4 !== 0 || !B64_STRICT_RE.test(s)) {
+    throw new Error('bad_base64');
+  }
+  const pad = s.indexOf('=');
+  if (pad !== -1 && pad < s.length - 2) throw new Error('bad_base64');
+  const b = Buffer.from(s, 'base64');
+  if (b.toString('base64') !== s) throw new Error('bad_base64'); // canonical only
+  return b;
+}
+
+/** Strict lowercase-hex decode of exactly `len` bytes. */
+export function strictHex(s, len) {
+  if (typeof s !== 'string' || s.length !== len * 2 || !HEX_STRICT_RE.test(s)) {
+    throw new Error('bad_hex');
+  }
+  return Buffer.from(s, 'hex');
+}
+
 /** HKDF-SHA256 subkey (§3): ikm=AES1, salt="" (explicit empty), info=domain. */
 export function subkey(aes1, info) {
   return Buffer.from(hkdfSync('sha256', aes1, Buffer.alloc(0), Buffer.from(info, 'ascii'), 32));
 }
 
-/** Build all bootstrap material for a password. Returns Buffer/hex fields. */
-export function buildBootstrapMaterial(password) {
-  const salt = randomBytes(16);
-  const aes1 = randomBytes(32); // dummy master key for the PoC (user-designated)
+/** Wrap AES1 under KEK(password, salt): nonce(12) || ct(32) || tag(16) = 60B (WORKLOG D2). */
+export function wrapAes1(aes1, password, salt) {
   const kek = pbkdf2Sync(Buffer.from(String(password), 'utf8'), salt, KDF_ITERS, 32, 'sha256');
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', kek, nonce);
@@ -43,6 +66,14 @@ export function buildBootstrapMaterial(password) {
   const tag = cipher.getAuthTag();
   const wrapped = Buffer.concat([nonce, ct, tag]);
   if (wrapped.length !== WRAPPED_LEN) throw new Error('wrapped_len');
+  return wrapped;
+}
+
+/** Build all bootstrap material for a password. Returns Buffer/hex fields. */
+export function buildBootstrapMaterial(password) {
+  const salt = randomBytes(16);
+  const aes1 = randomBytes(32); // dummy master key for the PoC (user-designated)
+  const wrapped = wrapAes1(aes1, password, salt);
   return {
     saltHex: hex(salt),
     iters: KDF_ITERS,
@@ -55,10 +86,19 @@ export function buildBootstrapMaterial(password) {
   };
 }
 
+/** §20 Type A rotation material: the SAME AES1 re-wrapped under a NEW
+ *  password with a fresh salt. AES1 never changes; no rows are touched. */
+export function buildRewrapMaterial(aes1, newPassword) {
+  const salt = randomBytes(16);
+  const wrapped = wrapAes1(aes1, newPassword, salt);
+  return { saltHex: hex(salt), wrappedB64: wrapped.toString('base64') };
+}
+
 /** Node mirror of the browser unlock path (used by the test suite + verification). */
 export function deriveClientKeys(password, saltHex, iters, wrappedB64) {
-  const salt = Buffer.from(saltHex, 'hex');
-  const wrapped = Buffer.from(wrappedB64, 'base64');
+  const salt = strictHex(saltHex, 16);
+  if (!Number.isInteger(iters) || iters < 1 || iters > 10000000) throw new Error('bad_config: iters');
+  const wrapped = strictB64(wrappedB64);
   if (wrapped.length !== WRAPPED_LEN) throw new Error('bad_config: wrapped must be 60 bytes');
   const kek = pbkdf2Sync(Buffer.from(String(password), 'utf8'), salt, iters, 32, 'sha256');
   const d = createDecipheriv('aes-256-gcm', kek, wrapped.subarray(0, 12));
@@ -74,9 +114,13 @@ export function deriveClientKeys(password, saltHex, iters, wrappedB64) {
 
 /** Row crypto helpers (Node mirror of js/crypto.js — used by the test suite). */
 export function rowAad(id, ver) {
-  const idB = Buffer.from(id, 'ascii');
+  if (!Number.isInteger(ver) || ver < 1 || ver > 4294967295) throw new Error('bad_ver');
+  // UTF-8 bytes of the id — byte-identical to the browser's TextEncoder.
+  // (§6 says "ASCII(id)"; every spec-conformant id is pure ASCII where
+  // UTF-8 == ASCII. UTF-8 keeps the two implementations identical for ANY id.)
+  const idB = Buffer.from(String(id), 'utf8');
   const v = Buffer.alloc(4);
-  v.writeUInt32BE(ver >>> 0, 0);
+  v.writeUInt32BE(ver, 0);
   return Buffer.concat([idB, v]);
 }
 
@@ -89,8 +133,8 @@ export function encryptRow(kData, id, ver, payload) {
 }
 
 export function decryptRow(kData, id, ver, nonceB64, ctB64) {
-  const nonce = Buffer.from(nonceB64, 'base64');
-  const ctAndTag = Buffer.from(ctB64, 'base64');
+  const nonce = strictB64(nonceB64);
+  const ctAndTag = strictB64(ctB64);
   const d = createDecipheriv('aes-256-gcm', kData, nonce);
   d.setAAD(rowAad(id, ver)); // §6: binds ct to row identity AND version
   d.setAuthTag(ctAndTag.subarray(ctAndTag.length - 16));
@@ -110,8 +154,11 @@ function parseArgs(argv) {
     if (a === '--url') out.url = argv[++i];
     else if (a === '--admin') out.admin = argv[++i];
     else if (a === '--password') out.password = argv[++i];
+    else if (a === '--new-password') out.newPassword = argv[++i];
+    else if (a === '--material') out.material = argv[++i];
     else if (a === '--force') out.force = true;
     else if (a === '--out') out.out = argv[++i];
+    else if (a === '--rewrap') out.rewrap = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else throw new Error('unknown_arg: ' + a);
   }
@@ -120,9 +167,17 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  if (args.help || !args.url || !args.admin || !args.password) {
+  if (
+    args.help ||
+    !args.url ||
+    !args.admin ||
+    !args.password ||
+    (args.rewrap && (!args.newPassword || !args.material))
+  ) {
     console.log(
-      'Usage: node cli/bootstrap.mjs --url <https://worker...> --admin <hex64> --password <pw> [--force] [--out file.json]'
+      'Usage:\n' +
+        '  bootstrap:  node cli/bootstrap.mjs --url <https://worker...> --admin <hex64> --password <pw> [--force] [--out file.json]\n' +
+        '  Type A:     node cli/bootstrap.mjs --rewrap --url <...> --admin <hex64> --password <OLD> --new-password <NEW> --material credentials.json [--out file.json]'
     );
     process.exit(args.help ? 0 : 2);
   }
@@ -130,6 +185,7 @@ async function main() {
     console.error('ERROR: --admin must be 64 lowercase hex chars');
     process.exit(2);
   }
+  if (args.rewrap) return rewrapMain(args);
 
   const mat = buildBootstrapMaterial(args.password);
 
@@ -198,6 +254,76 @@ async function main() {
   const out = JSON.stringify(report, null, 2);
   if (args.out) {
     const fs = await import('node:fs');
+    fs.writeFileSync(args.out, out + '\n', { mode: 0o600 });
+    console.error('Credentials written to ' + args.out + ' (mode 0600, not for committing)');
+  }
+  console.log(out);
+}
+
+/** §20 Type A rotation via PUT /bootstrap/rewrap: the SAME AES1 is re-wrapped
+ *  under the new password with a fresh salt. Rows, staged and the private
+ *  column (AUTH tokens are HKDF(AES1) — unchanged) are untouched.
+ *  Requires the credentials JSON produced by the original bootstrap. */
+async function rewrapMain(args) {
+  const fs = await import('node:fs');
+  const stored = JSON.parse(fs.readFileSync(args.material, 'utf8'));
+  const aes1 = strictHex(stored.aes1_hex, 32);
+
+  // Verify the OLD password really unwraps the stored AES1 before rotating.
+  const oldKeys = deriveClientKeys(
+    args.password,
+    stored.salt,
+    stored.iters ?? KDF_ITERS,
+    stored.wrapped_b64
+  );
+  if (!oldKeys.aes1.equals(aes1)) {
+    console.error('ERROR: old password does not unwrap the AES1 in --material');
+    process.exit(1);
+  }
+
+  const re = buildRewrapMaterial(aes1, args.newPassword);
+  const url = args.url.replace(/\/+$/, '');
+  const res = await fetch(url + '/bootstrap/rewrap', {
+    method: 'PUT',
+    headers: { authorization: 'Bearer ' + args.admin, 'content-type': 'application/json' },
+    body: JSON.stringify({ wrapped: re.wrappedB64, salt: re.saltHex }),
+  });
+  const text = await res.text();
+  if (res.status !== 200 || text !== '{}') {
+    console.error(`ERROR: rewrap failed: HTTP ${res.status} ${text}`);
+    process.exit(1);
+  }
+
+  // Verify: config reflects the new wrap, AUTH_UI (derived from the UNCHANGED
+  // AES1) still authenticates, and the new password unwraps to the SAME AES1.
+  const cfgRes = await fetch(url + '/config', {
+    headers: { authorization: 'Bearer ' + stored.auth_ui_hex },
+  });
+  const cfg = await cfgRes.json().catch(() => null);
+  if (cfgRes.status !== 200 || !cfg || cfg.wrapped !== re.wrappedB64 || cfg.salt !== re.saltHex) {
+    console.error('ERROR: post-rewrap verification failed (GET /config mismatch)');
+    process.exit(1);
+  }
+  const newKeys = deriveClientKeys(args.newPassword, re.saltHex, KDF_ITERS, re.wrappedB64);
+  if (!newKeys.aes1.equals(aes1)) {
+    console.error('ERROR: invariant broken — AES1 changed across the rotation');
+    process.exit(1);
+  }
+
+  const report = {
+    server: url,
+    note: 'Type A rotation complete: AES1 and AUTH tokens UNCHANGED; password + salt rotated.',
+    salt: re.saltHex,
+    iters: KDF_ITERS,
+    wrapped_b64: re.wrappedB64,
+    aes1_hex: stored.aes1_hex,
+    k_data_hex: stored.k_data_hex,
+    auth_ui_hex: stored.auth_ui_hex,
+    auth_clock_hex: stored.auth_clock_hex,
+    config_ver: cfg.ver,
+  };
+  const out = JSON.stringify(report, null, 2);
+  if (args.out) {
     fs.writeFileSync(args.out, out + '\n', { mode: 0o600 });
     console.error('Credentials written to ' + args.out + ' (mode 0600, not for committing)');
   }

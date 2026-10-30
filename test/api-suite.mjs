@@ -12,6 +12,7 @@
  */
 import {
   buildBootstrapMaterial,
+  buildRewrapMaterial,
   deriveClientKeys,
   encryptRow,
   decryptRow,
@@ -23,9 +24,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 /* ---------------- config ---------------- */
 
 let BASE = process.env.BASE_URL || 'http://127.0.0.1:8787';
+let MATERIAL_OUT = null;
 {
   const i = process.argv.indexOf('--url');
   if (i !== -1 && process.argv[i + 1]) BASE = process.argv[i + 1];
+  const m = process.argv.indexOf('--material-out');
+  if (m !== -1 && process.argv[m + 1]) MATERIAL_OUT = process.argv[m + 1];
 }
 BASE = BASE.replace(/\/+$/, '');
 const ADMIN = process.env.ADMIN_SECRET;
@@ -66,11 +70,18 @@ async function raw(method, path, opts = {}) {
         : 'Bearer ' + opts.token;
   }
   if (opts.origin !== undefined) headers.origin = opts.origin;
-  if (opts.body !== undefined) headers['content-type'] = 'application/json';
+  if (opts.body !== undefined || opts.rawBody !== undefined) {
+    headers['content-type'] = 'application/json';
+  }
   const res = await fetch(BASE + path, {
     method,
     headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    body:
+      opts.rawBody !== undefined
+        ? opts.rawBody
+        : opts.body !== undefined
+          ? JSON.stringify(opts.body)
+          : undefined,
   });
   const text = await res.text();
   return { status: res.status, headers: res.headers, text };
@@ -82,6 +93,10 @@ async function silentShape(method, path, opts) {
     body: r.text,
     wwwAuth: r.headers.get('www-authenticate'),
     ct: r.headers.get('content-type'),
+    cacheControl: r.headers.get('cache-control'),
+    etag: r.headers.get('etag'),
+    expires: r.headers.get('expires'),
+    lastMod: r.headers.get('last-modified'),
   };
 }
 
@@ -91,6 +106,7 @@ const MAT = buildBootstrapMaterial(PW); // primary test universe
 const MAT2 = buildBootstrapMaterial(PW + '-rotated'); // for Type A rewrap test
 const UNKNOWN_TOKEN = 'f'.repeat(64);
 const b64 = (b) => Buffer.from(b).toString('base64');
+const hx = (b) => Buffer.from(b).toString('hex');
 
 /* ================================================================ */
 console.log('PHASE B — bootstrap (§8)');
@@ -135,13 +151,22 @@ console.log('PHASE B — bootstrap (§8)');
   check('b7 uppercase auth_ui -> 400', r.status === 400, r.text);
 }
 {
-  const r = await raw('PUT', '/bootstrap', { token: ADMIN, body: undefined });
-  const r2 = await raw('PUT', '/bootstrap', {
-    token: ADMIN,
-    headers: { 'content-type': 'application/json' },
-    body: '{not json',
-  });
-  check('b8 no body / bad JSON -> 400', r.status === 400 && r2.status === 400, r.status + '/' + r2.status);
+  const r = await raw('PUT', '/bootstrap', { token: ADMIN, rawBody: '' });
+  const r2 = await raw('PUT', '/bootstrap', { token: ADMIN, rawBody: '{not json' });
+  const r3 = await raw('PUT', '/bootstrap', { token: ADMIN, rawBody: '"str"' });
+  const r4 = await raw('PUT', '/bootstrap', { token: ADMIN, rawBody: '[1]' });
+  check(
+    'b8 empty / bad-json / non-object body -> 400 (bad_json / bad_body)',
+    r.status === 400 &&
+      jparse(r.text)?.error === 'bad_json' &&
+      r2.status === 400 &&
+      jparse(r2.text)?.error === 'bad_json' &&
+      r3.status === 400 &&
+      jparse(r3.text)?.error === 'bad_body' &&
+      r4.status === 400 &&
+      jparse(r4.text)?.error === 'bad_body',
+    JSON.stringify([r.text, r2.text, r3.text, r4.text])
+  );
 }
 
 {
@@ -173,7 +198,16 @@ const shapes = [];
 {
   const s = await silentShape('GET', '/rows', {});
   shapes.push(['no token', s]);
-  check('s1 no token -> 404 empty, no WWW-Authenticate', s.status === 404 && s.body === '' && s.wwwAuth === null);
+  check(
+    's1 no token -> 404 empty, no WWW-Authenticate, no cache headers',
+    s.status === 404 &&
+      s.body === '' &&
+      s.wwwAuth === null &&
+      s.cacheControl === null &&
+      s.etag === null &&
+      s.expires === null &&
+      s.lastMod === null
+  );
 }
 {
   const s = await silentShape('GET', '/rows', { token: 'Bearer not-hex-at-all' });
@@ -226,6 +260,37 @@ const shapes = [];
   const ref = shapes[0][1];
   const uniform = shapes.every(([, s]) => JSON.stringify(s) === JSON.stringify(ref));
   check('s11 silent-drop uniformity across all gates', uniform, JSON.stringify(shapes.map(([n, s]) => [n, s])));
+}
+
+/* ================================================================ */
+console.log('PHASE S2 — token-class × route matrix (WORKLOG D15)');
+/* ================================================================ */
+
+{
+  const cases = [
+    // [name, method, path, token, body, expectStatus, expectBody]
+    ['ADMIN on PUT row', 'PUT', '/rows/cal:20990401', ADMIN, { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)) }, 404, ''],
+    ['ADMIN on DELETE row', 'DELETE', '/rows/cal:20990401', ADMIN, undefined, 404, ''],
+    ['ADMIN on GET /rows', 'GET', '/rows', ADMIN, undefined, 404, ''],
+    ['INTERNAL on GET /rows', 'GET', '/rows', INTERNAL, undefined, 404, ''],
+    ['INTERNAL on PUT row', 'PUT', '/rows/cal:20990401', INTERNAL, { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)) }, 404, ''],
+    ['INTERNAL on /bootstrap', 'PUT', '/bootstrap', INTERNAL, {}, 404, ''],
+    ['no token /version', 'GET', '/version', undefined, undefined, 404, ''],
+    ['no token /status', 'GET', '/status', undefined, undefined, 404, ''],
+    ['no token /rows/{id}', 'GET', '/rows/cal:20261105', undefined, undefined, 404, ''],
+    ['no token DELETE row', 'DELETE', '/rows/cal:20261105', undefined, undefined, 404, ''],
+  ];
+  let all = true;
+  const details = [];
+  for (const [name, method, path, token, body, st, bd] of cases) {
+    const r = await raw(method, path, { token, body });
+    const ok = r.status === st && r.text === bd && r.headers.get('www-authenticate') === null;
+    if (!ok) {
+      all = false;
+      details.push(`${name}: ${r.status}/${JSON.stringify(r.text)}`);
+    }
+  }
+  check('s2 class matrix (10 cases) all silent-404', all, details.join(' | '));
 }
 
 /* ================================================================ */
@@ -286,6 +351,23 @@ let CFG;
 {
   const r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: b64(randomBytes(59)) } });
   check('c11 rewrap 59B wrapped -> 400', r.status === 400, r.text);
+}
+{
+  // §20 Type A with the SAME AES1 (the spec invariant: "re-wrap AES1 … No data
+  // re-encryption anywhere … AES1 unchanged").
+  const re = buildRewrapMaterial(MAT.aes1, PW + '-typea');
+  const r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex } });
+  check('c12 Type A rewrap (same AES1) -> 200 {}', r.status === 200 && r.text === '{}', r.text);
+  const c = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
+  check('c13 config reflects Type A material', c.wrapped === re.wrappedB64 && c.salt === re.saltHex, JSON.stringify(c));
+  const k = deriveClientKeys(PW + '-typea', re.saltHex, 100000, re.wrappedB64);
+  check('c14 INVARIANT: AES1 unchanged across Type A', k.aes1.equals(MAT.aes1));
+  check('c15 INVARIANT: AUTH tokens unchanged (HKDF of same AES1)', hx(k.authUi) === MAT.authUiHex && hx(k.authClock) === MAT.authClockHex);
+  const r2 = await raw('GET', '/rows', { token: MAT.authUiHex });
+  check('c16 AUTH_UI still valid after Type A (private column untouched)', r2.status === 200, r2.text);
+  // Rotate back to the primary material for the remaining phases.
+  const back = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: MAT.wrappedB64, salt: MAT.saltHex } });
+  check('c17 rotate back to primary material', back.status === 200, back.text);
 }
 
 /* ================================================================ */
@@ -388,7 +470,7 @@ for (const [name, ver] of [['ver 0', 0], ['ver -1', -1], ['ver 1.5', 1.5], ['ver
 }
 {
   const r = await raw('PUT', '/rows/cal:20990105', { token: MAT.authUiHex, body: { ver: 1, nonce: '!!not-base64!!', ct: b64(randomBytes(64)) } });
-  check('r18 nonce non-base64 -> 400', r.status === 400);
+  check('r18 nonce non-base64 -> 400 bad_nonce', r.status === 400 && jparse(r.text)?.error === 'bad_nonce', r.text);
   // Genuinely unpadded base64: strip ALL '=' padding (length no longer %4).
   const r2 = await raw('PUT', '/rows/cal:20990105', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)).replace(/=+$/, '') } });
   check('r18b unpadded ct -> 400 (padded base64 required)', r2.status === 400, r2.status + ' ' + r2.text);
@@ -440,6 +522,32 @@ for (const [name, ver] of [['ver 0', 0], ['ver -1', -1], ['ver 1.5', 1.5], ['ver
 }
 
 /* ================================================================ */
+console.log('PHASE R2 — size/encoding edges (§21, D9, D16)');
+/* ================================================================ */
+
+{
+  const r = await raw('PUT', '/rows/cal:20990501', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(4)) } });
+  check('r2.1 4-byte ct -> 200 (D16: no minimum)', r.status === 200, r.text);
+  const r2 = await raw('PUT', '/rows/cal:20990502', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(17)) } });
+  check('r2.2 17-byte ct -> 200', r2.status === 200, r2.text);
+  const id257 = 'cal:' + 'a'.repeat(253); // 257 chars total
+  const r3 = await raw('PUT', '/rows/' + encodeURIComponent(id257), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)) } });
+  check('r2.3 257-char id (authed) -> 400 bad_id', r3.status === 400 && jparse(r3.text)?.error === 'bad_id', r3.text);
+  const id256 = 'cal:' + 'a'.repeat(252); // 256 chars total
+  const enc256 = encryptRow(K, id256, 1, { events: [] });
+  const r4 = await raw('PUT', '/rows/' + encodeURIComponent(id256), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc256.nonce), ct: b64(enc256.ct) } });
+  const g4 = await raw('GET', '/rows/' + encodeURIComponent(id256), { token: MAT.authUiHex });
+  check('r2.4 256-char id -> 200 + roundtrip', r4.status === 200 && g4.status === 200 && jparse(g4.text).id === id256);
+  const r5 = await raw('PUT', '/rows/' + encodeURIComponent(id257), {});
+  check('r2.5 257-char id UNAUTH -> silent 404 (bearer gate precedes validation)', r5.status === 404 && r5.text === '');
+  const big = b64(randomBytes(1100000)); // ~1.47 MiB JSON body
+  const r6 = await raw('PUT', '/rows/cal:20990503', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: big } });
+  check('r2.6 >1MiB body -> 400 too_large', r6.status === 400 && jparse(r6.text)?.error === 'too_large', r6.text);
+  const r7 = await raw('PUT', '/rows/cal:20990504', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: 'QR==' } });
+  check('r2.7 non-canonical ct ("QR==") -> 400 bad_ct', r7.status === 400 && jparse(r7.text)?.error === 'bad_ct', r7.text);
+}
+
+/* ================================================================ */
 console.log('PHASE E — crypto E2E, AAD binding, dual-writer merge (§6/§13)');
 /* ================================================================ */
 
@@ -481,6 +589,8 @@ console.log('PHASE E — crypto E2E, AAD binding, dual-writer merge (§6/§13)')
   const g = jparse((await raw('GET', '/rows/' + encodeURIComponent(RID), { token: MAT.authUiHex })).text); // ver2
   const r = await raw('PUT', '/rows/' + encodeURIComponent(RID), { token: MAT.authUiHex, body: { ver: 3, nonce: g.nonce, ct: g.ct } });
   check('e3a server accepts replayed envelope at ver3 (content-blind)', r.status === 200 && jparse(r.text)?.ver === 3, r.text);
+  const m3 = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  check('e3a2 manifest reflects ver 3 after the replay', m3.rows.find((x) => x.id === RID)?.ver === 3);
   const g3 = jparse((await raw('GET', '/rows/' + encodeURIComponent(RID), { token: MAT.authUiHex })).text);
   let threw = false;
   try {
@@ -557,8 +667,45 @@ console.log('PHASE E — crypto E2E, AAD binding, dual-writer merge (§6/§13)')
   check('e7a capEvents drops 4 of 20 own', capped.events.length === 16 && capped.dropped.length === 4);
   const enc = encryptRow(K, id, 1, { events: capped.events });
   const r = await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
-  const ctLen = enc.ct.length; // ct||tag bytes (encryptRow returns Buffers)
-  check('e7b capped bucket stored (ct < 64KiB)', r.status === 200 && ctLen < 65536, 'ct=' + ctLen);
+  // Read the row BACK from the server and decrypt it — the cap must be
+  // visible in the STORED ciphertext, not just in the local construction.
+  const g = jparse((await raw('GET', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex })).text);
+  const storedPayload = decryptRow(K, id, g.ver, g.nonce, g.ct);
+  check(
+    'e7b capped bucket stored + decrypts to exactly 16 events',
+    r.status === 200 && g.ver === 1 && storedPayload.events.length === 16,
+    'events=' + storedPayload.events.length
+  );
+}
+
+/* ================================================================ */
+console.log('PHASE E2 — truly parallel RMW (§9 linearizability)');
+/* ================================================================ */
+
+{
+  const id = 'cal:20261117';
+  const e1 = encryptRow(K, id, 1, { events: [] });
+  await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(e1.nonce), ct: b64(e1.ct) } });
+  const encA = encryptRow(K, id, 2, { events: [{ id: 'w:' + randomUUID(), date: '2026-11-17', hh: 8, mm: 0, title: 'A', priority: 0 }] });
+  const encB = encryptRow(K, id, 2, { events: [{ id: 'w:' + randomUUID(), date: '2026-11-17', hh: 9, mm: 0, title: 'B', priority: 0 }] });
+  const [ra, rb] = await Promise.all([
+    raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 2, nonce: b64(encA.nonce), ct: b64(encA.ct) } }),
+    raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 2, nonce: b64(encB.nonce), ct: b64(encB.ct) } }),
+  ]);
+  const aAccepted = jparse(ra.text)?.nonce === b64(encA.nonce) && jparse(ra.text)?.ct === b64(encA.ct);
+  const bAccepted = jparse(rb.text)?.nonce === b64(encB.nonce) && jparse(rb.text)?.ct === b64(encB.ct);
+  check(
+    'e2.1 exactly ONE writer accepted (envelope identity), both got 200',
+    ra.status === 200 && rb.status === 200 && (aAccepted ? 1 : 0) + (bAccepted ? 1 : 0) === 1,
+    `a=${aAccepted} b=${bAccepted}`
+  );
+  const g = jparse((await raw('GET', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex })).text);
+  const winner = aAccepted ? 'A' : 'B';
+  const loserText = aAccepted ? rb.text : ra.text;
+  check('e2.2 rebased writer received the STORED envelope', jparse(loserText).nonce === g.nonce, loserText);
+  check('e2.3 final state = winner at ver 2', g.ver === 2 && g.nonce === (aAccepted ? b64(encA.nonce) : b64(encB.nonce)));
+  const payload = decryptRow(K, id, g.ver, g.nonce, g.ct);
+  check('e2.4 winner payload decrypts', payload.events.length === 1 && payload.events[0].title === winner);
 }
 
 /* ================================================================ */
@@ -572,6 +719,7 @@ console.log('PHASE X — CORS allowlist (WORKLOG D6)');
     r.status === 204 &&
       r.headers.get('access-control-allow-origin') === PAGES_ORIGIN &&
       (r.headers.get('access-control-allow-methods') || '').includes('PUT') &&
+      (r.headers.get('access-control-allow-methods') || '').includes('DELETE') &&
       (r.headers.get('access-control-allow-headers') || '').toLowerCase().includes('authorization'),
     r.status + ' ' + JSON.stringify(Object.fromEntries(r.headers))
   );
@@ -599,6 +747,33 @@ console.log('PHASE X — CORS allowlist (WORKLOG D6)');
 {
   const r = await raw('OPTIONS', '/nonsense', { origin: PAGES_ORIGIN });
   check('x5 preflight for unknown path -> 204 + ACAO (uniform)', r.status === 204 && r.headers.get('access-control-allow-origin') === PAGES_ORIGIN);
+}
+
+/* ================================================================ */
+console.log('PHASE X2 — CORS decorate on ERROR statuses (D6)');
+/* ================================================================ */
+
+{
+  const o = { origin: PAGES_ORIGIN };
+  const r1 = await raw('PUT', '/rows/cal:20261105', { ...o, token: MAT.authClockHex, body: {} });
+  check(
+    'x8 403 carries ACAO (client must read the capability error)',
+    r1.status === 403 && r1.headers.get('access-control-allow-origin') === PAGES_ORIGIN,
+    r1.status + ' ' + r1.text
+  );
+  const r2 = await raw('GET', '/rows/none', { ...o, token: MAT.authUiHex });
+  check(
+    'x9 404 not_found carries ACAO + body',
+    r2.status === 404 && jparse(r2.text)?.error === 'not_found' && r2.headers.get('access-control-allow-origin') === PAGES_ORIGIN
+  );
+  const r3 = await raw('PUT', '/rows/cal:20990601', { ...o, token: MAT.authUiHex, body: { ver: 1, nonce: 'AAA', ct: 'AAA' } });
+  check('x10 400 carries ACAO', r3.status === 400 && r3.headers.get('access-control-allow-origin') === PAGES_ORIGIN);
+  const r4 = await raw('PUT', '/bootstrap', {
+    ...o,
+    token: ADMIN,
+    body: { salt: MAT.saltHex, iters: 100000, wrapped: MAT.wrappedB64, auth_ui: MAT.authUiHex, auth_clock: MAT.authClockHex },
+  });
+  check('x11 409 carries ACAO', r4.status === 409 && r4.headers.get('access-control-allow-origin') === PAGES_ORIGIN);
 }
 
 /* ================================================================ */
@@ -641,11 +816,82 @@ console.log('PHASE M — misc shapes');
   const r = await raw('PUT', '/rows/cal:20990301', { token: MAT.authUiHex, body: { ver: 1, nonce: 'AAAA', ct: 'AAAA' } });
   check('m1 400 carries JSON content-type', r.status === 400 && (r.headers.get('content-type') || '').includes('application/json'));
   const r2 = await raw('PUT', '/rows/cal:20990301', { token: MAT.authClockHex, body: {} });
-  check('m2 403 empty body, no content-type', r2.status === 403 && r2.text === '');
+  check('m2 403 empty body, no content-type', r2.status === 403 && r2.text === '' && r2.headers.get('content-type') === null);
   const r3 = await raw('GET', '/rows/none', { token: MAT.authUiHex });
   check('m3 not_found 404 has JSON body', r3.status === 404 && jparse(r3.text)?.error === 'not_found');
   const r4 = await raw('HEAD', '/rows', { token: MAT.authUiHex });
   check('m4 HEAD /rows -> silent 404 (not a route)', r4.status === 404);
+}
+
+/* ================================================================ */
+console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destructive)');
+/* ================================================================ */
+
+{
+  for (const day of ['2026-12-01', '2026-12-02']) {
+    const id = 'cal:' + day.replaceAll('-', '');
+    const enc = encryptRow(K, id, 1, { events: [] });
+    await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
+  }
+  const before = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  check('b2.1 rows seeded before force wipe', before.rows.length >= 2, JSON.stringify(before));
+  const r = await raw('PUT', '/bootstrap', {
+    token: ADMIN,
+    body: {
+      salt: MAT.saltHex, iters: 100000, wrapped: MAT.wrappedB64,
+      auth_ui: MAT.authUiHex, auth_clock: MAT.authClockHex, force: true,
+    },
+  });
+  check('b2.2 force re-bootstrap -> 200 {ver:1}', r.status === 200 && jparse(r.text)?.ver === 1, r.text);
+  const after = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  check('b2.3 wipe: manifest EMPTY', after.rows.length === 0, JSON.stringify(after));
+  const gone = await raw('GET', '/rows/cal:20261201', { token: MAT.authUiHex });
+  check('b2.4 wiped row -> 404 not_found', gone.status === 404 && jparse(gone.text)?.error === 'not_found', gone.text);
+  const cfg = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
+  check('b2.5 config re-created (ver=1, same material)', cfg.ver === 1 && cfg.salt === MAT.saltHex, JSON.stringify(cfg));
+}
+
+/* Re-seed deterministic content for the orchestrator's §19 D1 fidelity and
+   restore-drill verification (run-local.mjs wipes today's D1 snapshot first,
+   re-triggers the cron, then compares byte-for-byte). */
+{
+  const seeds = [
+    ['2026-11-01', 8, 'Standup'],
+    ['2026-11-02', 13, 'Lunch'],
+    ['2026-11-03', 19, 'Gym'],
+  ];
+  for (const [day, hh, title] of seeds) {
+    const id = 'cal:' + day.replaceAll('-', '');
+    const ev = { id: 'w:' + randomUUID(), date: day, hh, mm: 0, title, priority: 1 };
+    const enc = encryptRow(K, id, 1, { events: [ev] });
+    const r = await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
+    if (r.status !== 200) check('seed ' + day, false, r.text);
+  }
+  const r = await raw('POST', '/internal/backup', { token: INTERNAL });
+  const b = jparse(r.text);
+  check('seed backup snapshot -> {ok, rows:3}', r.status === 200 && b?.ok === true && b?.rows === 3, r.text);
+}
+
+if (MATERIAL_OUT) {
+  const fs = await import('node:fs');
+  fs.writeFileSync(
+    MATERIAL_OUT,
+    JSON.stringify(
+      {
+        server: BASE,
+        salt: MAT.saltHex,
+        iters: 100000,
+        wrapped_b64: MAT.wrappedB64,
+        aes1_hex: MAT.aes1Hex,
+        k_data_hex: MAT.kDataHex,
+        auth_ui_hex: MAT.authUiHex,
+        auth_clock_hex: MAT.authClockHex,
+      },
+      null,
+      2
+    ) + '\n',
+    { mode: 0o600 }
+  );
 }
 
 /* ================================================================ */

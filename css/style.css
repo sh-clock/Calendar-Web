@@ -1,5 +1,12 @@
 /* Calendar PoC — clean, minimal, mobile-friendly. */
 
+/* The hidden attribute must ALWAYS win over author display rules — otherwise
+   `#login { display:flex }` (or any future display rule) keeps "hidden"
+   elements visible. Without this, the login screen can never be dismissed. */
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --bg: #f5f6f8;
   --card: #ffffff;

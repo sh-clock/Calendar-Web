@@ -37,7 +37,9 @@ export function bytesToHex(bytes) {
   return s;
 }
 
-/** Strict base64 decode (standard alphabet, padded — §5). */
+/** Strict base64 decode (standard alphabet, padded, CANONICAL — §5).
+ *  Mirrors the server's b64Decode: non-zero trailing padding bits are
+ *  rejected so both implementations agree byte-for-byte on every input. */
 export function b64ToBytes(str) {
   if (typeof str !== 'string' || str.length === 0 || str.length % 4 !== 0 || !B64_RE.test(str)) {
     throw new Error('bad_base64');
@@ -47,6 +49,7 @@ export function b64ToBytes(str) {
   const bin = atob(str);
   const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  if (bytesToB64(u8) !== str) throw new Error('bad_base64'); // canonical only
   return u8;
 }
 
@@ -86,6 +89,12 @@ async function hkdf(ikm, info) {
  * Throws Error('unlock_failed') on a wrong password (GCM tag mismatch).
  */
 export async function deriveKeys(password, saltHex, iters, wrappedB64) {
+  if (typeof saltHex !== 'string' || !/^[0-9a-f]{32}$/.test(saltHex)) {
+    throw new Error('bad_config: salt');
+  }
+  if (!Number.isInteger(iters) || iters < 1 || iters > 10000000) {
+    throw new Error('bad_config: iters');
+  }
   const salt = hexToBytes(saltHex);
   const wrapped = b64ToBytes(wrappedB64);
   if (wrapped.length !== 60) {
@@ -123,9 +132,12 @@ export async function importRowKey(kData) {
   return crypto.subtle.importKey('raw', kData, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
-/** AAD = ASCII(id) || u32be(ver) — binds ciphertext to row identity AND version. */
+/** AAD = ASCII(id) || u32be(ver) — binds ct to row identity AND version.
+ *  ver must be a u32 >= 1 (§2: "first accepted value 1"). */
 export function rowAad(id, ver) {
-  const idB = textEncoder.encode(id);
+  if (!Number.isInteger(ver) || ver < 1 || ver > 4294967295) throw new Error('bad_ver');
+  const idB = textEncoder.encode(String(id)); // UTF-8 bytes — identical to the
+  // Node mirror (spec ids are pure ASCII, where UTF-8 == ASCII).
   const out = new Uint8Array(idB.length + 4);
   out.set(idB, 0);
   out.set(u32be(ver), idB.length);

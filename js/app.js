@@ -18,11 +18,10 @@ const REBASE_MAX = 8;
 const state = {
   api: null,
   rowKey: null,
-  eventsByDay: new Map(), // dateStr -> events[]
-  verByDay: new Map(), //   dateStr -> ver
+  eventsByDay: new Map(), // dateStr -> events[] (null = corrupt bucket, flagged in UI)
   today: null,
   viewYM: null, // 'YYYY-MM'
-  authUiDerived: null,
+  busy: false,
 };
 
 /* ---------------- tiny DOM helpers ---------------- */
@@ -57,15 +56,21 @@ function serverUrl() {
 }
 
 function ingestParams() {
+  // The setup code may arrive as a URL query OR as a #fragment — the fragment
+  // form is never transmitted to the static host (keeps the token out of
+  // CDN/access logs; WORKLOG D6 note).
   const params = new URLSearchParams(location.search);
-  const setup = params.get('setup');
+  const hash = new URLSearchParams(
+    location.hash.startsWith('#') ? location.hash.slice(1) : location.hash
+  );
+  const setup = hash.get('setup') || params.get('setup');
   if (setup && /^[0-9a-f]{64}$/.test(setup)) {
     localStorage.setItem(LS_TOKEN, setup);
     toast('Provisioning code stored in this browser.', 'ok');
   } else if (setup) {
     toast('Ignored invalid provisioning code (must be 64 lowercase hex chars).', 'err');
   }
-  const srv = params.get('server');
+  const srv = hash.get('server') || params.get('server');
   if (srv && /^https?:\/\//.test(srv)) localStorage.setItem(LS_SERVER, srv.replace(/\/+$/, ''));
   if (setup || srv) history.replaceState(null, '', location.pathname);
 }
@@ -95,19 +100,23 @@ async function unlock() {
     }
     state.api = new Api(url, authUiHex);
     state.rowKey = await importRowKey(kData);
-    state.authUiDerived = authUiHex;
-    state.aes1 = aes1;
+    // §3 ledger: the client caches K_data + AUTH_UI only — AES1 itself is
+    // dropped after derivation (never retained in app state).
     const ver = await state.api.getVersion();
     $('#proto-badge').textContent = 'protocol ' + ver.proto;
+    state.viewYM = core.localToday().slice(0, 7);
     await syncWindow();
+    $('#password').value = ''; // do not keep the password in the DOM after unlock
     showApp();
   } catch (e) {
+    const srvErr =
+      e instanceof ApiError && e.body && e.body.error ? ` (server said "${e.body.error}")` : '';
     const msg =
       e instanceof ApiError && e.kind === 'silent'
         ? 'Authentication failed (silent 404): the provisioning code is not valid on this server.'
         : e && e.message === 'unlock_failed'
           ? 'Unlock failed: wrong password (or the server config does not match this deployment).'
-          : 'Login failed: ' + (e && e.message ? e.message : String(e));
+          : 'Login failed: ' + (e && e.message ? e.message : String(e)) + srvErr;
     $('#login-msg').textContent = msg;
   } finally {
     setBusy(false);
@@ -117,16 +126,24 @@ async function unlock() {
 function showApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
+  $('#btn-sync').hidden = false;
+  $('#btn-lock').hidden = false;
+  $('#btn-forget').hidden = false;
 }
 
 function lock() {
   state.api = null;
   state.rowKey = null;
-  state.aes1 = null;
   state.eventsByDay.clear();
-  state.verByDay.clear();
+  state.today = null;
+  editingDay = null;
+  $('#password').value = '';
+  closeModal();
   $('#app').hidden = true;
   $('#login').hidden = false;
+  $('#btn-sync').hidden = true;
+  $('#btn-lock').hidden = true;
+  $('#btn-forget').hidden = true;
 }
 
 function forgetBrowser() {
@@ -146,54 +163,66 @@ async function syncWindow() {
   const targetSet = new Set(target);
 
   setBusy(true, 'Syncing the 23-bucket window…');
+  const errors = [];
   try {
     const manifest = await state.api.getManifest();
     const calRows = manifest.rows.filter((r) => core.parseBucketId(r.id));
-    const have = new Map(calRows.map((r) => [core.parseBucketId(r.id), r.ver]));
+    const have = new Set(calRows.map((r) => core.parseBucketId(r.id)));
 
     // DELETE buckets that slid out of the window (§13 rotation).
     for (const r of calRows) {
       const day = core.parseBucketId(r.id);
       if (!targetSet.has(day)) {
-        await state.api.deleteRow(r.id);
+        try {
+          await state.api.deleteRow(r.id);
+        } catch {
+          errors.push('delete ' + r.id);
+        }
       }
     }
 
     // CREATE buckets that slide in (§13 rotation) — empty unless they exist.
     for (const day of target) {
       if (!have.has(day)) {
-        const id = core.bucketId(day);
-        const enc = await encryptRow(state.rowKey, id, 1, { events: [] });
-        const res = await state.api.putRow(id, { ver: 1, ...enc });
-        // A concurrent writer may have created it first; the server then
-        // returns the stored envelope — harmless (no data loss possible).
-        void res;
+        try {
+          const id = core.bucketId(day);
+          const enc = await encryptRow(state.rowKey, id, 1, { events: [] });
+          // A concurrent writer may have created it first; the server then
+          // returns the stored envelope — harmless (no data loss possible).
+          await state.api.putRow(id, { ver: 1, ...enc });
+        } catch {
+          errors.push('create ' + day);
+        }
       }
     }
 
-    // Load + decrypt every live bucket (rows are truth; WS does not exist here).
-    state.eventsByDay.clear();
-    state.verByDay.clear();
+    // Load + decrypt every live bucket into LOCAL maps and swap on success —
+    // a mid-sync failure must never leave a wiped cache behind (rows are truth).
+    const oldEvents = state.eventsByDay;
+    const newEvents = new Map();
     for (const day of target) {
       const id = core.bucketId(day);
-      const env = await state.api.getRow(id);
-      if (!env) continue; // raced delete; will be retried next sync
       try {
-        const payload = await decryptRow(state.rowKey, id, env.ver, env.nonce, env.ct);
-        const bucket = core.normalizeBucket(payload);
-        if (!bucket) {
-          state.eventsByDay.set(day, null); // corrupt: flagged in UI, never rewritten
-          state.verByDay.set(day, env.ver);
-          continue;
+        const env = await state.api.getRow(id);
+        if (!env) continue; // raced delete; retried next sync
+        try {
+          const payload = await decryptRow(state.rowKey, id, env.ver, env.nonce, env.ct);
+          const bucket = core.normalizeBucket(payload);
+          // null = corrupt/tampered bucket: flagged in the UI, NEVER rewritten.
+          newEvents.set(day, bucket ? bucket.events : null);
+        } catch {
+          newEvents.set(day, null); // AEAD failure: flagged, never rewritten
         }
-        state.eventsByDay.set(day, bucket.events);
-        state.verByDay.set(day, env.ver);
       } catch {
-        state.eventsByDay.set(day, null); // AEAD failure: flagged, never rewritten
-        state.verByDay.set(day, env.ver);
+        errors.push('load ' + day);
+        if (oldEvents.has(day)) newEvents.set(day, oldEvents.get(day)); // keep the last decrypted view
       }
     }
+    state.eventsByDay = newEvents;
     renderAll();
+    if (errors.length > 0) {
+      toast(`Sync incomplete: ${errors.length} operation(s) failed — retry with Sync.`, 'warn', 7000);
+    }
   } finally {
     setBusy(false);
   }
@@ -209,7 +238,6 @@ async function syncWindow() {
  */
 async function writeBucket(day, mutate) {
   const id = core.bucketId(day);
-  let lastErr = null;
   for (let attempt = 0; attempt < REBASE_MAX; attempt++) {
     const env = await state.api.getRow(id);
     const ver = env ? env.ver : 0;
@@ -225,13 +253,6 @@ async function writeBucket(day, mutate) {
 
     const change = mutate(events); // pure: re-applied on each rebase attempt
     const capped = core.capEvents(change.events, core.WRITER_PREFIX, core.CAP_PER_BUCKET);
-    if (capped.dropped.length > 0) {
-      toast(
-        `Bucket cap (16/day): dropped ${capped.dropped.length} of YOUR lowest-priority events.`,
-        'warn',
-        7000
-      );
-    }
 
     const newVer = ver + 1;
     const enc = await encryptRow(state.rowKey, id, newVer, { events: capped.events });
@@ -240,14 +261,12 @@ async function writeBucket(day, mutate) {
 
     if (stored.ver === submitted.ver && stored.nonce === submitted.nonce && stored.ct === submitted.ct) {
       state.eventsByDay.set(day, capped.events);
-      state.verByDay.set(day, newVer);
       renderAll();
-      return { ok: true, dropped: capped.dropped.length };
+      return { ok: true, dropped: capped.dropped.length }; // cap drops surfaced ONCE, by the caller
     }
-    lastErr = new Error('rebased');
     // else: server returned the current envelope — loop re-reads and re-applies.
   }
-  throw new Error('rebase_exhausted: ' + (lastErr ? lastErr.message : ''));
+  throw new Error('rebase_exhausted: bucket kept changing across ' + REBASE_MAX + ' attempts');
 }
 
 /* ---------------- rendering ---------------- */
@@ -367,10 +386,19 @@ function renderClockPreview() {
 
 let editingDay = null;
 
+function openModal() {
+  $('#modal').hidden = false;
+  $('#modal-backdrop').hidden = false;
+}
+
+function closeModal() {
+  $('#modal').hidden = true;
+  $('#modal-backdrop').hidden = true;
+}
+
 function openDay(day) {
   editingDay = day;
   const events = state.eventsByDay.get(day);
-  const modal = $('#modal');
   const list = $('#day-events');
   list.innerHTML = '';
   $('#day-title').textContent = day + (day === state.today ? ' — today' : '');
@@ -381,7 +409,7 @@ function openDay(day) {
     note.textContent = 'This day is outside the 23-bucket sync window [today-1 .. today+21].';
     list.appendChild(note);
     $('#day-form').hidden = true;
-    modal.hidden = false;
+    openModal();
     return;
   }
   $('#day-form').hidden = false;
@@ -392,7 +420,7 @@ function openDay(day) {
     note.textContent = 'Bucket failed to decrypt (corrupt or tampered). Editing is disabled.';
     list.appendChild(note);
     $('#day-form').hidden = true;
-    modal.hidden = false;
+    openModal();
     return;
   }
 
@@ -427,7 +455,7 @@ function openDay(day) {
     list.appendChild(row);
   }
   clearForm();
-  modal.hidden = false;
+  openModal();
 }
 
 function fillForm(ev) {
@@ -459,13 +487,15 @@ async function saveForm() {
   const fields = { date: day, hh, mm, title, priority };
   try {
     setBusy(true, 'Writing bucket (RMW)…');
-    if (existingId) {
-      const ev = core.validateEvent({ id: existingId, ...fields });
-      if (!ev) throw new Error('invalid_event');
-      await writeBucket(day, (events) => ({ events: core.applyEvent(events, ev, core.WRITER_PREFIX) }));
-    } else {
-      const ev = core.makeEvent(fields);
-      await writeBucket(day, (events) => ({ events: core.applyEvent(events, ev, core.WRITER_PREFIX) }));
+    const ev = existingId
+      ? core.validateEvent({ id: existingId, ...fields })
+      : core.makeEvent(fields);
+    if (!ev) throw new Error('invalid_event');
+    const res = await writeBucket(day, (events) => ({
+      events: core.applyEvent(events, ev, core.WRITER_PREFIX),
+    }));
+    if (res.dropped > 0) {
+      toast(`Bucket cap (16/day): dropped ${res.dropped} of YOUR lowest-priority events.`, 'warn', 7000);
     }
     toast('Saved.', 'ok', 2000);
     openDay(day);
@@ -480,7 +510,9 @@ async function deleteOwnEvent(day, id) {
   if (state.busy) return;
   try {
     setBusy(true, 'Deleting event (RMW)…');
-    await writeBucket(day, (events) => ({ events: core.removeEvent(events, id, core.WRITER_PREFIX).events }));
+    await writeBucket(day, (events) => ({
+      events: core.removeEvent(events, id, core.WRITER_PREFIX).events,
+    }));
     toast('Deleted.', 'ok', 2000);
     openDay(day);
   } catch (e) {
@@ -507,7 +539,8 @@ function bind() {
   $('#btn-lock').addEventListener('click', lock);
   $('#btn-forget').addEventListener('click', forgetBrowser);
   $('#btn-sync').addEventListener('click', () => {
-    if (state.api) syncWindow().catch((e) => toast('Sync failed: ' + e.message, 'err'));
+    if (state.busy || !state.api) return;
+    syncWindow().catch((e) => toast('Sync failed: ' + (e && e.message ? e.message : String(e)), 'err'));
   });
   $('#btn-prev').addEventListener('click', () => navMonth(-1));
   $('#btn-next').addEventListener('click', () => navMonth(1));
@@ -515,11 +548,10 @@ function bind() {
     state.viewYM = core.localToday().slice(0, 7);
     renderAll();
   });
-  $('#btn-close-modal').addEventListener('click', () => {
-    $('#modal').hidden = true;
-  });
-  $('#modal-backdrop').addEventListener('click', () => {
-    $('#modal').hidden = true;
+  $('#btn-close-modal').addEventListener('click', closeModal);
+  $('#modal-backdrop').addEventListener('click', closeModal);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
   });
   $('#day-form').addEventListener('submit', (e) => {
     e.preventDefault();

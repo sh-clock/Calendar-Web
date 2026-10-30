@@ -23,6 +23,7 @@ const WRAPPED_LEN = 60;                            // WORKLOG D2: 12 nonce || 32
 const NONCE_LEN = 12;                              // §2 GCM_NONCE_LEN
 const ID_MAX = 256;                                // WORKLOG D9
 const BODY_MAX = 1048576;                          // hygiene cap on request bodies (WORKLOG D16)
+const BODY_DRAIN_MAX = 32 * 1048576;               // drain ceiling for rejected oversized bodies
 const BACKUP_RETENTION_DAYS = 7;                   // §2
 const STAGING_MAX_AGE_S = 14 * 86400;              // §2 STAGING_MAX_AGE
 
@@ -43,7 +44,7 @@ function b64Encode(bytes) {
   return btoa(s);
 }
 
-/** Strict base64 (standard alphabet, padded — §5). Returns null on any violation. */
+/** Strict base64 (standard alphabet, padded, CANONICAL — §5). Returns null on any violation. */
 function b64Decode(str) {
   if (typeof str !== 'string' || str.length === 0 || str.length % 4 !== 0) return null;
   if (!B64_RE.test(str)) return null;
@@ -53,6 +54,11 @@ function b64Decode(str) {
   try { bin = atob(str); } catch { return null; }
   const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  // Canonicality: atob silently discards non-zero trailing padding bits, so
+  // e.g. "QR==" decodes identically to "QQ==". Storing such input and echoing
+  // it back in canonical form would break the client's envelope-identity
+  // acceptance check (WORKLOG D14). Reject non-canonical base64 instead.
+  if (b64Encode(u8) !== str) return null;
   return u8;
 }
 
@@ -113,19 +119,25 @@ function badRequest(msg) {
 /* ------------------------------------------------------------------ */
 
 async function readBodyBounded(req) {
-  const cl = Number(req.headers.get('content-length') || '0');
-  if (Number.isFinite(cl) && cl > BODY_MAX) return null;
   if (!req.body) return new Uint8Array(0);
+  // Read the stream to COMPLETION (draining beyond BODY_MAX): returning a 400
+  // while the client is still sending would make workerd tear down the
+  // connection, so the client would see a network error instead of the 400.
+  // Beyond BODY_DRAIN_MAX (pathological abuse) we stop reading and let the
+  // connection reset — acceptable for that class of client.
   const reader = req.body.getReader();
   const chunks = [];
   let total = 0;
+  let overflow = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > BODY_MAX) return null;
-    chunks.push(value);
+    if (total > BODY_DRAIN_MAX) return null;
+    if (total <= BODY_MAX) chunks.push(value);
+    else overflow = true;
   }
+  if (overflow) return null;
   const out = new Uint8Array(total);
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.byteLength; }
@@ -155,10 +167,10 @@ export class Store {
     this._schema = null;
   }
 
-  /** §7 schema — created lazily, once per isolate. */
+  /** §7 schema — created lazily, once per isolate (with transient-failure retry). */
   async ensureSchema() {
     if (!this._schema) {
-      this._schema = (async () => {
+      const init = (async () => {
         const sql = this.ctx.storage.sql;
         sql.exec(
           'CREATE TABLE IF NOT EXISTS rows (' +
@@ -175,6 +187,12 @@ export class Store {
           'CREATE TABLE IF NOT EXISTS staged (uid TEXT PRIMARY KEY, first_seen INTEGER NOT NULL)'
         );
       })();
+      // Do not pin a rejected promise: a transient SQLite failure must not
+      // poison the isolate for every subsequent request.
+      init.catch(() => {
+        this._schema = null;
+      });
+      this._schema = init;
     }
     return this._schema;
   }
@@ -259,8 +277,8 @@ export class Store {
       } catch {
         return silentDrop(); // malformed percent-encoding → unknown route
       }
-      if (!raw || raw.length > ID_MAX) return silentDrop();
-      id = raw;
+      if (!raw) return silentDrop(); // empty id ("/rows/") → unknown route
+      id = raw; // length cap enforced AFTER the bearer gate (§5: authenticated-but-malformed → 400)
       if (method === 'GET') {
         family = 'app';
         handler = () => this.hGetRow(id);
@@ -306,6 +324,10 @@ export class Store {
       if (requireUi && cls !== 'ui') return forbidden();
     }
 
+    // Authenticated-but-malformed (§5): the D9 id size cap maps to 400 like
+    // every other field validation — never to a pre-auth silent drop.
+    if (id !== null && id.length > ID_MAX) return badRequest('bad_id');
+
     return handler();
   }
 
@@ -336,12 +358,13 @@ export class Store {
     const sql = this.ctx.storage.sql;
     if (existing) {
       // §8 force re-bootstrap: DESTRUCTIVELY wipes rows + staged (no R2 in
-      // calendar scope). Order matters for crash safety: config is removed
-      // first, so a crash mid-way leaves an un-bootstrapped (re-bootstrappable)
-      // server, never a half-migrated one.
-      sql.exec('DELETE FROM config');
+      // calendar scope). Order: rows/staged first, config LAST — a crash
+      // mid-wipe leaves config present, so the next bootstrap correctly 409s
+      // and the operator must force again. (Deleting config first would let a
+      // later NON-force bootstrap silently adopt stale old-key rows.)
       sql.exec('DELETE FROM rows');
       sql.exec('DELETE FROM staged');
+      sql.exec('DELETE FROM config');
     }
     sql.exec(
       'INSERT INTO config (k, salt, iters, wrapped, auth_ui, auth_clock, ver, updated_at) ' +
