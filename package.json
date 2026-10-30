@@ -1,7 +1,7 @@
 {
   "name": "calendar-web",
   "version": "1.0.0",
-  "description": "End-to-end-encrypted calendar PoC — Cloudflare Worker + Durable Object (protocol v4.1, calendar scope) with a static GitHub Pages client.",
+  "description": "End-to-end-encrypted calendar PoC — Cloudflare Worker + Durable Object (protocol v4.1 + v4.2 calendar delta) with a static GitHub Pages client.",
   "type": "module",
   "private": true,
   "scripts": {

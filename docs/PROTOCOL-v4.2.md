@@ -4,9 +4,13 @@
 trust model"). Everything not stated here is v4.1 verbatim. The server change
 is exactly one line: `GET /version` → `{"proto":"4.2"}` — v4.2 defines new
 ROW TYPES on the existing flat, type-blind row store (§6/§9); no new routes,
-no new server logic, no new auth classes. A v4.1 clock ignores unknown row
-ids in the `GET /rows` manifest (it addresses `cal:{yyyymmdd}` ids only) and
-keeps working unmodified.
+no new server logic, no new auth classes. A v4.1 clock is expected to ignore
+unknown row ids in the `GET /rows` manifest (it addresses `cal:{yyyymmdd}`
+ids only); note the v4.1 base spec mandates tolerance only for unknown JSON
+FIELDS (§22), not unknown row ids — the compatibility rests on v4.1 readers
+addressing their own id namespace, as the clock does (§13). No v4.1 client
+exists to test against (PoC), so this is a design expectation, not a proven
+property.
 
 ## Purpose
 
@@ -97,10 +101,16 @@ evt-row mutations and at sync time:
 - projection is **idempotent and complete per day**: the writer recomputes
   the full entry set for a day from ALL evt rows (the union is derived, so
   concurrent writers converge by §9's ver rebase without ownership loss);
-- entry ids use the prefix **`x:{uid}`** (`x` = derived projection
-  namespace — distinguishes v4.2-derived entries from v4.1-authored
-  `d:`/`t:`/`w:` entries; still matches the v4.1 event-id grammar
-  `[a-z]:{uuid}`); the same `x:{uid}` appears in every day the event
+- entry ids use the prefix **`x:{pid}`** where `{pid}` is a
+  deterministic UUID-shaped hash of `(calendar uuid, event UID)`
+  (128-bit FNV-derived, formatted in UUID layout, version-5-analogue;
+  see `projIdHash` in `js/calendar-core.js`). `x` = derived projection
+  namespace, distinguishing v4.2-derived entries from v4.1-authored
+  `d:`/`t:`/`w:` entries, and `{pid}` keeps the v4.1 event-id grammar
+  `[a-z]:{uuid}` valid even when the source UID is a foreign
+  non-UUID form (e.g. `…@google.com` — DAVx5 preserves such UIDs
+  verbatim) or the same UID exists in two calendars (the move
+  procedure). The same `x:{pid}` appears in every day the event
   touches;
 - per-day entry: `{id, date, hh, mm, title, priority}` where hh:mm is the
   event's LOCAL time in its own TZID (single-user ecosystem: clock and
@@ -109,11 +119,10 @@ evt-row mutations and at sync time:
   multi-day events project one entry per covered day;
 - the ≤16/day cap remains: derived entries drop by (priority, then id) —
   deterministic so every writer derives the identical dropped set;
-- corrupt/absent buckets are rebuildable from evt rows (self-healing);
-  a corrupt bucket is still never blindly overwritten by a writer that
-  cannot decrypt it (v4.1 rule retained — writers that cannot read a
-  bucket only rewrite it after a successful decrypt or after rotation
-  makes the day enter the window fresh).
+- ABSENT buckets are rebuildable from evt rows; a corrupt bucket is
+  still never blindly overwritten by a writer that cannot decrypt it
+  (v4.1 rule retained) — a corrupt day heals only after rotation
+  brings it back into the window (or via a fresh client bootstrap).
 
 ## Sync algorithm (client law; server unchanged)
 

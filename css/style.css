@@ -369,7 +369,7 @@ main { height: calc(100% - var(--header-height)); }
   width: 8px; border-radius: 4px; min-height: 28px; margin-inline-end: 16px; flex: 0 0 8px;
 }
 .eventpopover-date { font-size: 15px; margin-bottom: 12px; }
-.eventpopover-date .freq { color: var(--text-weak); }
+.eventpopover-date.freq { color: var(--text-weak); }
 .popover-iconrow { display: flex; gap: 10px; padding: 5px 0; font-size: 14px; align-items: flex-start; }
 .popover-iconrow .ic { flex: 0 0 auto; margin-top: 3px; color: var(--text-weak); }
 .popover-iconrow .content { min-width: 0; word-break: break-word; white-space: pre-wrap; }
@@ -378,7 +378,13 @@ main { height: calc(100% - var(--header-height)); }
   padding-top: 14px; border-top: 1px solid var(--border-weak);
 }
 .popover-footer .left { margin-right: auto; }
-#popover-backdrop, #editor-backdrop { position: fixed; inset: 0; z-index: calc(var(--z-floating-frames) - 1); }
+/* Backdrops: the event popover keeps a TRANSPARENT full-screen catcher
+   (Proton popovers don't dim); every MODAL backdrop dims (ModalTwo). */
+#popover-backdrop { position: fixed; inset: 0; z-index: calc(var(--z-floating-frames) - 1); }
+#editor-backdrop, #recur-backdrop, #cal-backdrop, #freq-backdrop {
+  position: fixed; inset: 0; z-index: calc(var(--z-modals) - 1);
+  background: var(--backdrop-norm);
+}
 
 /* ---------- modals (ModalTwo) ---------- */
 .modal-backdrop { position: fixed; inset: 0; background: var(--backdrop-norm); z-index: calc(var(--z-modals) - 1); }

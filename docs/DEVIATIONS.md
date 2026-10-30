@@ -97,3 +97,31 @@ follows the specification verbatim.
 - The delivered setup link uses the `#setup=` **fragment** form (also
   supported: `?setup=` query) — fragments are not transmitted to the static
   host, keeping the provisioning token out of CDN/access logs.
+
+---
+
+## PROTOCOL v4.2 (calendar delta, 2026-10-31) — client-enforced conventions
+
+The worker-side change of v4.2 is exactly the §22 version string (see
+docs/PROTOCOL-v4.2.md). The following v4.2 conventions are enforced by the
+CLIENT only (the server stays content-blind, L1/D16):
+
+- `evt:{cal}:{uid}` row payload = one RFC 5545 VCALENDAR (one UID per row:
+  master + RECURRENCE-ID exceptions); UID ≤ 200 chars, no `:` (row-id law).
+- `cmeta:{uuid}` payload JSON `{v:1, name≤100, color #rrggbb}`.
+- RRULE whitelist: FREQ = DAILY|WEEKLY|MONTHLY|YEARLY only (FREQ-first per
+  RFC 5545 §3.3.10; SECONDLY/MINUTELY/HOURLY rejected — clock ecosystem
+  scale). Rows violating the row rules above are treated as corrupt
+  (surfaced, never rewritten).
+- §13b projection ids: `x:{pid}` with `{pid}` = deterministic UUID-shaped
+  hash of (calendar, UID) — keeps the v4.1 `[a-z]:{uuid}` grammar valid for
+  foreign UIDs and disambiguates the same UID across calendars.
+- Derived bucket titles are capped at 500 chars (§13 title law) at
+  derivation; empty summaries project as `(untitled)`.
+- Two-master rows, duplicate RECURRENCE-IDs, exceptions on a non-recurring
+  master, duplicate single-occurring VEVENT properties → corrupt row.
+- Zero DURATION (`PT0S`) is accepted (RFC dur-value grammar) = zero-length
+  event; un-parseable EXDATE/RDATE value forms (e.g. PERIOD) round-trip
+  verbatim instead of destroying the row.
+- Client-side evt payload soft cap 200,000 chars (unreachable before the
+  server's 64 KiB ciphertext law rejects the write).

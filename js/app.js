@@ -126,7 +126,8 @@ function eventDateHeader(ev) {
   const e = wallToDate(ev.end);
   if (ev.isAllDay) {
     if (ev.start.date === ev.spanLast) return fmtDateLong.format(s) + ' · All day';
-    return fmtDateMed.format(s) + ' – ' + fmtDayMonth.format(e) + ' · All day';
+    // ev.end is the RFC-EXCLUSIVE DTEND; display the inclusive last day.
+    return fmtDateMed.format(s) + ' – ' + fmtDayMonth.format(new Date(ev.spanLast + 'T00:00:00')) + ' · All day';
   }
   if (ev.start.date === ev.spanLast) {
     return `${fmtDateMed.format(s)} · ${fmtTime.format(s)} – ${fmtTime.format(e)}`;
@@ -346,8 +347,8 @@ async function syncAll() {
   if (!state.api) return;
   const today = core.localToday();
   state.today = today;
-  const window = core.windowDays(today);
-  const windowSet = new Set(window);
+  const winDays = core.windowDays(today);
+  const windowSet = new Set(winDays);
 
   setBusy(true, 'Syncing…');
   const errors = [];
@@ -412,6 +413,8 @@ async function syncAll() {
       const id = core.cmetaId(uuid);
       if (!seen.has(id)) state.cals.delete(uuid);
     }
+    // Corrupt flags of rows that no longer exist must not linger forever.
+    for (const id of [...state.corrupt.keys()]) if (!seen.has(id)) state.corrupt.delete(id);
 
     /* ---- calendar visibility: unchecking persists; new calendars visible ---- */
     const stored = loadCalVis();
@@ -438,7 +441,7 @@ async function syncAll() {
       const b = core.normalizeBucket(res.payload);
       state.buckets.set(day, b ? { ver: res.ver, events: b.events } : null);
     }
-    for (const day of window) {
+    for (const day of winDays) {
       if (!state.buckets.has(day)) {
         try {
           const id = core.bucketId(day);
@@ -638,6 +641,7 @@ function viewEventsForRange(firstDay, lastDay) {
     const aBlock = a.isAllDay || a.isAllPartDay ? 1 : 0;
     const bBlock = b.isAllDay || b.isAllPartDay ? 1 : 0;
     if (aBlock !== bBlock) return bBlock - aBlock; // all-day first
+    if ((a.title || '') === (b.title || '')) return 0;
     return (a.title || '') < (b.title || '') ? -1 : 1;
   });
   return out;
@@ -826,14 +830,21 @@ function renderMonth() {
     const buttons = el('div', 'daygrid-daybuttons');
     for (const day of days) {
       const inMonth = monthDays.has(day);
-      const b = el('button', 'calendar-monthgrid-day' + (inMonth ? '' : ' is-outside-month'), {
+      const b = el('button', 'calendar-monthgrid-day' +
+        (inMonth ? '' : ' is-outside-month') +
+        (day === state.selectedDate ? ' selected' : ''), {
         type: 'button',
         'aria-current': day === today ? 'date' : null,
         'aria-pressed': day === state.selectedDate ? 'true' : null,
         'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
         title: fmtDateLong.format(new Date(day + 'T00:00:00')),
       });
-      b.addEventListener('click', () => openMorePopover(day, b.getBoundingClientRect()));
+      b.addEventListener('click', () => {
+        state.selectedDate = day;
+        renderMonth();
+        renderMiniCalendar();
+        openMorePopover(day, b.getBoundingClientRect());
+      });
       b.appendChild(el('span', 'calendar-monthgrid-day-number', { text: String(Number(day.slice(8))) }));
       buttons.appendChild(b);
     }
@@ -1118,8 +1129,7 @@ function openEventPopover(ev, anchor) {
   headMain.appendChild(title);
   headMain.appendChild(el('div', 'eventpopover-date', { text: eventDateHeader(ev) }));
   const freq = frequencyString(ev);
-  if (freq) headMain.appendChild(el('div', 'eventpopover-date', { text: freq, }));
-  headMain.lastChild.classList.add('freq');
+  if (freq) headMain.appendChild(el('div', 'eventpopover-date freq', { text: freq }));
   head.append(bar, headMain);
   const actions = el('div', 'eventpopover-actions');
   const btnEdit = el('button', 'button button-ghost icon-only', {
@@ -1313,12 +1323,23 @@ function beginEdit(ev) {
 }
 
 /** Delete entry point: recurring events ask scope first. */
-function beginDelete(ev) {
+async function beginDelete(ev) {
   closeAllOverlays();
+  const run = async (scope) => {
+    if (state.busy) return;
+    try {
+      setBusy(true, 'Deleting…');
+      await deleteEvent(ev, scope);
+    } catch (e) {
+      toast('Delete failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+    } finally {
+      setBusy(false);
+    }
+  };
   if (ev.isRecurring || ev.isException) {
-    openRecurringChoice('Delete recurring event', (scope) => deleteEvent(ev, scope));
+    openRecurringChoice('Delete recurring event', run);
   } else {
-    deleteEvent(ev, 'master');
+    await run('master');
   }
 }
 
@@ -1462,9 +1483,11 @@ function openEditor(form) {
     freqSel.value = f.freq;
   };
   freqSel.addEventListener('change', () => {
+    const prev = f.freq;
     f.freq = freqSel.value;
     if (f.freq === 'CUSTOM') openFreqModal((rrule) => {
       if (rrule) editor.custom = rrule;
+      else f.freq = prev; // cancelled: revert the selection
       refreshFreqLabels();
     }, editor.custom, f);
   });
@@ -1560,8 +1583,18 @@ function openEditor(form) {
   if (editor.mode === 'edit') {
     const del = el('button', 'button button-ghost button-danger left', { type: 'button', text: 'Delete' });
     del.addEventListener('click', async () => {
+      if (state.busy) return;
+      const target = editor.target; // capture BEFORE close (close resets state)
+      const scope = editor.scope === 'exception' ? 'exception' : 'all';
       close();
-      await deleteEvent(editor.target, editor.scope === 'exception' ? 'exception' : 'all');
+      try {
+        setBusy(true, 'Deleting…');
+        await deleteEvent(target, scope);
+      } catch (e) {
+        toast('Delete failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+      } finally {
+        setBusy(false);
+      }
     });
     footer.appendChild(del);
   }
@@ -1716,7 +1749,7 @@ async function saveEvent(form) {
       summary: form.title,
       description: form.description || null,
       location: form.location || null,
-      transp: form.allDay ? 'TRANSPARENT' : base.transp,
+      transp: form.allDay ? 'TRANSPARENT' : null,
       sequence: (base.sequence === null || base.sequence === undefined ? 0 : base.sequence) + 1,
       alarms,
     };
@@ -1754,7 +1787,8 @@ function buildVCalendarOf(spec) {
 }
 
 async function deleteEvent(ev, scope) {
-  if (editor.mode === 'create') return;
+  // NOTE: no create-mode guard — the editor's Delete button only renders in
+  // edit mode, and popover/day-list callers always pass a saved event.
   const rowId = ev.rowId;
   if (!(ev.isRecurring || ev.isException) || scope === 'all') {
     await state.api.deleteRow(rowId);
@@ -1797,9 +1831,31 @@ async function applyDayShift(ev, days, scope) {
       ? events.findIndex((e) => e.recurrenceId && e.recurrenceId.date === target.recId.date &&
           (e.recurrenceId.time || '') === (target.recId.time || ''))
       : events.findIndex((e) => e.recurrenceId === null);
-    if (idx < 0) throw new Error('component_not_found');
-    const old = events[idx];
-    const end = core.effectiveEnd(old);
+    // Dragging a plain occurrence as "This event" CREATES the exception
+    // component (same semantics as the editor's exception save path).
+    const old = idx >= 0
+      ? events[idx]
+      : {
+          uid: p.uid,
+          dtstamp: null,
+          dtstart: target.component.dtstart,
+          dtend: target.component.dtend,
+          duration: null,
+          recurrenceId: target.recId
+            ? { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz }
+            : null,
+          rrule: null,
+          exdates: [],
+          rdates: [],
+          summary: target.component.summary || '',
+          description: target.component.description || null,
+          location: target.component.location || null,
+          status: target.component.status || null,
+          transp: target.component.transp || null,
+          sequence: null,
+          alarms: target.component.alarms || [],
+          extra: [],
+        };
     const upd = {
       ...old,
       dtstamp: { date: new Date().toISOString().slice(0, 10), time: new Date().toISOString().slice(11, 19), tz: 'UTC' },
@@ -1811,7 +1867,8 @@ async function applyDayShift(ev, days, scope) {
     if (isException && target.recId) {
       upd.recurrenceId = { date: target.recId.date, time: target.recId.time, tz: old.dtstart.tz };
     }
-    events[idx] = upd;
+    if (idx >= 0) events[idx] = upd;
+    else events.push(upd);
     return serializeVCalendar(p.calendar);
   }, { allowCreate: false });
   await syncAll();
@@ -1951,7 +2008,8 @@ function openFreqModal(done, initial, form) {
       // RFC 5545: UNTIL value type must match DTSTART (DATE / date-time with Z).
       r += form.allDay
         ? ';UNTIL=' + untilI.value.replaceAll('-', '')
-        : ';UNTIL=' + untilI.value.replaceAll('-', '') + 'T' + (form.start.time || '00:00') + '00Z';
+        : ';UNTIL=' + untilI.value.replaceAll('-', '') + 'T' +
+          (form.start.time || '00:00').replaceAll(':', '') + '00Z';
     }
     close();
     done(r);
@@ -2259,7 +2317,7 @@ function createDragCreateEvent({ e, targetRow, targetDate: startTargetDate, rows
     result = isAfter
       ? { start: startTargetDate, end: endTargetDate }
       : { start: endTargetDate, end: startTargetDate };
-    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow, result.start, result.end, targetRow);
+    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow, result.start, result.end);
   };
 
   const handleMouseUp = () => {
@@ -2332,8 +2390,7 @@ function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, d
       end: shiftDay(ev.spanLast, differenceInDays),
       row: currentTargetRow,
     };
-    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow,
-      result.start, result.end, targetRow, ev, differenceInDays);
+    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow, result.start, result.end, ev);
   };
 
   const handleMouseUp = () => {
@@ -2379,12 +2436,14 @@ async function finishDragMove(ev, days) {
 }
 
 /** Ghost chip while dragging (Proton renders the moved event live). */
-function drawGhost(ghost, dayGridEl, model, targetRow, startDay, endDay, sourceRow, ev, diffDays) {
+function drawGhost(ghost, dayGridEl, model, targetRow, startDay, endDay, ev) {
   removeGhost(ghost);
   const rowsEls = dayGridEl.querySelectorAll('.daygrid-rowevents');
   const target = rowsEls[targetRow];
   if (!target) return null;
   const days = model.rows[targetRow];
+  // `diffDays` here is the MODULE function (the drag delta is not needed:
+  // the ghost always spans the shifted start..end days).
   const first = Math.max(0, diffDays(startDay, days[0]));
   const last = Math.min(6, diffDays(endDay, days[0]));
   if (first > last) return null;

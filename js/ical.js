@@ -207,13 +207,15 @@ export function parseDuration(v) {
   if (!m) throw new Error('bad_duration');
   const [, sign, w, d, h, mi, s] = m;
   const secs = (+(w || 0) * 604800 + +(d || 0) * 86400 + +(h || 0) * 3600 + +(mi || 0) * 60 + +(s || 0));
-  if (secs === 0 && !/[1-9]/.test(String(v).slice(1))) throw new Error('bad_duration');
+  // Zero durations are grammatically legal (dur-value = 1*DIGIT components);
+  // they denote a zero-length event.
   return sign === '-' ? -secs : secs;
 }
 
 /** Seconds → RFC 5545 DURATION (canonical PnDTnHnMnS form, sign only when negative). */
 export function formatDuration(secs) {
-  if (!Number.isInteger(secs) || secs === 0) throw new Error('bad_duration');
+  if (!Number.isInteger(secs)) throw new Error('bad_duration');
+  if (secs === 0) return 'PT0S';
   const sign = secs < 0 ? '-' : '';
   let s = Math.abs(secs);
   const d = Math.floor(s / 86400); s -= d * 86400;
@@ -294,6 +296,12 @@ const KNOWN = new Set([
  * props: [{name, params, value}] (VALARM blocks come in as
  * {name:'VALARM', props:[...]} pseudo-properties).
  */
+/** Properties that MUST NOT occur more than once per VEVENT (RFC 5545). */
+const SINGLE_OCCURRING = new Set([
+  'UID', 'DTSTAMP', 'DTSTART', 'DTEND', 'DURATION', 'RECURRENCE-ID',
+  'RRULE', 'SUMMARY', 'DESCRIPTION', 'LOCATION', 'STATUS', 'TRANSP', 'SEQUENCE',
+]);
+
 function veventFromProps(props) {
   const ev = {
     uid: null,
@@ -306,15 +314,23 @@ function veventFromProps(props) {
     exdates: [],
     rdates: [],
     summary: '',
+    summaryParams: [],
     description: null,
+    descriptionParams: [],
     location: null,
+    locationParams: [],
     status: null,
     transp: null,
     sequence: null,
-    alarms: [], // {action, triggerRaw, extra:[prop]}
+    alarms: [], // {action, triggerRaw, triggerParams, extra:[prop]}
     extra: [],
   };
+  const seenProps = new Set();
   for (const p of props) {
+    if (SINGLE_OCCURRING.has(p.name)) {
+      if (seenProps.has(p.name)) throw new Error('duplicate_prop');
+      seenProps.add(p.name);
+    }
     switch (p.name) {
       case 'VALARM':
         ev.alarms.push(alarmFromProps(p.props));
@@ -328,13 +344,20 @@ function veventFromProps(props) {
       case 'RRULE': ev.rrule = p.value.toUpperCase(); break;
       case 'EXDATE':
       case 'RDATE':
-        for (const v of p.value.split(',')) {
-          (p.name === 'EXDATE' ? ev.exdates : ev.rdates).push(parseDTValue(v, p.params));
+        try {
+          for (const v of p.value.split(',')) {
+            (p.name === 'EXDATE' ? ev.exdates : ev.rdates).push(parseDTValue(v, p.params));
+          }
+        } catch {
+          // Un-parseable value forms (e.g. PERIOD) are preserved verbatim
+          // instead of destroying the whole row (flagged so serialization
+          // does not drop it as a "known" property).
+          ev.extra.push({ ...p, tolerated: true });
         }
         break;
-      case 'SUMMARY': ev.summary = unescapeText(p.value); break;
-      case 'DESCRIPTION': ev.description = unescapeText(p.value); break;
-      case 'LOCATION': ev.location = unescapeText(p.value); break;
+      case 'SUMMARY': ev.summary = unescapeText(p.value); ev.summaryParams = p.params; break;
+      case 'DESCRIPTION': ev.description = unescapeText(p.value); ev.descriptionParams = p.params; break;
+      case 'LOCATION': ev.location = unescapeText(p.value); ev.locationParams = p.params; break;
       case 'STATUS': {
         const s = p.value.toUpperCase();
         if (s !== 'CONFIRMED' && s !== 'TENTATIVE' && s !== 'CANCELLED') throw new Error('bad_status');
@@ -372,10 +395,13 @@ function veventFromProps(props) {
 }
 
 function alarmFromProps(props) {
-  const a = { action: null, triggerRaw: null, extra: [] };
+  const a = { action: null, triggerRaw: null, triggerParams: [], extra: [] };
   for (const p of props) {
     if (p.name === 'ACTION') a.action = p.value.toUpperCase();
-    else if (p.name === 'TRIGGER') a.triggerRaw = p.value;
+    else if (p.name === 'TRIGGER') {
+      a.triggerRaw = p.value;
+      a.triggerParams = p.params || []; // RELATED=END / VALUE=DATE-TIME must survive
+    }
     else a.extra.push(p);
   }
   if (a.action === null || a.triggerRaw === null) throw new Error('bad_alarm');
@@ -497,12 +523,14 @@ function veventToProps(ev) {
       props.push({ name: 'RDATE', params: g.params, value: g.values.join(',') });
     }
   }
-  if (ev.summary !== '') props.push({ name: 'SUMMARY', params: [], value: escapeText(ev.summary) });
+  if (ev.summary !== '') {
+    props.push({ name: 'SUMMARY', params: ev.summaryParams || [], value: escapeText(ev.summary) });
+  }
   if (ev.description !== null && ev.description !== undefined && ev.description !== '') {
-    props.push({ name: 'DESCRIPTION', params: [], value: escapeText(ev.description) });
+    props.push({ name: 'DESCRIPTION', params: ev.descriptionParams || [], value: escapeText(ev.description) });
   }
   if (ev.location !== null && ev.location !== undefined && ev.location !== '') {
-    props.push({ name: 'LOCATION', params: [], value: escapeText(ev.location) });
+    props.push({ name: 'LOCATION', params: ev.locationParams || [], value: escapeText(ev.location) });
   }
   if (ev.status) props.push({ name: 'STATUS', params: [], value: ev.status });
   if (ev.transp) props.push({ name: 'TRANSP', params: [], value: ev.transp });
@@ -516,7 +544,7 @@ function veventToProps(ev) {
     props.push({ name: 'VALARM', props: alarmProps });
   }
   for (const p of ev.extra || []) {
-    if (KNOWN.has(p.name) || p.name === 'BEGIN' || p.name === 'END') continue; // never duplicate knowns
+    if ((KNOWN.has(p.name) && !p.tolerated) || p.name === 'BEGIN' || p.name === 'END') continue; // never duplicate knowns
     props.push(p);
   }
   return props;

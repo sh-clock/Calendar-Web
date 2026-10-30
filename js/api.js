@@ -1,5 +1,5 @@
 /**
- * api.js — HTTP client for the calendar PoC server (protocol v4.1, §5 policy).
+ * api.js — HTTP client for the calendar PoC server (protocol v4.1 + v4.2 delta, §5 policy).
  *
  * Distinguishes the three failure shapes the wire spec defines:
  *  - silent drop (§4): 404 with an EMPTY body — authentication failed.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * api-suite.mjs — FULL HTTP conformance matrix for the calendar PoC server
- * (protocol v4.1). This is NOT a smoke test: every route, every §5 error
+ * (protocol v4.2 calendar delta over v4.1). This is NOT a smoke test: every route, every §5 error
  * shape, the §4 silent-drop law, §9 RMW arbitration, §6 AAD binding, §13
  * dual-writer ownership merge, §8 bootstrap/rewrap (Type A rotation), CORS
  * (WORKLOG D6), and §19 backup are exercised.
@@ -894,6 +894,84 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
   check('seed backup snapshot -> {ok, rows:3}', r.status === 200 && b?.ok === true && b?.rows === 3, r.text);
   const cfgNow = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
   check('seed phase: config at ver 3, material restored', cfgNow.ver === 3 && cfgNow.wrapped === MAT.wrappedB64, JSON.stringify(cfgNow));
+}
+
+/* ================================================================ */
+console.log('PHASE V42 — v4.2 row types (evt/cmeta on the opaque store)');
+/* ================================================================ */
+/* The v4.2 claim under test: NO new server logic — evt:/cmeta: rows are
+   ordinary opaque rows. Server-side assertions only (client row rules are
+   pinned in test/core-unit.mjs). Runs in the post-B2 universe (fresh
+   bootstrap, empty manifest) — idempotent seeding. */
+{
+  const CAL = '01234567-89ab-cdef-0123-456789abcdef';
+  const cmetaId = 'cmeta:' + CAL;
+  const meta = JSON.stringify({ v: 1, name: 'E2E cal', color: '#EC3E7C' });
+  const encMeta = encryptRow(K, cmetaId, 1, meta);
+  let r = await raw('PUT', '/rows/' + encodeURIComponent(cmetaId), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encMeta.nonce), ct: b64(encMeta.ct) } });
+  check('v42.1 cmeta PUT ver1 -> 200', r.status === 200, r.text);
+
+  const evtUidUuid = randomUUID();
+  const evtIdUuid = `evt:${CAL}:${evtUidUuid}`;
+  const ical = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//t//EN',
+    'BEGIN:VEVENT', 'UID:' + evtUidUuid, 'DTSTAMP:20260101T000000Z',
+    'DTSTART:20261102T090000Z', 'DTEND:20261102T093000Z',
+    'RRULE:FREQ=WEEKLY;BYDAY=MO', 'SUMMARY:V42 uuid event', 'END:VEVENT',
+    'END:VCALENDAR', '',
+  ].join('\r\n');
+  const encEvt = encryptRow(K, evtIdUuid, 1, ical);
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encEvt.nonce), ct: b64(encEvt.ct) } });
+  check('v42.2 evt PUT (UUID uid) -> 200', r.status === 200, r.text);
+
+  // Foreign (non-UUID) UID: doc-legal, must be an ordinary opaque id.
+  const evtIdForeign = `evt:${CAL}:6a1r2fa3d8b9c0d1e2f3@google.com`;
+  const encF = encryptRow(K, evtIdForeign, 1, ical.replaceAll(evtUidUuid, '6a1r2fa3d8b9c0d1e2f3@google.com'));
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdForeign), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encF.nonce), ct: b64(encF.ct) } });
+  check('v42.3 evt PUT (foreign @ uid) -> 200', r.status === 200, r.text);
+
+  // 241-char evt id (UUID + 200-char UID budget) — accepted; 257 -> bad_id.
+  const uidMax = 'u'.repeat(200);
+  const evtIdMax = `evt:${CAL}:${uidMax}`;
+  const encM = encryptRow(K, evtIdMax, 1, ical.replaceAll(evtUidUuid, uidMax));
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdMax), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encM.nonce), ct: b64(encM.ct) } });
+  check('v42.4 evt PUT at 241-char id budget -> 200', r.status === 200, r.text);
+  r = await raw('PUT', '/rows/' + encodeURIComponent(`evt:${CAL}:${'u'.repeat(216)}`), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encM.nonce), ct: b64(encM.ct) } });
+  check('v42.5 evt PUT over id budget -> 400 bad_id', r.status === 400 && jparse(r.text)?.error === 'bad_id', r.text);
+
+  // Mixed manifest: cal: + cmeta: + evt: rows all listed with their vers.
+  const g = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  const ids = (g.rows || []).map((x) => x.id);
+  check('v42.6 manifest lists all three row types',
+    ids.includes(cmetaId) && ids.includes(evtIdUuid) && ids.includes(evtIdForeign) && ids.includes(evtIdMax),
+    JSON.stringify(ids));
+  check('v42.7 manifest carries vers', (g.rows || []).every((x) => Number.isInteger(x.ver)));
+
+  // GET roundtrip: the stored evt row decrypts to the exact iCalendar text.
+  const g2 = jparse((await raw('GET', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authUiHex })).text);
+  const roundtrip = decryptRow(K, evtIdUuid, g2.ver, g2.nonce, g2.ct);
+  check('v42.8 evt GET roundtrip = verbatim iCalendar', roundtrip === ical, JSON.stringify(roundtrip).slice(0, 80));
+
+  // cmeta GET roundtrip.
+  const g3 = jparse((await raw('GET', '/rows/' + encodeURIComponent(cmetaId), { token: MAT.authUiHex })).text);
+  check('v42.9 cmeta GET roundtrip = exact JSON', decryptRow(K, cmetaId, g3.ver, g3.nonce, g3.ct) === meta);
+
+  // Class gate still precedes id handling: CLOCK token PUT on an evt row -> 403.
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authClockHex, body: { ver: 2, nonce: b64(encEvt.nonce), ct: b64(encEvt.ct) } });
+  check('v42.10 CLOCK token evt PUT -> 403 empty', r.status === 403 && r.text === '', r.text);
+
+  // RMW rebase on evt rows: stale ver -> stored envelope echo (D14 contract).
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encEvt.nonce), ct: b64(encEvt.ct) } });
+  const rr = jparse(r.text);
+  check('v42.11 stale evt ver -> rebase echo of stored envelope',
+    r.status === 200 && rr.ver === 1 && rr.nonce === g2.nonce && rr.ct === g2.ct, r.text);
+
+  // Clean up the phase's rows (keeps the suite universe deterministic).
+  for (const id of [cmetaId, evtIdUuid, evtIdForeign, evtIdMax]) {
+    await raw('DELETE', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex });
+  }
+  const gEnd = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  check('v42.12 phase rows cleaned', !(gEnd.rows || []).some((x) => x.id.startsWith('evt:') || x.id.startsWith('cmeta:')), JSON.stringify(gEnd.rows));
 }
 
 if (MATERIAL_OUT) {

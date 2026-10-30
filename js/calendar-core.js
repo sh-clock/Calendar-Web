@@ -152,6 +152,15 @@ export function parseEvtPayload(text) {
   const master = cal.events.find((e) => e.recurrenceId === null);
   const exceptions = cal.events.filter((e) => e.recurrenceId !== null);
   if (!master) return null; // every row needs the master
+  if (cal.events.filter((e) => e.recurrenceId === null).length !== 1) {
+    return null; // two masters (same UID) = corrupt (PROTOCOL v4.2 row rule)
+  }
+  if (exceptions.length > 0 && !master.rrule) {
+    return null; // RECURRENCE-ID exceptions require a recurring master
+  }
+  if (uid.length > UID_MAX) {
+    return null; // docs/PROTOCOL-v4.2.md id budget
+  }
   if (new Set(exceptions.map((e) => e.recurrenceId.date + 'T' + (e.recurrenceId.time || ''))).size !== exceptions.length) {
     return null; // duplicate RECURRENCE-ID = corrupt
   }
@@ -254,7 +263,13 @@ function buildRRule(master) {
     }
   } else if (untilZ) {
     const u = untilZ[1];
-    options.until = new Date(Date.UTC(+u.slice(0, 4), +u.slice(4, 6) - 1, +u.slice(6, 8), 0, 0, 0));
+    // Floating DATE-TIME UNTIL: keep its time-of-day (RFC 5545 requires the
+    // UNTIL value type to match DTSTART; a floating pair carries real time).
+    const tm = /(\d{8})T?(\d{2})?(\d{2})?(\d{2})?$/.exec(u);
+    options.until = new Date(Date.UTC(
+      +tm[1].slice(0, 4), +tm[1].slice(4, 6) - 1, +tm[1].slice(6, 8),
+      +(tm[2] || 0), +(tm[3] || 0), +(tm[4] || 0)
+    ));
   }
   options.dtstart = new Date(startMs);
   try {
@@ -330,6 +345,20 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
     return span.first <= toDay && span.last >= fromDay;
   };
 
+  // Canonical occurrence key: DATE values key by day; timed values key by
+  // INSTANT (each side normalized with its own TZID — RFC 5545 lets EXDATE /
+  // RECURRENCE-ID / RDATE carry a different TZID or UTC form than DTSTART).
+  const occKey = (dt) => {
+    if (dt.time === null) return 'D' + dt.date;
+    try {
+      return 'T' + wallToInstantUTC(dt, dt.tz || 'UTC').getTime();
+    } catch {
+      return 'T' + dt.date + '|' + dt.time; // defensive: unresolvable tz
+    }
+  };
+  const exdateKeys = new Set(master.exdates.map(occKey));
+  const overriddenKeys = new Set(exceptions.map((e) => occKey(e.recurrenceId)));
+
   if (!master.rrule) {
     const occ = mkOcc(master, null, false);
     if (overlaps(occ)) out.push(occ);
@@ -339,7 +368,15 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
       // Upper bound = last microsecond OF toDay (not the next midnight):
       // rrule.between(from, to, inc=true) includes instants EQUAL to the
       // bounds, so a next-midnight bound would pull in toDay+1 occurrences.
-      const fromMs = Date.UTC(+fromDay.slice(0, 4), +fromDay.slice(5, 7) - 1, +fromDay.slice(8, 10), 0, 0, 0);
+      // Lower bound is span-aware: an occurrence STARTING up to the master's
+      // span length BEFORE fromDay can still overlap the window.
+      const span = spanDays(master);
+      const backDays = Math.max(0, dayDiff(span.first, span.last));
+      const fromMs = Date.UTC(
+        +addDays(fromDay, -backDays).slice(0, 4),
+        +addDays(fromDay, -backDays).slice(5, 7) - 1,
+        +addDays(fromDay, -backDays).slice(8, 10), 0, 0, 0
+      );
       const toMs = Date.UTC(+toDay.slice(0, 4), +toDay.slice(5, 7) - 1, +toDay.slice(8, 10), 24, 0, 0) - 1;
       let occs;
       try {
@@ -348,21 +385,19 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
         occs = [];
       }
       const isAllDayMaster = master.dtstart.time === null;
-      const overridden = new Set(exceptions.map((e) => e.recurrenceId.date + '|' + (e.recurrenceId.time || '')));
+      const seenKeys = new Set();
       for (const o of occs) {
         const naiveWall = naiveUTCToWall(o.getTime()); // '00:00:00' even for all-day
-        const key = naiveWall.date + '|' + (isAllDayMaster ? '' : naiveWall.time);
-        const exdateHits = (x) =>
-          isAllDayMaster
-            ? x.time === null && x.date === naiveWall.date // DATE-valued EXDATE
-            : sameWall(x, naiveWall);
-        if (master.exdates.some(exdateHits)) continue; // EXDATE removal
-        if (overridden.has(key)) continue; // replaced by its exception below
         // All-day masters keep DATE semantics on every occurrence (the
         // naive expansion yields 00:00:00; the model needs time === null).
         const occStart = isAllDayMaster
           ? { date: naiveWall.date, time: null, tz: null }
           : { ...naiveWall, tz: master.dtstart.tz };
+        const key = occKey(occStart);
+        if (exdateKeys.has(key)) continue; // EXDATE removal
+        if (overriddenKeys.has(key)) continue; // replaced by its exception below
+        if (seenKeys.has(key)) continue; // RRULE duplicates (defensive)
+        seenKeys.add(key);
         const comp = occurrenceComponent(master, occStart);
         out.push(mkOcc(comp, isAllDayMaster ? { date: naiveWall.date, time: null } : naiveWall, false));
       }
@@ -375,16 +410,20 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
   }
 
   // RDATE: additional explicit occurrence starts (RFC 5545 §3.8.5.2), with
-  // or without an RRULE. Match the master's value type (all-day RDATEs pair
-  // with DATE masters). EXDATE'd or exception-overridden instances are
-  // skipped; every other RDATE overlapping the range is an occurrence.
+  // or without an RRULE. EXDATE'd / exception-overridden / duplicate starts
+  // are skipped (RFC recurrence-set semantics: the set is a UNION, so an
+  // RDATE equal to an RRULE occurrence collapses to one instance); every
+  // other RDATE overlapping the range is an occurrence.
   {
-    const overriddenSet = new Set(exceptions.map((e) => e.recurrenceId.date + '|' + (e.recurrenceId.time || '')));
+    const prior = new Set(out.map((o) => occKey({ date: o.start.date, time: o.start.time, tz: o.master.dtstart.tz })));
+    const seen = new Set();
     for (const rd of master.rdates || []) {
       if ((rd.time === null) !== (master.dtstart.time === null)) continue; // type mismatch: ignored
-      const wall = { date: rd.date, time: rd.time === null ? null : rd.time };
-      if (master.exdates.some((x) => sameWall(x, wall))) continue;
-      if (overriddenSet.has(wall.date + '|' + (wall.time || ''))) continue;
+      const key = occKey(rd);
+      if (exdateKeys.has(key)) continue;
+      if (overriddenKeys.has(key)) continue;
+      if (prior.has(key) || seen.has(key)) continue; // union dedupe
+      seen.add(key);
       const comp = occurrenceComponent(master, { date: rd.date, time: rd.time, tz: master.dtstart.tz });
       const occ = mkOcc(comp, { date: rd.date, time: rd.time }, false);
       if (overlaps(occ)) out.push(occ);
@@ -440,16 +479,41 @@ export function deriveBucketEntries(occurrences, day) {
     if (occ.isCancelled) continue;
     if (!(occ.start.date <= day && day <= spanDays(occ.master).last)) continue;
     const t = occ.start.time || '00:00:00';
+    const title = occ.master.summary || '(untitled)';
     entries.push({
-      id: PROJ_PREFIX + ':' + occ.uid,
+      // §13b: deterministic UUID-shaped projection id — NOT the raw UID
+      // (foreign UIDs like "x@server" would violate the v4.1 id grammar
+      // [a-z]:{uuid} and the same UID in two calendars would collide).
+      id: PROJ_PREFIX + ':' + projIdHash(occ.calId || '', occ.uid),
       date: day,
       hh: +t.slice(0, 2),
       mm: +t.slice(3, 5),
-      title: occ.master.summary || '(untitled)',
+      title: title.length > 500 ? title.slice(0, 500) : title, // §13 title cap
       priority: occ.allDay ? 1 : 2,
     });
   }
   return capDerived(entries);
+}
+
+/**
+ * Deterministic 128-bit hash of (calendar uuid, event UID), formatted in
+ * UUID layout (version-5-analogue) for §13b projection ids: same inputs →
+ * same id on every client; different calendars/UIDs → different ids with
+ * negligible collision odds (126 effective bits). Pure function, no crypto
+ * dependency (buckets are a derived cache, not a security boundary).
+ */
+export function projIdHash(cal, uid) {
+  const str = String(cal) + '|' + String(uid);
+  const lanes = [0x811c9dc5, 0x01000193, 0xdeadbeef, 0x41c6ce57];
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    for (let j = 0; j < 4; j++) {
+      lanes[j] = Math.imul(lanes[j] ^ ((c + j * 0x9e37) & 0xffff), 0x01000193) >>> 0;
+    }
+  }
+  const h = lanes.map((n) => n.toString(16).padStart(8, '0')).join('');
+  return h.slice(0, 8) + '-' + h.slice(8, 12) + '-5' + h.slice(13, 16) +
+    '-a' + h.slice(17, 20) + '-' + h.slice(20, 32);
 }
 
 /** Deterministic §13 cap: keep (priority, id) order, drop the tail. */

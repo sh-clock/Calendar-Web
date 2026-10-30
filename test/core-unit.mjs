@@ -10,7 +10,7 @@ import {
   validateCalendarMeta, newCalendarMeta, parseEvtPayload, serializeEvtPayload,
   effectiveEnd, spanDays, expandEvtRow, validateBucketEvent, normalizeBucket,
   deriveBucketEntries, capDerived, sortBucketEvents, deriveWindowBuckets,
-  PALETTE, CAP_PER_BUCKET, PROJ_PREFIX,
+  PALETTE, CAP_PER_BUCKET, PROJ_PREFIX, projIdHash,
 } from '../js/calendar-core.js';
 import {
   unfoldLines, foldLine, escapeText, unescapeText, parseContentLine,
@@ -104,7 +104,8 @@ eq('sameWall ignores tz', sameWall({ date: '2026-10-28', time: '10:00:00', tz: '
 eq('parseDuration simple', parseDuration('PT30M'), 1800);
 eq('parseDuration weeks+days', parseDuration('P2W1DT3H'), 2 * 604800 + 86400 + 10800);
 eq('parseDuration negative', parseDuration('-PT10M'), -600);
-throws('parseDuration rejects zero', () => parseDuration('PT0S'));
+eq('parseDuration accepts zero (RFC grammar)', parseDuration('PT0S'), 0);
+eq('formatDuration zero canonical', formatDuration(0), 'PT0S');
 eq('formatDuration canonical', formatDuration(3661), 'PT1H1M1S');
 eq('formatDuration day', formatDuration(86400), 'P1D');
 eq('formatDuration negative', formatDuration(-600), '-PT10M');
@@ -362,12 +363,15 @@ const rowOf = (lines) => { const p = parseEvtPayload(V(lines)); return p; };
     mkOcc('2026-10-31', '09:30:00', 'c3', 'NineHalf'),
     mkOcc('2026-10-31', '08:00:00', 'd4', 'Cancelled', true),
   ], '2026-10-31');
+  const pid = (uid) => 'x:' + projIdHash(CALID, uid);
   eq('deriveBucketEntries: cancelled excluded, (priority,id) derivation order', entries, [
-    { id: 'x:a1', date: '2026-10-31', hh: 0, mm: 0, title: 'AllDay', priority: 1 },
-    { id: 'x:b2', date: '2026-10-31', hh: 10, mm: 0, title: 'Ten', priority: 2 },
-    { id: 'x:c3', date: '2026-10-31', hh: 9, mm: 30, title: 'NineHalf', priority: 2 },
+    { id: pid('a1'), date: '2026-10-31', hh: 0, mm: 0, title: 'AllDay', priority: 1 },
+    { id: pid('b2'), date: '2026-10-31', hh: 10, mm: 0, title: 'Ten', priority: 2 },
+    { id: pid('c3'), date: '2026-10-31', hh: 9, mm: 30, title: 'NineHalf', priority: 2 },
   ]);
-  eq('deriveBucketEntries display order via sortBucketEvents', sortBucketEvents(entries).map((e) => e.id), ['x:a1', 'x:c3', 'x:b2']);
+  eq('derived ids are UUID-shaped (§13 grammar)', entries.every((e) => /^[a-z]:[0-9a-f-]{36}$/.test(e.id)), true);
+  eq('deriveBucketEntries display order via sortBucketEvents', sortBucketEvents(entries).map((e) => e.id), [pid('a1'), pid('c3'), pid('b2')]);
+  eq('deriveBucketEntries validate (foreign UID now safe)', entries.every((e) => validateBucketEvent(e) !== null), true);
   const many = Array.from({ length: 20 }, (_, i) => mkOcc('2026-10-31', `0${Math.floor(i / 6)}:${(i * 7) % 60 < 10 ? '0' : ''}${(i * 7) % 60}:00`.replace(/^0(\d\d)/, '$1'), 'u' + i, 'E' + i));
   const capped = deriveBucketEntries(many, '2026-10-31');
   eq('deriveBucketEntries caps at 16', capped.length, 16);
@@ -400,16 +404,145 @@ eq('capDerived cap=16 default', capDerived(Array.from({ length: 20 }, (_, i) => 
   eq('window size', buckets.size, 23);
   eq('day0 empty (today-1)', buckets.get('2026-10-30'), []);
   eq('today empty', buckets.get(today), []);
-  eq('Nov2 1 entry', buckets.get('2026-11-02'), [{ id: 'x:w1', date: '2026-11-02', hh: 8, mm: 0, title: '(untitled)', priority: 2 }]);
-  eq('Nov3 1 entry', buckets.get('2026-11-03')[0].id, 'x:w1');
-  eq('Nov4 (COUNT=3 end) 1 entry', buckets.get('2026-11-04')[0].id, 'x:w1');
-  eq('Nov5 all-day entry priority 1', buckets.get('2026-11-05'), [{ id: 'x:o1', date: '2026-11-05', hh: 0, mm: 0, title: '(untitled)', priority: 1 }]);
+  eq('Nov2 1 entry', buckets.get('2026-11-02'), [{ id: 'x:' + projIdHash(CALID, 'w1'), date: '2026-11-02', hh: 8, mm: 0, title: '(untitled)', priority: 2 }]);
+  eq('Nov3 1 entry', buckets.get('2026-11-03')[0].id, 'x:' + projIdHash(CALID, 'w1'));
+  eq('Nov4 (COUNT=3 end) 1 entry', buckets.get('2026-11-04')[0].id, 'x:' + projIdHash(CALID, 'w1'));
+  eq('Nov5 all-day entry priority 1', buckets.get('2026-11-05'), [{ id: 'x:' + projIdHash(CALID, 'o1'), date: '2026-11-05', hh: 0, mm: 0, title: '(untitled)', priority: 1 }]);
   eq('Nov6 empty (after all-day)', buckets.get('2026-11-06'), []);
   eq('last day empty', buckets.get('2026-11-21'), []);
 }
 eq('PROJ_PREFIX is x', PROJ_PREFIX, 'x');
 eq('CAP_PER_BUCKET 16', CAP_PER_BUCKET, 16);
 eq('localToday shape', localToday().match(/^\d{4}-\d{2}-\d{2}$/) !== null, true);
+
+/* ================ wave-4 regressions ================ */
+{
+  // W4-1: occurrence starting BEFORE fromDay whose span overlaps the window.
+  const p = rowOf(evLines({
+    uid: 'span1', dtstamp: 'DTSTAMP:20260101T000000Z',
+    dtstart: 'DTSTART;VALUE=DATE:20261005', dtend: 'DTEND;VALUE=DATE:20261008', rrule: 'FREQ=WEEKLY',
+  }));
+  const occs = expandEvtRow(p, evtId(CALID, 'span1'), '2026-10-06', '2026-10-28');
+  eq('span-overlap at leading edge: Oct 5 occurrence included', occs.some((o) => o.start.date === '2026-10-05'), true);
+  const buckets = deriveWindowBuckets(new Map([[evtId(CALID, 'span1'), p]]), '2026-10-07');
+  eq('deriveWindowBuckets leading edge: Oct 6 + Oct 7 covered', [
+    buckets.get('2026-10-06').length, buckets.get('2026-10-07').length,
+  ], [1, 1]);
+}
+{
+  // W4-2: UTC (Z) EXDATE and RECURRENCE-ID against a TZID master.
+  const p = rowOf([
+    ...evLines({
+      uid: 'tz1', dtstamp: 'DTSTAMP:20260101T000000Z',
+      dtstart: 'DTSTART;TZID=Australia/Sydney:20261005T090000', dtend: 'DTEND;TZID=Australia/Sydney:20261005T093000',
+      rrule: 'FREQ=DAILY', exdate: 'EXDATE:20261018T220000Z', // = Oct 19 09:00 Sydney
+    }),
+    ...evLines({
+      uid: 'tz1', dtstamp: 'DTSTAMP:20260101T000000Z', recId: 'RECURRENCE-ID:20261016T220000Z', // = Oct 17 09:00 Sydney
+      dtstart: 'DTSTART;TZID=Australia/Sydney:20261017T140000', dtend: 'DTEND;TZID=Australia/Sydney:20261017T143000',
+    }),
+  ]);
+  const occs = expandEvtRow(p, evtId(CALID, 'tz1'), '2026-10-05', '2026-10-25');
+  const days = occs.map((o) => o.start.date + 'T' + (o.start.time || ''));
+  eq('Z-form EXDATE removed (Oct 19 absent)', days.includes('2026-10-19T09:00:00'), false);
+  eq('Z-form RECURRENCE-ID overridden (Oct 17 original absent)', days.includes('2026-10-17T09:00:00'), false);
+  eq('moved exception present', days.includes('2026-10-17T14:00:00'), true);
+  eq('neighbor days intact', days.includes('2026-10-16T09:00:00') && days.includes('2026-10-20T09:00:00'), true);
+}
+{
+  // W4-3: foreign (non-UUID) UID derives a valid bucket; two calendars differ.
+  const mk = (cal, uid) => ({
+    rowId: evtId(cal, uid), calId: cal, uid, recId: null,
+    start: { date: '2026-10-31', time: '10:00:00' }, end: { date: '2026-10-31', time: '11:00:00' },
+    allDay: false, isException: false, isCancelled: false,
+    master: { dtstart: { date: '2026-10-31', time: '10:00:00', tz: null }, exdates: [], rdates: [], alarms: [], extra: [], summary: 'Foreign' },
+  });
+  const CAL2 = '89abcdef-89ab-cdef-89ab-cdef89abcdef';
+  const entries = deriveBucketEntries([mk(CALID, '6a1r2fa3d8b9c0d1e2f3@google.com'), mk(CAL2, '6a1r2fa3d8b9c0d1e2f3@google.com')], '2026-10-31');
+  eq('foreign UID derives 2 valid entries', entries.length, 2);
+  eq('both entries pass validateBucketEvent', entries.every((e) => validateBucketEvent(e) !== null), true);
+  eq('different calendars -> different ids', entries[0].id !== entries[1].id, true);
+  eq('same input -> same hash (deterministic)', projIdHash(CALID, 'x@y') === projIdHash(CALID, 'x@y'), true);
+  eq('hash is UUID-shaped', /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/.test(projIdHash(CALID, 'x@y')), true);
+}
+{
+  // W4-4: RDATE duplicating an RRULE occurrence collapses (RFC union).
+  const p = rowOf(evLines({
+    uid: 'dup1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261005T090000Z',
+    rrule: 'FREQ=WEEKLY;BYDAY=MO;COUNT=1', rdate: 'RDATE:20261005T090000Z',
+  }));
+  const occs = expandEvtRow(p, evtId(CALID, 'dup1'), '2026-10-01', '2026-10-31');
+  eq('RDATE=RRULE start collapses to one occurrence', occs.length, 1);
+}
+{
+  // W4-5: TRIGGER params survive the round-trip.
+  const text = V(evLines({
+    uid: 'al1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z',
+    alarmLines: ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER;RELATED=END:-PT30M', 'DESCRIPTION:Before end', 'END:VALARM'],
+  }));
+  const cal = parseVCalendar(text);
+  const rt = parseVCalendar(serializeVCalendar(cal));
+  eq('TRIGGER params round-trip', JSON.stringify(rt.events[0].alarms[0].triggerParams), JSON.stringify([['RELATED', 'END']]));
+}
+{
+  // W4-6: known TEXT property params survive the round-trip.
+  const text = V(evLines({
+    uid: 'pp1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z',
+    extra: 'SUMMARY;LANGUAGE=en:Param summary',
+  }));
+  const cal = parseVCalendar(text);
+  const rt = parseVCalendar(serializeVCalendar(cal));
+  eq('SUMMARY params round-trip', JSON.stringify(rt.events[0].summaryParams), JSON.stringify([['LANGUAGE', 'en']]));
+}
+{
+  // A8: floating UNTIL keeps its time-of-day.
+  const p = rowOf(evLines({ uid: 'fu1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261001T120000', rrule: 'FREQ=DAILY;UNTIL=20261003T120000' }));
+  eq('floating UNTIL keeps time (3 occurrences)', expandEvtRow(p, evtId(CALID, 'fu1'), '2026-10-01', '2026-10-31').length, 3);
+}
+{
+  // A9: two masters rejected; A11a: exception without RRULE rejected.
+  ok('two masters rejected', !parseEvtPayload(V([
+    ...evLines({ uid: 'mm', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z' }),
+    ...evLines({ uid: 'mm', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261029T100000Z' }),
+  ])));
+  ok('exception without RRULE rejected', !parseEvtPayload(V([
+    ...evLines({ uid: 'nx', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z' }),
+    ...evLines({ uid: 'nx', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261029T100000Z', recId: 'RECURRENCE-ID:20261028T100000Z' }),
+  ])));
+  throws('duplicate RRULE rejected', () => parseVCalendar(V([
+    ...evLines({ uid: 'dr', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z', rrule: 'FREQ=DAILY', extra: 'RRULE:FREQ=WEEKLY' }),
+  ])));
+}
+{
+  // A10: PT0S accepted; RDATE;VALUE=PERIOD preserved verbatim (row survives).
+  const p = parseEvtPayload(V(evLines({
+    uid: 'pz', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z', extra: 'DURATION:PT0S',
+  })));
+  ok('PT0S accepted (zero-length event)', !!p);
+  const p2 = parseEvtPayload(V(evLines({
+    uid: 'per', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z',
+    extra: 'RDATE;VALUE=PERIOD:20261029T090000Z/PT2H',
+  })));
+  ok('RDATE PERIOD tolerated (row parses)', !!p2);
+  ok('RDATE PERIOD preserved verbatim', (() => {
+    const rt = serializeVCalendar(p2.calendar);
+    return rt.includes('RDATE;VALUE=PERIOD:20261029T090000Z/PT2H');
+  })());
+}
+{
+  // A13: derived title truncated to §13 cap; A14: UID > 200 rejected.
+  const longTitle = 'T'.repeat(600);
+  const occ = {
+    rowId: evtId(CALID, 'tt'), calId: CALID, uid: 'tt', recId: null,
+    start: { date: '2026-10-31', time: '10:00:00' }, end: { date: '2026-10-31', time: '11:00:00' },
+    allDay: false, isException: false, isCancelled: false,
+    master: { dtstart: { date: '2026-10-31', time: '10:00:00', tz: null }, exdates: [], rdates: [], alarms: [], extra: [], summary: longTitle },
+  };
+  const [entry] = deriveBucketEntries([occ], '2026-10-31');
+  eq('derived title capped at 500', entry.title.length, 500);
+  eq('capped entry validates', validateBucketEvent(entry) !== null, true);
+  ok('UID > 200 rejected', !parseEvtPayload(V(evLines({ uid: 'u'.repeat(201), dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z' }))));
+}
 
 /* ================ report ================ */
 console.log(`core-unit: ${pass} passed, ${fails.length} failed`);

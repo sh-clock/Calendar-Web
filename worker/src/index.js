@@ -1,5 +1,5 @@
 /**
- * Calendar PoC Worker — front door (protocol v4.1, calendar scope).
+ * Calendar PoC Worker — front door (protocol v4.1 + v4.2 calendar delta).
  *
  * Thin router: CORS allowlist (WORKLOG D6) + Durable Object relay + §19 cron.
  * The Worker itself stores nothing; the "Store" DO is primary storage (§7, L1).
