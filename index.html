@@ -4,24 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Calendar — Encrypted Clock PoC</title>
-  <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.1, calendar scope) — Proof of Concept.">
+  <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.2, calendar scope) — Proof of Concept.">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+  <div id="syncbar" hidden><span id="syncmsg"></span></div>
+
   <header id="topbar">
     <div class="brand">
-      <span class="logo">▚</span>
-      <span>Calendar <small>· encrypted clock ecosystem, PoC</small></span>
+      <span class="logo" aria-hidden="true">▚</span>
+      <span class="brand-name">Calendar</span>
     </div>
     <div class="right">
       <span id="proto-badge" class="badge proto"></span>
-      <button id="btn-sync" class="ghost" hidden>Sync window</button>
-      <button id="btn-lock" class="ghost" hidden>Lock</button>
-      <button id="btn-forget" class="ghost danger" hidden>Forget browser</button>
+      <button id="btn-sync" class="button button-ghost" hidden>Sync</button>
+      <button id="btn-lock" class="button button-ghost" hidden>Lock</button>
+      <button id="btn-forget" class="button button-ghost button-danger" hidden>Forget browser</button>
     </div>
   </header>
-
-  <div id="syncbar" hidden><span id="syncmsg"></span></div>
 
   <main>
     <!-- ============ login / unlock ============ -->
@@ -38,7 +38,7 @@
           <label for="setup-input">Provisioning code <small>(first use on this browser — AUTH_UI, one-time)</small></label>
           <div class="row">
             <input id="setup-input" type="text" placeholder="64 lowercase hex chars" spellcheck="false" autocomplete="off">
-            <button id="btn-paste-setup" type="button">Store</button>
+            <button id="btn-paste-setup" type="button" class="button">Store</button>
           </div>
           <p class="hint">Delivered out-of-band with this PoC (the setup-link analogue of the clock's
             NVS provisioning channel). The password below then derives all keys.</p>
@@ -50,68 +50,85 @@
           known-insecure — a dummy AES key is in use).</p>
 
         <div id="login-msg" class="err" aria-live="polite"></div>
-        <button type="submit" class="primary">Unlock</button>
+        <button type="submit" class="button button-primary">Unlock</button>
       </form>
     </section>
 
     <!-- ============ app ============ -->
     <section id="app" hidden>
-      <div class="monthbar">
-        <button id="btn-prev" class="ghost">‹ Prev</button>
-        <strong id="month-label"></strong>
-        <button id="btn-next" class="ghost">Next ›</button>
-        <button id="btn-today" class="ghost">Today</button>
-      </div>
+      <div id="layout">
+        <!-- ---------- sidebar ---------- -->
+        <aside id="sidebar">
+          <button id="btn-new-event" class="button button-primary button-newevent" type="button">
+            <svg viewBox="0 0 16 16" class="ic" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            New event
+          </button>
 
-      <div class="layout">
-        <div id="grid"></div>
+          <div id="minicalendar" aria-label="Mini calendar">
+            <div class="minicalendar-head">
+              <span id="minical-label" class="minicalendar-month-label"></span>
+              <button id="minical-prev" class="button button-ghost icon-only" type="button" aria-label="Previous month">‹</button>
+              <button id="minical-next" class="button button-ghost icon-only" type="button" aria-label="Next month">›</button>
+            </div>
+            <div id="minical-grid" class="minicalendar-grid"></div>
+          </div>
 
-        <aside id="clock-panel">
-          <h2>Clock preview <small>· §13 reader: today + 7 days</small></h2>
-          <p class="hint">What the clock would render from its cached buckets (read-only).</p>
-          <div id="clock-list"></div>
+          <div class="sidebar-section">
+            <div class="sidebar-section-head">
+              <span>My calendars</span>
+              <button id="btn-add-calendar" class="button button-ghost icon-only" type="button" aria-label="Add calendar" title="Add calendar">+</button>
+            </div>
+            <ul id="calendar-list" class="calendar-list"></ul>
+            <p id="no-calendars" class="hint" hidden>No calendars yet — create one to start.</p>
+          </div>
+
+          <div class="sidebar-section sidebar-section-clock">
+            <div class="sidebar-section-head"><span>Clock preview</span><small class="head-note">today + 7</small></div>
+            <p class="hint">What the clock renders from its cached §13 buckets (read-only).</p>
+            <div id="clock-list"></div>
+          </div>
         </aside>
+
+        <!-- ---------- main area ---------- -->
+        <div id="main-area">
+          <div id="toolbar">
+            <button id="btn-today" class="button button-outline" type="button">Today</button>
+            <button id="btn-prev" class="button button-ghost icon-only" type="button" aria-label="Previous month">‹</button>
+            <button id="btn-next" class="button button-ghost icon-only" type="button" aria-label="Next month">›</button>
+            <h2 id="month-label" class="current-range"></h2>
+            <span class="grow"></span>
+            <span class="view-selector" aria-label="Month view">Month</span>
+          </div>
+
+          <div id="daygrid" class="is-month-view">
+            <div id="grid-head" class="calendar-daygrid-days"></div>
+            <div id="grid-rows" class="calendar-daygrid-rows"></div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
 
-  <!-- ============ day editor modal ============ -->
-  <div id="modal-backdrop" hidden></div>
-  <div id="modal" role="dialog" aria-modal="true" aria-labelledby="day-title" hidden>
-    <div class="modal-head">
-      <strong id="day-title"></strong>
-      <button id="btn-close-modal" class="ghost" aria-label="Close editor">×</button>
-    </div>
-    <div id="day-events"></div>
-    <form id="day-form">
-      <h3>Add / edit event <small>(writer prefix “w:”)</small></h3>
-      <div class="row">
-        <div>
-          <label for="ev-time">Time</label>
-          <input id="ev-time" type="time" value="09:00" required>
-        </div>
-        <div class="grow">
-          <label for="ev-title">Title</label>
-          <input id="ev-title" type="text" maxlength="500" placeholder="Title" required>
-        </div>
-        <div>
-          <label for="ev-pri">Priority</label>
-          <select id="ev-pri">
-            <option value="0">p0 highest</option>
-            <option value="1" selected>p1 high</option>
-            <option value="2">p2 normal</option>
-            <option value="3">p3 low</option>
-          </select>
-        </div>
-      </div>
-      <input id="ev-id" type="hidden">
-      <div class="row">
-        <button type="submit" class="primary">Save</button>
-        <button type="button" id="btn-clear-form" class="ghost">Clear</button>
-      </div>
-      <p class="hint">Cap: 16 events per day. Entries from other writers (d:, t:, …) are read-only.</p>
-    </form>
-  </div>
+  <!-- ============ event popover (read-only, saved events) ============ -->
+  <div id="popover-backdrop" hidden></div>
+  <div id="event-popover" class="eventpopover" hidden role="dialog" aria-modal="false"></div>
+
+  <!-- ============ event editor: shared form, popover or modal surface ============ -->
+  <div id="editor-backdrop" hidden></div>
+  <div id="editor-popover" class="eventpopover" hidden role="dialog"></div>
+  <div id="editor-modal" class="modal-two" hidden role="dialog" aria-modal="true"></div>
+
+  <!-- ============ recurring choice ============ -->
+  <div id="recur-backdrop" hidden></div>
+  <div id="recur-modal" class="modal-two modal-two--small" hidden role="dialog" aria-modal="true"></div>
+
+  <!-- ============ calendar (meta) modal ============ -->
+  <div id="cal-backdrop" hidden></div>
+  <div id="cal-modal" class="modal-two modal-two--small" hidden role="dialog" aria-modal="true"></div>
+
+  <!-- ============ custom frequency modal ============ -->
+  <div id="freq-backdrop" hidden></div>
+  <div id="freq-modal" class="modal-two modal-two--small" hidden role="dialog" aria-modal="true"></div>
 
   <div id="toasts" aria-live="polite"></div>
   <script type="module" src="js/app.js"></script>

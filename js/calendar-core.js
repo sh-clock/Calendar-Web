@@ -1,67 +1,73 @@
 /**
- * calendar-core.js — pure calendar logic for PROTOCOL v4.1 §13 (calendar
- * buckets). NO DOM, NO fetch: this module is imported BOTH by the browser UI
- * and by the Node test suite, so the merge/ownership/cap rules are verified
- * against exactly the code that runs in production.
+ * calendar-core.js — pure calendar logic for PROTOCOL v4.2 (calendar
+ * domain). NO DOM, NO fetch: imported by the browser UI and the Node test
+ * suite, so every rule below is verified against exactly the code that runs
+ * in production.
  *
- * §13 facts implemented here:
- *  - Row id "cal:{yyyymmdd}", sliding window of 23 live buckets
- *    [today-1 .. today+21] (client-enforced).
- *  - Payload { "events": [ { id:"d:{uuid}"|"t:{uuid}"|..., date, hh, mm,
- *    title, priority } ] }.
- *  - Ownership: a writer creates/edits ONLY entries carrying its own prefix.
- *    It NEVER rewrites another prefix's entries. The daily RMW is a union over
- *    both prefixes.
- *  - Capacity <= 16 events per bucket-day; a writer over cap drops ITS OWN
- *    lowest-priority entries (never the other writer's).
+ * v4.2 model (docs/PROTOCOL-v4.2.md):
+ *  - `cmeta:{uuid}` rows — calendar metadata {v:1, name, color}.
+ *  - `evt:{cal}:{uid}` rows — payload = RFC 5545 VCALENDAR text (one UID:
+ *    master VEVENT + RECURRENCE-ID exceptions). Source of truth.
+ *  - `cal:{yyyymmdd}` day buckets — DERIVED projection for the clock,
+ *    v4.1 §13 format preserved; entry ids use the `x:{uid}` derived
+ *    namespace. 23-day window rotation unchanged.
  *
- * WORKLOG D5: this PoC's web writer uses prefix "w:" (spec defines d:/t: for
- * the DAVx5/trudido phone forks, which do not exist in this PoC).
+ * v4.1 helpers retained verbatim: bucketId/parseBucketId, windowDays,
+ * addDays, validDate, localToday, clockPreviewDays, normalizeBucket.
  */
 
-export const WRITER_PREFIX = 'w';
+import { RRule } from './vendor/rrule.mjs';
+import {
+  parseVCalendar, serializeVCalendar, parseDTValue, sameWall,
+  triggerMinutes, wallToInstantUTC, formatDuration, tzOffsetMinutes,
+} from './ical.js';
+
 export const CAP_PER_BUCKET = 16; // §13
-export const WINDOW_BACK = 1; // [today-1 .. today+21] = 23 buckets (§13)
+export const WINDOW_BACK = 1;     // [today-1 .. today+21] = 23 buckets (§13)
 export const WINDOW_FWD = 21;
+export const PROJ_PREFIX = 'x';   // v4.2 derived-projection namespace
+
+/** Proton ACCENT_COLORS (WebClients packages/shared/lib/colors.ts, GPL-3.0). */
+export const PALETTE = [
+  '#8080FF', '#DB60D6', '#EC3E7C', '#F78400', '#936D58',
+  '#5252CC', '#A839A4', '#BA1E55', '#C44800', '#54473F',
+  '#415DF0', '#179FD9', '#1DA583', '#3CBB3A', '#B4A40E',
+  '#273EB2', '#0A77A6', '#0F735A', '#258723', '#807304',
+];
+
+/* ---------------- date helpers (v4.1 verbatim) ---------------- */
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const EVENT_ID_RE = /^[a-z]:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A real calendar date in YYYY-MM-DD form (rejects 2026-13-01 etc.). */
 export function validDate(s) {
   if (typeof s !== 'string' || !DATE_RE.test(s)) return false;
   const d = new Date(s + 'T00:00:00Z');
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
 
-/** "2026-11-03" -> "cal:20261103" (§13 id format). */
 export function bucketId(dateStr) {
   if (!validDate(dateStr)) throw new Error('bad_date');
   return 'cal:' + dateStr.replaceAll('-', '');
 }
 
-/** "cal:20261103" -> "2026-11-03", or null if not a calendar bucket id. */
 export function parseBucketId(id) {
   const m = /^cal:(\d{4})(\d{2})(\d{2})$/.exec(id);
   if (!m) return null;
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
-/** UTC date arithmetic on YYYY-MM-DD strings. */
 export function addDays(dateStr, n) {
   const d = new Date(dateStr + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
 
-/** The 23-day sliding window [today-1 .. today+21] (§13). */
 export function windowDays(today) {
   const out = [];
   for (let i = -WINDOW_BACK; i <= WINDOW_FWD; i++) out.push(addDays(today, i));
   return out;
 }
 
-/** Local calendar date of the browser (the clock/UI operate on local days). */
 export function localToday() {
   const d = new Date();
   return (
@@ -73,10 +79,283 @@ export function localToday() {
   );
 }
 
-/** Strict event validation; returns the event or null. */
-export function validateEvent(ev) {
+export function clockPreviewDays(today) {
+  const out = [];
+  for (let i = 0; i <= 7; i++) out.push(addDays(today, i));
+  return out;
+}
+
+/* ---------------- row id grammar (v4.2) ---------------- */
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const UID_MAX = 200; // docs/PROTOCOL-v4.2.md id budget
+
+export function cmetaId(uuid) {
+  if (!UUID_RE.test(uuid)) throw new Error('bad_uuid');
+  return 'cmeta:' + uuid;
+}
+
+/** "cmeta:{uuid}" → uuid, or null. */
+export function parseCmetaId(id) {
+  const m = /^cmeta:([0-9a-f-]{36})$/.exec(id);
+  return m ? m[1] : null;
+}
+
+export function evtId(calUuid, uid) {
+  if (!UUID_RE.test(calUuid) || typeof uid !== 'string' || !uid || uid.includes(':') || uid.length > UID_MAX) {
+    throw new Error('bad_evt_id');
+  }
+  return 'evt:' + calUuid + ':' + uid;
+}
+
+/** "evt:{cal}:{uid}" → {cal, uid}, or null. */
+export function parseEvtId(id) {
+  const m = /^evt:([0-9a-f-]{36}):([^:]{1,200})$/.exec(id);
+  return m ? { cal: m[1], uid: m[2] } : null;
+}
+
+/* ---------------- calendar metadata ---------------- */
+
+export function validateCalendarMeta(p) {
+  if (!p || typeof p !== 'object') return null;
+  if (p.v !== 1) return null;
+  if (typeof p.name !== 'string' || p.name.length === 0 || p.name.length > 100) return null;
+  if (typeof p.color !== 'string' || !/^#[0-9A-Fa-f]{6}$/.test(p.color)) return null;
+  return { v: 1, name: p.name, color: p.color.toUpperCase() };
+}
+
+export function newCalendarMeta(name, color) {
+  const m = validateCalendarMeta({ v: 1, name, color });
+  if (!m) throw new Error('invalid_calendar');
+  return m;
+}
+
+/* ---------------- evt row payload ---------------- */
+
+/**
+ * Validate + parse an evt row payload (VCALENDAR text).
+ * Returns { calendar, master, exceptions:[], uids:[..] } or null when
+ * structurally invalid (corrupt row: surfaced, never rewritten).
+ * Enforces the v4.2 one-UID-per-row rule.
+ */
+export function parseEvtPayload(text) {
+  if (typeof text !== 'string' || text.length === 0 || text.length > 200000) return null;
+  let cal;
+  try {
+    cal = parseVCalendar(text);
+  } catch {
+    return null;
+  }
+  const uids = new Set(cal.events.map((e) => e.uid));
+  if (uids.size !== 1) return null;
+  const uid = cal.events[0].uid;
+  const master = cal.events.find((e) => e.recurrenceId === null);
+  const exceptions = cal.events.filter((e) => e.recurrenceId !== null);
+  if (!master) return null; // every row needs the master
+  if (new Set(exceptions.map((e) => e.recurrenceId.date + 'T' + (e.recurrenceId.time || ''))).size !== exceptions.length) {
+    return null; // duplicate RECURRENCE-ID = corrupt
+  }
+  if (master.rrule && !/^FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)([;].*)?$/.test(master.rrule)) {
+    return null; // FREQ required first (RFC 5545 §3.3.10); SECONDLY/MINUTELY/HOURLY rejected (clock ecosystem scale)
+  }
+  return { calendar: cal, uid, master, exceptions };
+}
+
+/** Serialize an evt payload from {calendar} (round-trips unknown props). */
+export function serializeEvtPayload(parsed) {
+  return serializeVCalendar(parsed.calendar);
+}
+
+/* ---------------- wall-time helpers ---------------- */
+
+const T240 = /^(\d{2}):(\d{2}):(\d{2})$/;
+
+function wallToNaiveUTC(w) {
+  const m = T240.exec(w.time || '00:00:00');
+  if (!m) return null;
+  return Date.UTC(+w.date.slice(0, 4), +w.date.slice(5, 7) - 1, +w.date.slice(8, 10), +m[1], +m[2], +m[3]);
+}
+
+function naiveUTCToWall(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return {
+    date: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`,
+    time: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`,
+  };
+}
+
+/** Effective end wall time of a VEVENT (RFC 5545 §3.6.1 defaults). */
+export function effectiveEnd(ev) {
+  if (ev.dtend) return ev.dtend;
+  if (ev.duration !== null && ev.duration !== undefined) {
+    const startMs = wallToNaiveUTC(ev.dtstart);
+    // Duration arithmetic on wall-naive times is DST-naive; acceptable for
+    // the display path (real instants are only materialized for UNTIL).
+    const endMs = startMs + ev.duration * 1000;
+    return { ...naiveUTCToWall(endMs), tz: ev.dtstart.tz };
+  }
+  if (ev.dtstart.time === null) {
+    return { date: addDays(ev.dtstart.date, 1), time: null, tz: null }; // DATE: ends next day
+  }
+  return { ...ev.dtstart }; // zero-length timed event
+}
+
+/** Days a (possibly multi-day/all-day) event covers, inclusive. */
+export function spanDays(ev) {
+  const end = effectiveEnd(ev);
+  const lastDay =
+    end.time === null || end.time === '00:00:00'
+      ? addDays(end.date, end.time === '00:00:00' ? -1 : 0)
+      : end.date;
+  return { first: ev.dtstart.date, last: lastDay >= ev.dtstart.date ? lastDay : ev.dtstart.date };
+}
+
+/* ---------------- recurrence expansion ---------------- */
+
+/**
+ * Build an RRule for a master VEVENT operating on NAIVE WALL times
+ * (occurrence Dates are wall components as-if-UTC; the DST-correct
+ * expansion idiom for rrule.js). UNTIL in UTC (Z) form is converted to the
+ * event's timezone wall form first so the comparison stays instant-exact.
+ * Returns null when the rule cannot be used.
+ */
+function buildRRule(master) {
+  if (!master.rrule) return null;
+  const startMs = wallToNaiveUTC(master.dtstart);
+  if (startMs === null) return null;
+  let options;
+  try {
+    options = RRule.parseString(master.rrule);
+  } catch {
+    return null;
+  }
+  if (!options) return null;
+  const untilZ = /UNTIL=(\d{8}T\d{6}Z?)([;]|$)/.exec(master.rrule);
+  if (untilZ && untilZ[1].endsWith('Z')) {
+    try {
+      const untilInstant = new Date(
+        Date.UTC(
+          +untilZ[1].slice(0, 4), +untilZ[1].slice(4, 6) - 1, +untilZ[1].slice(6, 8),
+          +untilZ[1].slice(9, 11), +untilZ[1].slice(11, 13), +untilZ[1].slice(13, 15)
+        )
+      );
+      const tz = master.dtstart.tz && master.dtstart.tz !== 'UTC' ? master.dtstart.tz : 'UTC';
+      const off = tzOffsetCached(tz, untilInstant);
+      const wallMs = untilInstant.getTime() + off * 60000;
+      options.until = new Date(wallMs); // naive wall form
+    } catch {
+      return null;
+    }
+  } else if (untilZ) {
+    const u = untilZ[1];
+    options.until = new Date(Date.UTC(+u.slice(0, 4), +u.slice(4, 6) - 1, +u.slice(6, 8), 0, 0, 0));
+  }
+  options.dtstart = new Date(startMs);
+  try {
+    return new RRule(options);
+  } catch {
+    return null;
+  }
+}
+
+const offsetCache = new Map();
+function tzOffsetCached(tz, instant) {
+  const key = tz + '|' + Math.floor(instant.getTime() / 1800000); // 30-min buckets
+  let v = offsetCache.get(key);
+  if (v === undefined) {
+    v = tzOffsetMinutes(tz, instant);
+    offsetCache.set(key, v);
+  }
+  return v;
+}
+
+/**
+ * Expand one evt row's occurrences overlapping [fromDay, toDay] (inclusive,
+ * YYYY-MM-DD). Returns occurrence objects:
+ *  { rowId, calId, uid, recId:{date,time}|null, start:{date,time},
+ *    end:{date,time}, allDay:bool, isException:bool, isCancelled:bool,
+ *    master:VEvent (the component this occurrence renders from) }
+ * Overridden instances are replaced by their exception components; EXDATE'd
+ * instances are dropped; exceptions moved outside the master's series are
+ * still listed at their own date.
+ */
+export function expandEvtRow(parsed, rowId, fromDay, toDay) {
+  const { uid, master, exceptions } = parsed;
+  const out = [];
+  const mkOcc = (comp, recId, isException) => ({
+    rowId,
+    calId: (parseEvtId(rowId) || { cal: null }).cal,
+    uid,
+    recId,
+    start: { date: comp.dtstart.date, time: comp.dtstart.time },
+    end: (function () {
+      const e = effectiveEnd(comp);
+      return { date: e.date, time: e.time };
+    })(),
+    allDay: comp.dtstart.time === null,
+    isException,
+    isCancelled: comp.status === 'CANCELLED',
+    master: comp,
+  });
+
+  const overlaps = (occ) => {
+    const span = spanDays(occ.master);
+    return span.first <= toDay && span.last >= fromDay;
+  };
+
+  if (!master.rrule) {
+    const occ = mkOcc(master, null, false);
+    if (overlaps(occ)) out.push(occ);
+  } else {
+    const rule = buildRRule(master);
+    if (rule) {
+      const fromMs = Date.UTC(+fromDay.slice(0, 4), +fromDay.slice(5, 7) - 1, +fromDay.slice(8, 10), 0, 0, 0);
+      const toMs = Date.UTC(+toDay.slice(0, 4), +toDay.slice(5, 7) - 1, +toDay.slice(8, 10), 24, 0, 0);
+      let occs;
+      try {
+        occs = rule.between(new Date(fromMs), new Date(toMs), true);
+      } catch {
+        occs = [];
+      }
+      const overridden = new Set(exceptions.map((e) => e.recurrenceId.date + '|' + (e.recurrenceId.time || '')));
+      for (const o of occs) {
+        const wall = naiveUTCToWall(o.getTime());
+        const key = wall.date + '|' + wall.time;
+        if (master.exdates.some((x) => sameWall(x, wall))) continue; // EXDATE removal
+        if (overridden.has(key)) continue; // replaced by its exception below
+        // All-day masters keep DATE semantics on every occurrence (the
+        // naive expansion yields 00:00:00; the model needs time === null).
+        const occStart = master.dtstart.time === null
+          ? { date: wall.date, time: null, tz: null }
+          : { ...wall, tz: master.dtstart.tz };
+        const comp = { ...master, dtstart: occStart };
+        out.push(mkOcc(comp, wall, false));
+      }
+    } else {
+      // Unusable rule: fall back to the master's own start only (flagged
+      // upstream as an expansion limitation, never silently dropped).
+      const occ = mkOcc(master, null, false);
+      if (overlaps(occ)) out.push(occ);
+    }
+  }
+
+  // Exceptions render at their own (possibly moved) date.
+  for (const ex of exceptions) {
+    const occ = mkOcc(ex, { date: ex.recurrenceId.date, time: ex.recurrenceId.time }, true);
+    if (overlaps(occ)) out.push(occ);
+  }
+  return out;
+}
+
+/* ---------------- §13 day-bucket derivation (v4.2) ---------------- */
+
+const BUCKET_EVENT_ID_RE = /^[a-z]:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** v4.1 §13 bucket payload validation (verbatim semantics). */
+export function validateBucketEvent(ev) {
   if (!ev || typeof ev !== 'object') return null;
-  if (typeof ev.id !== 'string' || !EVENT_ID_RE.test(ev.id)) return null;
+  if (typeof ev.id !== 'string' || !BUCKET_EVENT_ID_RE.test(ev.id)) return null;
   if (!validDate(ev.date)) return null;
   if (!Number.isInteger(ev.hh) || ev.hh < 0 || ev.hh > 23) return null;
   if (!Number.isInteger(ev.mm) || ev.mm < 0 || ev.mm > 59) return null;
@@ -85,113 +364,77 @@ export function validateEvent(ev) {
   return { id: ev.id, date: ev.date, hh: ev.hh, mm: ev.mm, title: ev.title, priority: ev.priority };
 }
 
-/**
- * Strict bucket payload validation. Returns {events} or null when ANY event is
- * malformed — strictness is deliberate: a partially-corrupt bucket must be
- * surfaced as an error, never silently rewritten (which would lose data).
- */
 export function normalizeBucket(p) {
   if (!p || typeof p !== 'object' || !Array.isArray(p.events)) return null;
   const events = [];
   for (const ev of p.events) {
-    const v = validateEvent(ev);
+    const v = validateBucketEvent(ev);
     if (!v) return null;
     events.push(v);
   }
   const ids = new Set(events.map((e) => e.id));
-  if (ids.size !== events.length) return null; // duplicate ids = corrupt
+  if (ids.size !== events.length) return null;
   return { events };
 }
 
-/** New owned event (crypto.randomUUID is native in browsers & Node ≥ 16.7). */
-export function makeEvent(fields) {
-  const ev = validateEvent({
-    id: WRITER_PREFIX + ':' + crypto.randomUUID(),
-    date: fields.date,
-    hh: fields.hh,
-    mm: fields.mm,
-    title: fields.title,
-    priority: fields.priority,
-  });
-  if (!ev) throw new Error('invalid_event');
-  return ev;
+/**
+ * Derive one day's bucket entries from occurrence objects (as produced by
+ * expandEvtRow). Deterministic (same inputs → same bytes): entries are the
+ * §13 projection; cancelled events are excluded; all-day events project at
+ * 00:00 with priority 1; timed events at their wall time with priority 2.
+ */
+export function deriveBucketEntries(occurrences, day) {
+  const entries = [];
+  for (const occ of occurrences) {
+    if (occ.isCancelled) continue;
+    if (!(occ.start.date <= day && day <= spanDays(occ.master).last)) continue;
+    const t = occ.start.time || '00:00:00';
+    entries.push({
+      id: PROJ_PREFIX + ':' + occ.uid,
+      date: day,
+      hh: +t.slice(0, 2),
+      mm: +t.slice(3, 5),
+      title: occ.master.summary || '(untitled)',
+      priority: occ.allDay ? 1 : 2,
+    });
+  }
+  return capDerived(entries);
 }
 
-/** Display order: time, then priority (0 = highest), then id for stability. */
-export function sortEvents(events) {
+/** Deterministic §13 cap: keep (priority, id) order, drop the tail. */
+export function capDerived(entries, cap = CAP_PER_BUCKET) {
+  const sorted = [...entries].sort(
+    (a, b) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+  return sorted.slice(0, cap);
+}
+
+/** Display order for clock/UI lists: time, priority, id (§13 v4.1 order). */
+export function sortBucketEvents(events) {
   return [...events].sort(
     (a, b) => a.hh - b.hh || a.mm - b.mm || a.priority - b.priority || (a.id < b.id ? -1 : 1)
   );
 }
 
-/**
- * §13 ownership: upsert an OWN event into a bucket's event list.
- * Throws on attempts to modify another writer's entry.
- */
-export function applyEvent(events, ev, ownPrefix) {
-  if (!ev.id.startsWith(ownPrefix + ':')) throw new Error('ownership_violation');
-  const i = events.findIndex((e) => e.id === ev.id);
-  if (i >= 0) {
-    if (!events[i].id.startsWith(ownPrefix + ':')) throw new Error('ownership_violation');
-    const copy = [...events];
-    copy[i] = ev;
-    return copy;
+/** Derive the full 23-day window's buckets from a parsed-row map. */
+export function deriveWindowBuckets(parsedRows, today) {
+  const days = windowDays(today);
+  const fromDay = days[0];
+  const toDay = days[days.length - 1];
+  const byDay = new Map(days.map((d) => [d, []]));
+  for (const [rowId, parsed] of parsedRows) {
+    // Expand only over the window (occurrences carry their own spans).
+    const occs = expandEvtRow(parsed, rowId, fromDay, toDay);
+    for (const occ of occs) {
+      const span = spanDays(occ.master);
+      for (const d of days) {
+        if (occ.start.date <= d && d <= span.last) byDay.get(d).push(occ);
+      }
+    }
   }
-  return [...events, ev];
-}
-
-/** §13 ownership: remove an OWN event. Throws for other writers' entries. */
-export function removeEvent(events, id, ownPrefix) {
-  const ev = events.find((e) => e.id === id);
-  if (!ev) return { events, removed: false };
-  if (!ev.id.startsWith(ownPrefix + ':')) throw new Error('ownership_violation');
-  return { events: events.filter((e) => e.id !== id), removed: true };
-}
-
-/**
- * §13 capacity: <= 16 events per bucket-day. A writer over cap drops ITS OWN
- * lowest-priority entries (never the other writer's) and the drop is surfaced
- * to the caller. If the OTHER writers' entries alone exceed the cap, they are
- * all kept (a writer never deletes another writer's data) and all own entries
- * are dropped.
- */
-export function capEvents(events, ownPrefix, cap = CAP_PER_BUCKET) {
-  if (events.length <= cap) return { events: sortEvents(events), dropped: [] };
-  const own = events.filter((e) => e.id.startsWith(ownPrefix + ':'));
-  const other = events.filter((e) => !e.id.startsWith(ownPrefix + ':'));
-  // Own entries kept by priority (0 = highest; ties broken deterministically).
-  const ownSorted = [...own].sort(
-    (a, b) => a.priority - b.priority || (a.id < b.id ? -1 : 1)
-  );
-  const keepCount = cap - other.length;
-  if (keepCount <= 0) {
-    return { events: sortEvents(other), dropped: own };
-  }
-  const kept = ownSorted.slice(0, keepCount);
-  const dropped = ownSorted.slice(keepCount);
-  return { events: sortEvents([...other, ...kept]), dropped };
-}
-
-/** §13 reader behaviour (the clock renders today + next 7 days). */
-export function clockPreviewDays(today) {
-  const out = [];
-  for (let i = 0; i <= 7; i++) out.push(addDays(today, i));
+  const out = new Map();
+  for (const d of days) out.set(d, deriveBucketEntries(byDay.get(d), d));
   return out;
 }
 
-/** Human label for a writer prefix (ownership badge in the UI). */
-export function writerLabel(prefix) {
-  return (
-    {
-      w: 'this app',
-      d: 'DAVx5',
-      t: 'trudido',
-    }[prefix] || 'ext'
-  );
-}
-
-/** Prefix of an event id ("w:uuid" -> "w"). */
-export function eventPrefix(ev) {
-  const i = ev.id.indexOf(':');
-  return i > 0 ? ev.id.slice(0, i) : '?';
-}
+export { triggerMinutes, formatDuration, parseDTValue, sameWall, wallToInstantUTC };

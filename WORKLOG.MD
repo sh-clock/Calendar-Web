@@ -488,6 +488,83 @@ VLM audit (glm-5v): login screen, calendar grid (incl. weekday alignment Oct-1�
 
 <!-- WAVE-3-ANCHOR -->
 
+## TASK 2 (from user, 2026-10-31) — THREE SUB-TASKS
+
+1. **UI overhaul of the PoC** — base loosely on ProtonMail WebClients (Proton
+   Calendar); look + interactions as identical as possible; do NOT copy
+   Proton-only features (meet, share, email/participants, bookings);
+   "debloat" external features; MAINTAIN all calendar features: drag & drop,
+   recurring events, multiple calendars with different colors.
+2. **Working davx5 fork** (repo: sh-clock/davx, fork of bitfireAT/davx5-ose) —
+   goal: "an easy fork of the protocol into the davx app to allow for android
+   calendar sync. Therefore, the protocol must ensure that ALL caldav features
+   are met." Write + extensively test. Android cannot be emulated here → use
+   exact verbatim code in a JVM harness (precedent: davx5's own
+   core/src/test CalDavCollectionTest.kt MockEngine pattern).
+3. **Modify the protocol and the worker** where necessary for compatibility.
+
+PAT (new, 2026-10-31): verified via GitHub API — login `sh-clock`, full
+admin/maintain/push/pull on BOTH `sh-clock/Calendar-Web` and `sh-clock/davx`
+(fork of bitfireAT/davx5-ose @ v4.5.22-beta.2, 66MB). No missing permissions
+for code work. (Pages:write was already flagged as missing in Task 1 delivery —
+Pages site creation remains a manual owner step.)
+
+## ARCHITECTURE DECISIONS — Task 2 (evidence-based)
+
+- **D17 [ARCH] v4.2 event rows carry iCalendar.** New row type
+  `evt:{cal}:{uid}` whose plaintext payload is a full RFC 5545 VCALENDAR text
+  (one UID per row: master VEVENT + its RECURRENCE-ID exceptions). Rationale:
+  davx5's sync seam (`core/resource/remote/WebDavCollection.kt` interface, 7
+  operations) + `CalendarSyncManager` are iCalendar-native — carrying RFC 5545
+  payloads verbatim makes the fork a thin adapter and guarantees CalDAV data
+  parity (RRULE/EXDATE/exceptions/reminders/description/location/status/
+  transparency all have native iCalendar + Android CalendarProvider columns).
+  Evidenced by Explore agent 8ee36d1d (davx map) — verify by reading the
+  files before implementing.
+- **D18 [ARCH] CalDAV↔v4.2 mapping.** resource URL ↔ row id; ETag ↔ `ver`
+  (string form); sync-token/PROPFIND listing ↔ GET /rows manifest
+  (id+ver set); multiget ↔ per-row GET (decrypted to iCalendar text);
+  If-Match ↔ ver+1 with rebase detection (conflict → the dav4jvm
+  PreconditionFailedException vocabulary, so SyncManager's existing handling
+  applies); calendar collection ↔ `cmeta:{uuid}` row
+  (payload JSON {v,name,color}); displayname/color ↔ cmeta fields.
+  Server needs NO new logic (row store is type-blind, §6/§9) except the
+  §22 minor version bump to "4.2".
+- **D19 [ARCH] day buckets become a derived projection.** §13 `cal:{yyyymmdd}`
+  buckets remain the CLOCK's read model, v4.1 format preserved
+  ({events:[{id,date,hh,mm,title,priority}]}); v4.2 UI writers regenerate
+  them (idempotent full derivation per day) from evt rows after mutations +
+  on sync. Bucket entry ids use the `x:{uid}` prefix (derived-namespace,
+  single projection per event; documented v4.2 §13b). The 23-day window
+  rotation is unchanged. evt/cmeta rows have NO window.
+- **D20 [UI] Proton look = ported tokens, vanilla implementation.** Design
+  tokens extracted from WebClients source (snow theme + calendar SCSS,
+  verbatim values in css/style.css comments): primary #6d4aff, text-norm
+  #0c0c14, text-weak #5c5958, border-weak #eae7e4, background-weak #f5f4f2,
+  14px base Inter/system stack, radii 4/8/12, sidebar 250px, header 60px,
+  28px month chip rows, all-day chip = solid calendar color + white text +
+  5px darker left bar (HSL l−0.05/s−0.05 per gen-accent-shades.ts), part-day
+  chip = 4px color dot + time + semibold title on plain bg, day-number
+  1.75em box radius 8, today = primary bold + border, no adjacent-month
+  dimming in main grid, +N more overflow, custom document-capture-mousedown
+  DnD (no library), modal editor with icon rows (title/datetime+all-day+
+  frequency/calendar/location/notifications/description), mini calendar
+  (7-col grid aspect 1:1), calendar list with color checkboxes. Calendar
+  color palette = Proton ACCENT_COLORS (20 hexes, extracted from
+  packages/shared/lib/colors.ts).
+- **D21 [DEP] vendored rrule.js 2.8.1 (BSD-3-Clause)** for web-client RRULE
+  expansion (verified via npm; license-compatible, attribution header kept).
+  Timezone wall-time↔instant math via native Intl.DateTimeFormat (no tz
+  library). davx side uses ical4j (already a dependency).
+- **D22 [SCOPE] UI feature set** (debloated): month view + mini calendar +
+  calendar list/CRUD/colors + event popover/modal + drag&drop + recurrence
+  (presets + custom) + all-day + description/location + reminders (VALARM)
+  + keyboard shortcuts (n/t/arrows/esc). REMOVED relative to Proton:
+  attendees/participants/RSVP, video conferencing, per-event custom color,
+  booking/scheduling, search, commander, share links, email integration,
+  paid features. The Clock preview panel (§13 reader) is retained — it is
+  the ecosystem's core feature, not external bloat.
+
 ## Change Log
 
 | Date | Author | Change |
