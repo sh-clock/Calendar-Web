@@ -617,3 +617,35 @@ BROWSER E2E + VLM record below).
   notes recorded below; no code change.
 - C10 deployment order: WORKER FIRST, then Pages — enforced in the deploy
   procedure of this wave.
+
+## TASK 2.1 — VERIFICATION & DEPLOYMENT RECORD (2026-10-31, wave 4)
+
+- Local (workerd): core-unit **164/164**, api-suite **138/138** (incl. new
+  PHASE V42: evt/cmeta rows, foreign @-UID, 241-char id budget, mixed
+  manifest, roundtrip + rebase echo + class gate), crypto-parity 38/38,
+  §19 backup/retention/restore ALL GREEN.
+- Browser E2E re-verified after wave-4 fixes: drag ghost renders (B1),
+  custom-UNTIL RRULE parses + expands exactly Nov5/Nov19 (B2),
+  delete-after-create works (B3), drag "This event" creates a proper
+  RECURRENCE-ID exception Oct12→Oct14 (B4), modal backdrops dim (B5).
+- **Production deployment: ALREADY v4.2** (deployed by the pre-crash
+  session before the context loss; verified now: /version → 4.2, evt
+  PUT/GET/DELETE roundtrip EXACT, CORS Pages-origin 204 / foreign 404).
+  Pre-crash test rows (2 cmeta + 2 evt) deleted → 23 empty buckets remain
+  (clean delivery state; the client bootstraps "My calendar" on first sync).
+- **BLOCKER (user action needed): the Cloudflare API TOKEN was lost with
+  the crashed session** (it existed only in chat context; .secrets/prod.env
+  holds only worker secrets ADMIN_SECRET/INTERNAL_TOKEN). Deployment of
+  FUTURE worker changes is blocked until the user re-provides it. Current
+  production is already the v4.2 build, so nothing is pending right now.
+- GitHub: sh-clock/Calendar-Web @ main — all work pushed continuously.
+
+## Change Log (Task 2.1)
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2026-10-31 | Main orchestrator | Crash recovery: state reconstructed, WIP committed+pushed. |
+| 2026-10-31 | Main orchestrator | New js/app.js (Proton UI port: layout/DnD/popover/editor/mini-cal/calendar list/clock preview), v4.2 client sync (manifest diff, rotation, derivation, RMW). |
+| 2026-10-31 | Main orchestrator | Worker §22 → 4.2; index.html cleaned; ical/core bug fixes (spanDays RFC-exclusive, RDATE expansion+serialization, between() bound, all-day key normalization). |
+| 2026-10-31 | Agents A/B/C + orchestrator | Audit wave 4: 1 blocker + 12 majors + 19 minors found; all majors + high-value minors fixed (see W4 table); +27 tests. |
+| 2026-10-31 | Main orchestrator | E2E + VLM visual audit; visual fixes (SVG icons, close-X, copy). Production verified v4.2 + cleaned. |
