@@ -136,9 +136,10 @@ function eventDateHeader(ev) {
 
 const WEEKDAY_LONG = (() => {
   const out = [];
+  // Monday-first ordering (2023-01-02 was a Monday); every consumer indexes
+  // this array Monday-first, matching the grid layout.
   for (let i = 0; i < 7; i++) {
-    // 2023-01-01 was a Sunday; Monday-first ordering
-    out.push(new Intl.DateTimeFormat(locale, { weekday: 'long' }).format(new Date(2023, 0, 1 + i)));
+    out.push(new Intl.DateTimeFormat(locale, { weekday: 'long' }).format(new Date(2023, 0, 2 + i)));
   }
   return out;
 })();
@@ -829,6 +830,7 @@ function renderMonth() {
         type: 'button',
         'aria-current': day === today ? 'date' : null,
         'aria-pressed': day === state.selectedDate ? 'true' : null,
+        'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
         title: fmtDateLong.format(new Date(day + 'T00:00:00')),
       });
       b.addEventListener('click', () => openMorePopover(day, b.getBoundingClientRect()));
@@ -838,20 +840,20 @@ function renderMonth() {
     week.appendChild(buttons);
 
     // Event chips area — the DnD row element (data-row).
-    const rowEvents = el('div', 'daygrid-rowevents unstyled', { role: 'list', 'data-row': String(rowIndex) });
-    const eventsInRow = splitDayEventsInInterval(
-      events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0])),
-      days[0], days[6]
-    );
+    const rowEventsEl = el('div', 'daygrid-rowevents unstyled', { role: 'list', 'data-row': String(rowIndex) });
+    // NOTE: splitDayEventsInInterval indexes into the array it is GIVEN —
+    // keep one filtered array and index into THAT (never the full list).
+    const rowEvents = events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0]));
+    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], days[6]);
     const laid = dayGridRowLayout(eventsInRow, numberOfRows);
     for (const s of laid.styles) {
       if (s.type === 'more') {
-        rowEvents.appendChild(moreChip(s.dayIdx, days, laid.summary, events, eventsInRow, numberOfRows));
+        rowEventsEl.appendChild(moreChip(s.dayIdx, days, laid.summary, rowEvents, eventsInRow, numberOfRows));
       } else {
-        rowEvents.appendChild(eventChip(s, eventsInRow[s.idx] ? events[eventsInRow[s.idx].idx] : null, days));
+        rowEventsEl.appendChild(eventChip(s, eventsInRow[s.idx] ? rowEvents[eventsInRow[s.idx].idx] : null, days));
       }
     }
-    week.appendChild(rowEvents);
+    week.appendChild(rowEventsEl);
     rowsWrap.appendChild(week);
   });
 
@@ -1377,7 +1379,9 @@ function openEditor(form) {
   /* ---- title ---- */
   const rowTitle = el('div', 'form-row');
   const titleInput = el('input', null, { type: 'text', value: f.title, placeholder: 'Add title', 'aria-label': 'Title' });
-  titleInput.addEventListener('input', () => { f.title = titleInput.value; });
+  const onTitle = () => { f.title = titleInput.value; };
+  titleInput.addEventListener('input', onTitle);
+  titleInput.addEventListener('change', onTitle);
   rowTitle.appendChild(el('span', 'ic'));
   rowTitle.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2v3M8 11v3M2 8h3M11 8h3" stroke-linecap="round"/></svg>';
   rowTitle.appendChild(titleInput);
@@ -1393,6 +1397,9 @@ function openEditor(form) {
     timeI.classList.add('narrow');
     const apply = () => {
       f[which] = { date: dateI.value || f[which].date, time: f.allDay ? null : (timeI.value || f[which].time) };
+      // Frequency preset labels are derived from the START date (weekday /
+      // month-day / date) — refresh them like Proton does on date change.
+      if (which === 'start') refreshFreqLabels();
     };
     dateI.addEventListener('change', apply);
     timeI.addEventListener('change', apply);
@@ -1486,7 +1493,9 @@ function openEditor(form) {
   rowLoc.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 14s4.5-4.2 4.5-7.5a4.5 4.5 0 1 0-9 0C3.5 9.8 8 14 8 14zm0-6a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z" stroke-linejoin="round"/></svg>';
   const locBody = el('div', 'form-row-body');
   const locI = el('input', null, { type: 'text', value: f.location, placeholder: 'Add location', 'aria-label': 'Location' });
-  locI.addEventListener('input', () => { f.location = locI.value; });
+  const onLoc = () => { f.location = locI.value; };
+  locI.addEventListener('input', onLoc);
+  locI.addEventListener('change', onLoc);
   locBody.appendChild(locI);
   rowLoc.appendChild(locBody);
   box.appendChild(rowLoc);
@@ -1531,7 +1540,9 @@ function openEditor(form) {
   const descBody = el('div', 'form-row-body');
   const descT = el('textarea', null, { placeholder: 'Add description', 'aria-label': 'Description' });
   descT.value = f.description;
-  descT.addEventListener('input', () => { f.description = descT.value; });
+  const onDesc = () => { f.description = descT.value; };
+  descT.addEventListener('input', onDesc);
+  descT.addEventListener('change', onDesc);
   descBody.appendChild(descT);
   rowDesc.appendChild(descBody);
   box.appendChild(rowDesc);
@@ -2157,12 +2168,10 @@ function currentGridModel() {
   const { rows } = monthRows(state.viewYM);
   const events = viewEventsForRange(rows[0][0], rows[rows.length - 1][6]);
   const perRow = rows.map((days) => {
-    const eventsInRow = splitDayEventsInInterval(
-      events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0])),
-      days[0], days[6]
-    );
+    const rowEvents = events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0]));
+    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], days[6]);
     const laid = dayGridRowLayout(eventsInRow, Math.max(state.gridRows, 0));
-    return { days, events, eventsInRow, eventsInRowStyles: laid.styles, eventsInRowSummary: laid.summary };
+    return { days, rowEvents, eventsInRow, eventsInRowStyles: laid.styles, eventsInRowSummary: laid.summary };
   });
   return { rows, events, perRow };
 }
@@ -2195,7 +2204,7 @@ function handleDayGridMouseDown(e) {
   }
 
   const targetIndex = findContainingParent(rowElement, e.target);
-  const { eventsInRowStyles, eventsInRow, eventsInRowSummary } = model.perRow[targetRow] || {};
+  const { eventsInRowStyles, eventsInRow, eventsInRowSummary, rowEvents } = model.perRow[targetRow] || {};
   if (!Array.isArray(eventsInRowStyles) || targetIndex >= eventsInRowStyles.length) return;
   const eventStyle = eventsInRowStyles[targetIndex];
   if (!eventStyle) return;
@@ -2204,8 +2213,9 @@ function handleDayGridMouseDown(e) {
     return createUpMoreEvent(() => openMorePopover(days[eventStyle.idx], rowElement.getBoundingClientRect()));
   }
 
+  // eventsInRow[...].idx indexes the row's FILTERED event list (rowEvents).
   const eventIdx = eventsInRow[eventStyle.idx].idx;
-  const ev = model.events[eventIdx];
+  const ev = rowEvents[eventIdx];
   return createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow: days.length, model, dayGridEl });
 }
 
@@ -2293,12 +2303,15 @@ function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, d
   e.preventDefault();
   e.stopPropagation();
 
-  const handleMouseMove = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
+  // NOTE: the mouse event parameter is `me` — the outer `ev` is the VIEW
+  // EVENT being dragged (Proton keeps them distinct too; shadowing here
+  // previously threw inside this handler and silently killed every drag).
+  const handleMouseMove = (me) => {
+    me.preventDefault();
+    me.stopPropagation();
     const rect = dayGridEl.getBoundingClientRect();
-    currentTargetRow = getTargetIndex(ev.pageY, rect.top, rect.height, model.perRow.length);
-    const currentTargetDay = getTargetIndex(ev.pageX, rect.left, rect.width, daysPerRow);
+    currentTargetRow = getTargetIndex(me.pageY, rect.top, rect.height, model.perRow.length);
+    const currentTargetDay = getTargetIndex(me.pageX, rect.left, rect.width, daysPerRow);
     const currentIdx = currentTargetRow * daysPerRow + currentTargetDay;
     if (currentIdx === oldIdx) return;
     oldIdx = currentIdx;

@@ -276,6 +276,27 @@ function tzOffsetCached(tz, instant) {
 }
 
 /**
+ * Build the per-occurrence component for a master at a shifted start: the
+ * master's DTEND (when present) moves by the SAME whole-day offset so the
+ * component is self-consistent — the occurrence's dtstart AND dtend belong
+ * to that occurrence (DURATION is relative and needs no shift).
+ */
+function occurrenceComponent(master, occStart) {
+  const comp = { ...master, dtstart: occStart };
+  if (master.dtend) {
+    const dayShift = dayDiff(master.dtstart.date, occStart.date);
+    comp.dtend = { date: addDays(master.dtend.date, dayShift), time: master.dtend.time, tz: master.dtend.tz };
+  }
+  return comp;
+}
+
+function dayDiff(a, b) {
+  return Math.round(
+    (new Date(b + 'T00:00:00Z').getTime() - new Date(a + 'T00:00:00Z').getTime()) / 86400000
+  );
+}
+
+/**
  * Expand one evt row's occurrences overlapping [fromDay, toDay] (inclusive,
  * YYYY-MM-DD). Returns occurrence objects:
  *  { rowId, calId, uid, recId:{date,time}|null, start:{date,time},
@@ -342,7 +363,7 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
         const occStart = isAllDayMaster
           ? { date: naiveWall.date, time: null, tz: null }
           : { ...naiveWall, tz: master.dtstart.tz };
-        const comp = { ...master, dtstart: occStart };
+        const comp = occurrenceComponent(master, occStart);
         out.push(mkOcc(comp, isAllDayMaster ? { date: naiveWall.date, time: null } : naiveWall, false));
       }
     } else {
@@ -364,7 +385,7 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
       const wall = { date: rd.date, time: rd.time === null ? null : rd.time };
       if (master.exdates.some((x) => sameWall(x, wall))) continue;
       if (overriddenSet.has(wall.date + '|' + (wall.time || ''))) continue;
-      const comp = { ...master, dtstart: { date: rd.date, time: rd.time, tz: master.dtstart.tz } };
+      const comp = occurrenceComponent(master, { date: rd.date, time: rd.time, tz: master.dtstart.tz });
       const occ = mkOcc(comp, { date: rd.date, time: rd.time }, false);
       if (overlaps(occ)) out.push(occ);
     }

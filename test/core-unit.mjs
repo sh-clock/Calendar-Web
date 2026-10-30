@@ -294,6 +294,30 @@ const rowOf = (lines) => { const p = parseEvtPayload(V(lines)); return p; };
   eq('COUNT honored', expandEvtRow(pC, evtId(CALID, 'u3'), '2026-10-01', '2026-10-31').length, 2);
 }
 {
+  // Recurring master occurrences carry their OWN shifted DTEND (regression:
+  // occurrence components used to inherit the master's unshifted DTEND).
+  const p = rowOf(evLines({
+    uid: 'dtshift', dtstamp: 'DTSTAMP:20260101T000000Z',
+    dtstart: 'DTSTART:20261005T093000Z', dtend: 'DTEND:20261005T100000Z',
+    rrule: 'FREQ=WEEKLY;BYDAY=MO',
+  }));
+  const occs = expandEvtRow(p, evtId(CALID, 'dtshift'), '2026-10-01', '2026-10-31');
+  const o12 = occs.find((o) => o.start.date === '2026-10-12');
+  eq('occurrence end shifts with start (Oct 12)', [o12.start.time, o12.end.time, o12.end.date], ['09:30:00', '10:00:00', '2026-10-12']);
+  const o19 = occs.find((o) => o.start.date === '2026-10-19');
+  eq('occurrence end shifts with start (Oct 19)', [o19.end.date, o19.end.time], ['2026-10-19', '10:00:00']);
+  // Multi-day all-day master: every occurrence spans one day at its own date.
+  const p2 = rowOf(evLines({
+    uid: 'dtshift2', dtstamp: 'DTSTAMP:20260101T000000Z',
+    dtstart: 'DTSTART;VALUE=DATE:20261005', dtend: 'DTEND;VALUE=DATE:20261007', rrule: 'FREQ=WEEKLY;BYDAY=MO',
+  }));
+  const occs2 = expandEvtRow(p2, evtId(CALID, 'dtshift2'), '2026-10-01', '2026-10-31');
+  const o12b = occs2.find((o) => o.start.date === '2026-10-12');
+  // Master spans Oct 5-6 (DTEND Oct 7 exclusive); the Oct 12 occurrence
+  // carries the SAME 2-day span at its own date.
+  eq('multi-day occurrence span shifts (Oct 12-13)', spanDays(o12b.master), { first: '2026-10-12', last: '2026-10-13' });
+}
+{
   // monthly on day 31 (short months skip) + yearly
   const pM = rowOf(evLines({ uid: 'm1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261031T120000Z', rrule: 'FREQ=MONTHLY' }));
   const occs = expandEvtRow(pM, evtId(CALID, 'm1'), '2026-10-01', '2027-01-31');
