@@ -578,3 +578,42 @@ Pages site creation remains a manual owner step.)
 | 2026-10-30 | Main orchestrator | Deployed calendar-poc to Cloudflare (see DEPLOYMENT RECORD); secrets set. |
 | 2026-10-30 | Main orchestrator | Full remote conformance suite 126/126 vs production; remote D1 verified; final bootstrap (test password + dummy AES key). |
 | 2026-10-30 | Main orchestrator | Browser E2E + VLM visual audit ALL PASS (see record); localhost CORS window reverted; Pages workflow ready (pending owner's Source:GitHub Actions flip — PAT lacks Pages:write). |
+
+## AUDIT WAVE 4 (Task 2.1 — v4.2 client + UI, 2026-10-31)
+
+Agents A (calendar-core/ical), B (UI/app.js), C (protocol/worker/tests), run in
+parallel, all findings orchestrator-cross-checked before fixing. Suite state
+entering the wave: core-unit 137/137, api-suite 126/126, E2E green (see
+BROWSER E2E + VLM record below).
+
+### Confirmed findings (→ fixed in this wave)
+
+| # | Src | Severity | Finding |
+|---|-----|----------|---------|
+| W4-1 | A1 | BLOCKER | expandEvtRow: rrule.between bounds occurrences by START only → occurrences starting before fromDay whose span overlaps the window are dropped (deriveWindowBuckets has no margin; UI margin ±7d insufficient for >7d spans). |
+| W4-2 | A2 | MAJOR | EXDATE / RECURRENCE-ID / RDATE matched by wall-STRING equality; UTC (Z) or foreign-TZID forms never match (RFC-legal; breaks davx5-written events). |
+| W4-3 | A3+B6+C1 | MAJOR | x:{uid} projection id violates v4.1 §13 [a-z]:{uuid} grammar for non-UUID UIDs → the client writes buckets its own reader rejects → permanent corrupt-flagged day. davx5 reuses foreign UIDs verbatim, so this WILL fire in production. Same UID in 2 calendars also collides (spec's own move procedure). |
+| W4-4 | A4 | MAJOR | RDATE duplicating an RRULE occurrence → duplicate ids in one bucket → normalizeBucket null (same corruption path). |
+| W4-5 | A6 | MAJOR | VALARM TRIGGER params dropped on round-trip (RELATED=END etc.); triggerParams field dead → alarms corrupted for downstream clients. |
+| W4-6 | A7 | MAJOR | SUMMARY/DESCRIPTION/LOCATION params (LANGUAGE, ALTREP) silently dropped on round-trip — violates the module's own never-drop contract. |
+| W4-7 | B1 | MAJOR | drawGhost's `diffDays` PARAMETER shadows module diffDays → TypeError on every drag-move; ghost never renders (drag still commits). Same species as the createDragMoveEvent shadowing fixed earlier. |
+| W4-8 | B2 | MAJOR | Custom-frequency UNTIL for timed events emits 'T14:3000Z' (colon not stripped) → unparseable RRULE persisted → recurrence silently dies. |
+| W4-9 | B3 | MAJOR | Vestigial `editor.mode === 'create'` guard in deleteEvent + mode never reset on modal close → Delete is a silent no-op after any create session. |
+| W4-10 | B4 | MAJOR | Drag "This event" of a recurring occurrence without a pre-existing exception → component_not_found (applyDayShift doesn't create the missing exception, unlike saveEvent). |
+| W4-11 | B5 | MAJOR | Modal backdrops inert: .modal-backdrop CSS dead (no element carries it); recur/cal/freq backdrops 0×0 undimmed; editor/popover never dim. |
+| W4-12 | C2 | MAJOR | api-suite has ZERO evt:/cmeta: row coverage — the v4.2 "no new server logic" claim pinned only by ad-hoc probe. |
+| W4-13 | A8/B7/B8/B9/B11/B13/B16/B17/B19/A9/A11/A13/A14/A10/C4/C6 | MINOR | see git history of this wave (floating UNTIL time; popover all-day end off-by-one; corrupt-set not pruned; delete paths unguarded/uncaught; custom-freq cancel leaves CUSTOM; .freq selector dead; `window` shadowing; comparator returns 1 on equal; TRANSP kept on all-day→timed; two-master rows accepted; duplicate single-occurring props accepted; derived title >500 unvalidated; UID cap not enforced on parse; PT0S/PERIOD destroy rows; stale doc comments). |
+
+### Dispositions recorded for accepted items (no code change)
+
+- B21 ±7d expansion margin: superseded by W4-1's span-aware core fix.
+- B22 New-event seeds from today not selectedDate: accepted (Proton seeds from
+  the view date; single-user PoC, today default documented).
+- B23 createAutoScroll not ported: accepted for the PoC (month grid rarely
+  scrolls; noted as fidelity gap).
+- B20 cap-drop toast for derived buckets: accepted (clock display cap, §13).
+- A12 wallToInstantUTC non-existent-time comment: doc-comment corrected only.
+- A15/A16/A17, B24/B25/B26, C3/C5/C8/C10: documentation / deployment-order
+  notes recorded below; no code change.
+- C10 deployment order: WORKER FIRST, then Pages — enforced in the deploy
+  procedure of this wave.
