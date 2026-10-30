@@ -462,6 +462,30 @@ Agent C1 (final pre-deploy verification): all 13 wave-2 fixes VERIFIED-CORRECT (
 - Version ff82e137-477f-494f-b44b-930835b93a1f · bindings: STORE (Durable Object, SQLite), BACKUP (D1 calendar-poc-backup 010ed43d-a145-400e-adba-e790c00349c3), ALLOWED_ORIGIN=https://sh-clock.github.io · cron trigger 0 3 * * *.
 - Secrets ADMIN_SECRET / INTERNAL_TOKEN set post-deploy via `wrangler secret put` (generated hex64, stored at .secrets/prod.env OUTSIDE the repo, never committed).
 
+
+## BROWSER E2E + VLM VISUAL AUDIT (2026-10-30, post-deploy)
+
+Method: agent-browser (headless Chromium) driving the REAL static client against the REAL production worker (temporary localhost CORS window, reverted afterwards — worker version 2a827082 restored to ALLOWED_ORIGIN=https://sh-clock.github.io only).
+
+Flow verified (zero console errors throughout):
+1. Setup-link provisioning (#setup= fragment): token stored, URL stripped, login shown.
+2. Unlock with test password 'password': PBKDF2→unwrap→HKDF→AUTH_UI derivation live; login hidden; header buttons visible; month 'October 2026'; 31 day cells; clock preview = today+7; password field cleared.
+3. Day editor: modal + backdrop open on 2026-10-31; add event ('E2E test event'); saved via RMW.
+4. SERVER-SIDE PROOF: bucket cal:20261031 envelope ver 2 decrypts (with the real K_data) to exactly the event payload — the server stores ciphertext only (150B).
+5. Persistence: full page reload + re-unlock → event still rendered; manifest = exactly 23 rows (the §13 sliding window, in production).
+6. Edit flow: title changed via modal → ver 3. Delete flow: event removed → ver 4 (later 5–6 with the pixel-audit event). Final state: 23 EMPTY buckets (clean delivery state).
+7. Escape closes modal+backdrop; day chip rendering with ellipsis truncation measured INSIDE the cell (chipRight 785.7 < cellRight 791.7 — the VLM's "slight overflow" claim was a FALSE POSITIVE, disproven by bounding-box measurement).
+
+VLM audit (glm-5v): login screen, calendar grid (incl. weekday alignment Oct-1→THU / Oct-31→SAT, today highlight), modal form, event rows, chips, clock preview — ALL PASS, no visual defects.
+
+## FINAL STATE (delivery)
+
+- Worker: https://calendar-poc.sh-clock.workers.dev (version 2a827082) — DO SQLite primary, D1 daily backup @ 03:00 UTC (remote verified), cron registered, CORS = Pages origin only, secrets ADMIN_SECRET + INTERNAL_TOKEN set (hex64).
+- Final bootstrap: password 'password' (user-designated), DUMMY AES key; credentials in .secrets/credentials.json (0600, outside the repo) and delivered in the final report.
+- Repo: github.com/sh-clock/Calendar-Web @ main — 6 commits, no secrets committed (.dev.vars ignored, verified).
+- GitHub Pages: workflow ready + dispatch-verified; ONE manual step remains (the fine-grained PAT lacks Pages:write and the Actions GITHUB_TOKEN cannot create a Pages site — verified against actions/configure-pages#40): the owner must set Settings → Pages → Build and deployment → Source = 'GitHub Actions' (then any push or a workflow dispatch publishes https://sh-clock.github.io/Calendar-Web/).
+- E2E screenshots archived to /home/z/my-project/download/e2e-screenshots/.
+
 <!-- WAVE-3-ANCHOR -->
 
 ## Change Log
@@ -475,3 +499,5 @@ Agent C1 (final pre-deploy verification): all 13 wave-2 fixes VERIFIED-CORRECT (
 | 2026-10-30 | Main orchestrator | Audit wave 2: 3 agents, all fixes verified; wave-2 findings fixed (stale-modal MAJOR et al.). |
 | 2026-10-30 | Agent C1 / orchestrator | Audit wave 3: READY TO SHIP; C1-N1 test-infra idempotency FIXED and proven by double same-day runs. |
 | 2026-10-30 | Main orchestrator | Deployed calendar-poc to Cloudflare (see DEPLOYMENT RECORD); secrets set. |
+| 2026-10-30 | Main orchestrator | Full remote conformance suite 126/126 vs production; remote D1 verified; final bootstrap (test password + dummy AES key). |
+| 2026-10-30 | Main orchestrator | Browser E2E + VLM visual audit ALL PASS (see record); localhost CORS window reverted; Pages workflow ready (pending owner's Source:GitHub Actions flip — PAT lacks Pages:write). |
