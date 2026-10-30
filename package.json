@@ -1,0 +1,19 @@
+{
+  "name": "calendar-web",
+  "version": "1.0.0",
+  "description": "End-to-end-encrypted calendar PoC — Cloudflare Worker + Durable Object (protocol v4.1, calendar scope) with a static GitHub Pages client.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test:unit": "node test/core-unit.mjs",
+    "test:local": "node test/run-local.mjs",
+    "test:remote": "node test/api-suite.mjs",
+    "dev:worker": "cd worker && npx wrangler dev --test-scheduled",
+    "deploy": "cd worker && npx wrangler deploy",
+    "bootstrap": "node cli/bootstrap.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.156.0"
+  }
+}

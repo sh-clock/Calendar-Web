@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "calendar-poc",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "account_id": "2677059f4553d3e1d840f1faccb914be",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "STORE",
+        "class_name": "Store"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Store"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "BACKUP",
+      "database_name": "calendar-poc-backup",
+      "database_id": "010ed43d-a145-400e-adba-e790c00349c3"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 3 * * *"]
+  },
+  "vars": {
+    "ALLOWED_ORIGIN": "https://sh-clock.github.io"
+  },
+  "observability": {
+    "enabled": false
+  }
+}

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calendar — Encrypted Clock PoC</title>
+  <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.1, calendar scope) — Proof of Concept.">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <span>Calendar <small>· encrypted clock ecosystem, PoC</small></span>
+    </div>
+    <div class="right">
+      <span id="proto-badge" class="badge proto"></span>
+      <button id="btn-sync" class="ghost" hidden>Sync window</button>
+      <button id="btn-lock" class="ghost" hidden>Lock</button>
+      <button id="btn-forget" class="ghost danger" hidden>Forget browser</button>
+    </div>
+  </header>
+
+  <div id="syncbar" hidden><span id="syncmsg"></span></div>
+
+  <main>
+    <!-- ============ login / unlock ============ -->
+    <section id="login">
+      <form id="login-form" class="card" autocomplete="off">
+        <h1>Unlock</h1>
+        <p class="hint">Rows are encrypted client-side (AES-256-GCM under keys derived from your
+          password). The server stores only opaque envelopes.</p>
+
+        <label for="server">Server</label>
+        <input id="server" type="url" spellcheck="false" autocomplete="off">
+
+        <div id="setup-row">
+          <label for="setup-input">Provisioning code <small>(first use on this browser — AUTH_UI, one-time)</small></label>
+          <div class="row">
+            <input id="setup-input" type="text" placeholder="64 lowercase hex chars" spellcheck="false" autocomplete="off">
+            <button id="btn-paste-setup" type="button">Store</button>
+          </div>
+          <p class="hint">Delivered out-of-band with this PoC (the setup-link analogue of the clock's
+            NVS provisioning channel). The password below then derives all keys.</p>
+        </div>
+
+        <label for="password">Password</label>
+        <input id="password" type="password" value="password" autocomplete="current-password">
+        <p id="lock-note" class="hint">Test password for this PoC is <code>password</code> (user-designated,
+          known-insecure — a dummy AES key is in use).</p>
+
+        <div id="login-msg" class="err" aria-live="polite"></div>
+        <button type="submit" class="primary">Unlock</button>
+      </form>
+    </section>
+
+    <!-- ============ app ============ -->
+    <section id="app" hidden>
+      <div class="monthbar">
+        <button id="btn-prev" class="ghost">‹ Prev</button>
+        <strong id="month-label"></strong>
+        <button id="btn-next" class="ghost">Next ›</button>
+        <button id="btn-today" class="ghost">Today</button>
+      </div>
+
+      <div class="layout">
+        <div id="grid"></div>
+
+        <aside id="clock-panel">
+          <h2>Clock preview <small>· §13 reader: today + 7 days</small></h2>
+          <p class="hint">What the clock would render from its cached buckets (read-only).</p>
+          <div id="clock-list"></div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ day editor modal ============ -->
+  <div id="modal-backdrop" hidden></div>
+  <div id="modal" hidden>
+    <div class="modal-head">
+      <strong id="day-title"></strong>
+      <button id="btn-close-modal" class="ghost">×</button>
+    </div>
+    <div id="day-events"></div>
+    <form id="day-form">
+      <h3>Add / edit event <small>(writer prefix “w:”)</small></h3>
+      <div class="row">
+        <input id="ev-time" type="time" value="09:00" required>
+        <input id="ev-title" type="text" maxlength="500" placeholder="Title" required>
+        <select id="ev-pri">
+          <option value="0">p0 highest</option>
+          <option value="1" selected>p1 high</option>
+          <option value="2">p2 normal</option>
+          <option value="3">p3 low</option>
+        </select>
+      </div>
+      <input id="ev-id" type="hidden">
+      <div class="row">
+        <button type="submit" class="primary">Save</button>
+        <button type="button" id="btn-clear-form" class="ghost">Clear</button>
+      </div>
+      <p class="hint">Cap: 16 events per day. Entries from other writers (d:, t:, …) are read-only.</p>
+    </form>
+  </div>
+
+  <div id="toasts"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
