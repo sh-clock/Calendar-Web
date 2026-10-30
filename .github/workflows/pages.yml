@@ -25,6 +25,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # Pages is not pre-enabled on this repo (the fine-grained PAT lacks
+          # the Pages REST permission); let the workflow token create the site.
+          enablement: true
       - name: Assemble site (static client only)
         run: |
           mkdir -p _site/js _site/css
