@@ -29,11 +29,19 @@ export class Api {
     if (body !== undefined) headers['content-type'] = 'application/json';
     let res;
     try {
-      res = await fetch(this.base + path, {
-        method,
-        headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
+      // 30s abort: a hung request must never pin the UI's busy state forever.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 30000);
+      try {
+        res = await fetch(this.base + path, {
+          method,
+          headers,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (e) {
       throw new ApiError('network', 0, null, String(e));
     }
@@ -49,7 +57,11 @@ export class Api {
     if (res.ok) return parsed;
     if (res.status === 404 && !text) throw new ApiError('silent', 404, null);
     if (res.status === 403 && !text) throw new ApiError('forbidden', 403, null);
-    if (res.status === 404) throw new ApiError('not_found', 404, parsed);
+    // A 404 WITH a body is only "not_found" when it is OUR not_found — a
+    // foreign 404 page (e.g. a wrong server URL) must classify generically.
+    if (res.status === 404 && parsed && parsed.error === 'not_found') {
+      throw new ApiError('not_found', 404, parsed);
+    }
     throw new ApiError('http', res.status, parsed, text);
   }
 

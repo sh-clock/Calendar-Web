@@ -321,12 +321,18 @@ export class Store {
       if (cls !== 'internal') return silentDrop();
     } else {
       if (cls !== 'ui' && cls !== 'clock') return silentDrop();
-      if (requireUi && cls !== 'ui') return forbidden();
+      if (requireUi && cls !== 'ui') {
+        if (method === 'PUT') await readBodyBounded(req); // drain so the 403 reaches the client cleanly
+        return forbidden();
+      }
     }
 
     // Authenticated-but-malformed (§5): the D9 id size cap maps to 400 like
     // every other field validation — never to a pre-auth silent drop.
-    if (id !== null && id.length > ID_MAX) return badRequest('bad_id');
+    if (id !== null && id.length > ID_MAX) {
+      if (method === 'PUT') await readBodyBounded(req); // drain: the client must receive the 400, not a connection reset
+      return badRequest('bad_id');
+    }
 
     return handler();
   }

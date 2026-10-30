@@ -67,6 +67,7 @@ input, select {
 input:focus, select:focus { outline: 2px solid #bfdbfe; border-color: var(--accent); }
 .row { display: flex; gap: 8px; }
 .row > * { flex: 1; }
+.row > .grow { flex: 2; }
 
 button {
   font: inherit; border-radius: 8px; border: 1px solid var(--line); background: #fff;

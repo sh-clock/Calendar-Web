@@ -132,6 +132,7 @@ function showApp() {
 }
 
 function lock() {
+  if (state.busy) return; // never tear the API out from under an in-flight RMW/sync
   state.api = null;
   state.rowKey = null;
   state.eventsByDay.clear();
@@ -147,6 +148,7 @@ function lock() {
 }
 
 function forgetBrowser() {
+  if (state.busy) return;
   localStorage.removeItem(LS_TOKEN);
   localStorage.removeItem(LS_SERVER);
   lock();
@@ -243,7 +245,15 @@ async function writeBucket(day, mutate) {
     const ver = env ? env.ver : 0;
     let events;
     if (env) {
-      const payload = await decryptRow(state.rowKey, id, env.ver, env.nonce, env.ct);
+      let payload;
+      try {
+        payload = await decryptRow(state.rowKey, id, env.ver, env.nonce, env.ct);
+      } catch {
+        // AEAD failure on the write path: same refusal semantics as sync —
+        // a corrupt bucket is NEVER rewritten (raw WebCrypto errors would
+        // otherwise leak as confusing OperationError messages).
+        throw new Error('bucket_corrupt: refusing to rewrite a corrupt bucket');
+      }
       const bucket = core.normalizeBucket(payload);
       if (!bucket) throw new Error('bucket_corrupt: refusing to rewrite a corrupt bucket');
       events = bucket.events;
@@ -474,6 +484,13 @@ function clearForm() {
 
 async function saveForm() {
   if (state.busy || !editingDay) return;
+  // Window guard (B2-M1): a stale modal (open across midnight, or across a
+  // manual Sync) must never resurrect a bucket that rotation just DELETEd —
+  // the write would be silently lost on the next sync.
+  if (!inWindow(editingDay)) {
+    toast('This day slid out of the 23-bucket sync window — close and re-open it after syncing.', 'warn', 7000);
+    return;
+  }
   const day = editingDay;
   const time = $('#ev-time').value;
   const title = $('#ev-title').value.trim();
@@ -498,7 +515,8 @@ async function saveForm() {
       toast(`Bucket cap (16/day): dropped ${res.dropped} of YOUR lowest-priority events.`, 'warn', 7000);
     }
     toast('Saved.', 'ok', 2000);
-    openDay(day);
+    // Re-open the editor ONLY if the user has not closed the modal mid-write.
+    if (!$('#modal').hidden) openDay(day);
   } catch (e) {
     toast('Save failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
   } finally {
@@ -508,13 +526,20 @@ async function saveForm() {
 
 async function deleteOwnEvent(day, id) {
   if (state.busy) return;
+  if (!inWindow(day)) {
+    toast('This day slid out of the 23-bucket sync window — sync first.', 'warn', 7000);
+    return;
+  }
   try {
     setBusy(true, 'Deleting event (RMW)…');
-    await writeBucket(day, (events) => ({
+    const res = await writeBucket(day, (events) => ({
       events: core.removeEvent(events, id, core.WRITER_PREFIX).events,
     }));
+    if (res.dropped > 0) {
+      toast(`Bucket cap (16/day): dropped ${res.dropped} of YOUR lowest-priority events.`, 'warn', 7000);
+    }
     toast('Deleted.', 'ok', 2000);
-    openDay(day);
+    if (!$('#modal').hidden) openDay(day);
   } catch (e) {
     toast('Delete failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
   } finally {
@@ -566,6 +591,14 @@ function bind() {
       toast('Provisioning code stored.', 'ok');
     } else {
       toast('Invalid provisioning code (64 lowercase hex chars).', 'err');
+    }
+  });
+  // Enter in the setup field must STORE the code, not submit the login form
+  // while the code is still sitting unstored in the input.
+  $('#setup-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#btn-paste-setup').click();
     }
   });
 }

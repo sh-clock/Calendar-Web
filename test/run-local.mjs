@@ -114,7 +114,10 @@ async function pollD1(sql, predicate, timeoutMs = 20000) {
 }
 
 const b64 = (b) => Buffer.from(b).toString('base64');
-const hx = (b) => Buffer.from(b).toString('hex');
+
+function dayOffset(days) {
+  return new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+}
 
 async function api(method, p, { token, body } = {}) {
   const headers = {};
@@ -252,15 +255,27 @@ async function main() {
       JSON.stringify(cb)
     );
 
-    console.log('\n== §19 retention prune (7-day) ==');
+    console.log('\n== §19 retention prune (7-day boundary) ==');
+    // today-7 must be RETAINED (cutoff is exclusive); today-8 must be pruned.
+    d1Query(`INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(7)}', 'boundary-keep', 1, x'00', x'00')`);
+    d1Query(`INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('${dayOffset(8)}', 'boundary-drop', 1, x'00', x'00')`);
     d1Query("INSERT INTO backup (day, id, ver, nonce, ct) VALUES ('2020-01-01', 'stale-row', 1, x'00', x'00')");
     const sched2 = await fetch(`${BASE}/__scheduled?cron=0+3+*+*+*`);
-    await sched2.text();
-    const pruned = await pollD1(
-      "SELECT COUNT(*) AS n FROM backup WHERE day = '2020-01-01'",
-      (r) => (r[0]?.results || [])[0]?.n === 0
+    const sched2Text = await sched2.text();
+    ok('second __scheduled trigger -> 200', sched2.status === 200, sched2.status + ' ' + sched2Text);
+    const boundary = await pollD1(
+      "SELECT (SELECT COUNT(*) FROM backup WHERE id = 'boundary-drop') AS dropped, (SELECT COUNT(*) FROM backup WHERE id = 'boundary-keep') AS kept",
+      (r) => {
+        const row = (r[0]?.results || [])[0];
+        return !!row && row.dropped === 0;
+      }
     );
-    ok('stale day pruned by the sweep', pruned !== null);
+    const brow = boundary ? (boundary[0]?.results || [])[0] : null;
+    ok(
+      'retention boundary: today-8 pruned, today-7 retained, stale swept',
+      !!brow && brow.dropped === 0 && brow.kept === 1,
+      JSON.stringify(brow)
+    );
 
     console.log('\n== §19 RESTORE DRILL (M6 exit criterion) ==');
     // Fresh universe: force-bootstrap NEW material (different AES1), then PUT
@@ -331,7 +346,22 @@ async function main() {
       },
     });
     ok('post-drill: re-bootstrapped back to the suite universe', restoreBack.status === 200, restoreBack.text);
+    const backCfg = (await api('GET', '/config', { token: MAT.auth_ui_hex })).json;
+    const backManifest = (await api('GET', '/rows', { token: MAT.auth_ui_hex })).json;
+    ok(
+      'post-drill: config + empty manifest verified',
+      backCfg.salt === MAT.salt &&
+        backCfg.wrapped === MAT.wrapped_b64 &&
+        backCfg.ver === 1 &&
+        Array.isArray(backManifest.rows) &&
+        backManifest.rows.length === 0,
+      JSON.stringify(backCfg)
+    );
   } finally {
+    // The material file carries test tokens — remove it after the run.
+    try {
+      fs.rmSync(MATERIAL, { force: true });
+    } catch {}
     console.log('\n== stopping wrangler dev ==');
     child.kill('SIGTERM');
     await sleep(1500);

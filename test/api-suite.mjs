@@ -93,6 +93,7 @@ async function silentShape(method, path, opts) {
     body: r.text,
     wwwAuth: r.headers.get('www-authenticate'),
     ct: r.headers.get('content-type'),
+    cl: r.headers.get('content-length'),
     cacheControl: r.headers.get('cache-control'),
     etag: r.headers.get('etag'),
     expires: r.headers.get('expires'),
@@ -199,10 +200,11 @@ const shapes = [];
   const s = await silentShape('GET', '/rows', {});
   shapes.push(['no token', s]);
   check(
-    's1 no token -> 404 empty, no WWW-Authenticate, no cache headers',
+    's1 no token -> 404 empty, no WWW-Authenticate, no cache headers, no body length',
     s.status === 404 &&
       s.body === '' &&
       s.wwwAuth === null &&
+      (s.cl === null || s.cl === '0') &&
       s.cacheControl === null &&
       s.etag === null &&
       s.expires === null &&
@@ -275,6 +277,11 @@ console.log('PHASE S2 — token-class × route matrix (WORKLOG D15)');
     ['INTERNAL on GET /rows', 'GET', '/rows', INTERNAL, undefined, 404, ''],
     ['INTERNAL on PUT row', 'PUT', '/rows/cal:20990401', INTERNAL, { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)) }, 404, ''],
     ['INTERNAL on /bootstrap', 'PUT', '/bootstrap', INTERNAL, {}, 404, ''],
+    ['INTERNAL on GET /config', 'GET', '/config', INTERNAL, undefined, 404, ''],
+    ['ADMIN on GET /version', 'GET', '/version', ADMIN, undefined, 404, ''],
+    ['ADMIN on GET /status', 'GET', '/status', ADMIN, undefined, 404, ''],
+    ['ADMIN on GET /rows/{id}', 'GET', '/rows/cal:20261105', ADMIN, undefined, 404, ''],
+    ['INTERNAL on POST /internal/backup', 'POST', '/internal/backup', ADMIN, undefined, 404, ''],
     ['no token /version', 'GET', '/version', undefined, undefined, 404, ''],
     ['no token /status', 'GET', '/status', undefined, undefined, 404, ''],
     ['no token /rows/{id}', 'GET', '/rows/cal:20261105', undefined, undefined, 404, ''],
@@ -290,7 +297,7 @@ console.log('PHASE S2 — token-class × route matrix (WORKLOG D15)');
       details.push(`${name}: ${r.status}/${JSON.stringify(r.text)}`);
     }
   }
-  check('s2 class matrix (10 cases) all silent-404', all, details.join(' | '));
+  check('s2 class matrix (15 cases) all silent-404', all, details.join(' | '));
 }
 
 /* ================================================================ */
@@ -351,6 +358,12 @@ let CFG;
 {
   const r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: b64(randomBytes(59)) } });
   check('c11 rewrap 59B wrapped -> 400', r.status === 400, r.text);
+  const cfgAfter = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
+  check(
+    'c11b failed rewrap left config untouched (ver + wrapped)',
+    cfgAfter.wrapped === MAT.wrappedB64 && cfgAfter.ver === 3,
+    JSON.stringify(cfgAfter)
+  );
 }
 {
   // §20 Type A with the SAME AES1 (the spec invariant: "re-wrap AES1 … No data
@@ -473,7 +486,9 @@ for (const [name, ver] of [['ver 0', 0], ['ver -1', -1], ['ver 1.5', 1.5], ['ver
   check('r18 nonce non-base64 -> 400 bad_nonce', r.status === 400 && jparse(r.text)?.error === 'bad_nonce', r.text);
   // Genuinely unpadded base64: strip ALL '=' padding (length no longer %4).
   const r2 = await raw('PUT', '/rows/cal:20990105', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(64)).replace(/=+$/, '') } });
-  check('r18b unpadded ct -> 400 (padded base64 required)', r2.status === 400, r2.status + ' ' + r2.text);
+  check('r18b unpadded ct -> 400 bad_ct', r2.status === 400 && jparse(r2.text)?.error === 'bad_ct', r2.status + ' ' + r2.text);
+  const r3 = await raw('PUT', '/rows/cal:20990105', { token: MAT.authUiHex, body: { ver: 1, nonce: 'QR==', ct: b64(randomBytes(64)) } });
+  check('r18c non-canonical nonce ("QR==") -> 400 bad_nonce', r3.status === 400 && jparse(r3.text)?.error === 'bad_nonce', r3.text);
 }
 {
   const enc = encryptRow(K, 'cal:20990106', 1, { events: [] });
@@ -848,7 +863,7 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
   const gone = await raw('GET', '/rows/cal:20261201', { token: MAT.authUiHex });
   check('b2.4 wiped row -> 404 not_found', gone.status === 404 && jparse(gone.text)?.error === 'not_found', gone.text);
   const cfg = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
-  check('b2.5 config re-created (ver=1, same material)', cfg.ver === 1 && cfg.salt === MAT.saltHex, JSON.stringify(cfg));
+  check('b2.5 config re-created (ver=1, same salt AND wrapped)', cfg.ver === 1 && cfg.salt === MAT.saltHex && cfg.wrapped === MAT.wrappedB64, JSON.stringify(cfg));
 }
 
 /* Re-seed deterministic content for the orchestrator's §19 D1 fidelity and
@@ -856,20 +871,28 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
    re-triggers the cron, then compares byte-for-byte). */
 {
   const seeds = [
-    ['2026-11-01', 8, 'Standup'],
-    ['2026-11-02', 13, 'Lunch'],
-    ['2026-11-03', 19, 'Gym'],
+    ['2026-11-01', 8, 'Standup', 1],
+    ['2026-11-02', 13, 'Lunch', 1],
+    ['2026-11-03', 19, 'Gym', 3], // seeded at ver 3 (new-row ver>1 is legal per
+    // D8) so the restore drill exercises a NON-1 ver end-to-end.
   ];
-  for (const [day, hh, title] of seeds) {
+  for (const [day, hh, title, ver] of seeds) {
     const id = 'cal:' + day.replaceAll('-', '');
     const ev = { id: 'w:' + randomUUID(), date: day, hh, mm: 0, title, priority: 1 };
-    const enc = encryptRow(K, id, 1, { events: [ev] });
-    const r = await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
+    const enc = encryptRow(K, id, ver, { events: [ev] });
+    const r = await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
     if (r.status !== 200) check('seed ' + day, false, r.text);
   }
+  // Two rewraps (out and back) bump config.ver to 3 so the D1 config_backup
+  // ver copy is non-vacuous for the orchestrator's fidelity check.
+  const re = buildRewrapMaterial(MAT.aes1, PW + '-seed');
+  await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex } });
+  await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: MAT.wrappedB64, salt: MAT.saltHex } });
   const r = await raw('POST', '/internal/backup', { token: INTERNAL });
   const b = jparse(r.text);
   check('seed backup snapshot -> {ok, rows:3}', r.status === 200 && b?.ok === true && b?.rows === 3, r.text);
+  const cfgNow = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
+  check('seed phase: config at ver 3, material restored', cfgNow.ver === 3 && cfgNow.wrapped === MAT.wrappedB64, JSON.stringify(cfgNow));
 }
 
 if (MATERIAL_OUT) {

@@ -75,8 +75,25 @@ follows the specification verbatim.
 
 ## Security posture of this PoC (by design, per owner)
 
-- Password is the user-designated test value `password`.
+- Password is the user-designated test value `password` (the spec's §2
+  40-character minimum is therefore intentionally NOT enforced — a client-side
+  convention the owner waived for this PoC).
 - The master key AES1 is a **dummy** generated at bootstrap and delivered to
   the owner out-of-band. Nothing here is production-secure; the crypto
   construction, however, is the protocol's real one (PBKDF2 → AES-GCM →
   HKDF, all native WebCrypto/Node crypto).
+
+## Explicitly out of PoC scope (documented exclusions)
+
+- **§20 Type B rotation** (AES1 compromise: drain, quiet window, full
+  re-encryption of every row, re-wrapping of k_photo fields, token rotation).
+  The Type A route (`PUT /bootstrap/rewrap`, same AES1) IS implemented and
+  tested, including the CLI `--rewrap` mode and the AES1/AUTH-token-unchanged
+  invariants. Type B is a rare structural drill that does not serve the
+  calendar PoC; it would reuse the same RMW machinery that the suite already
+  proves.
+- **§11 WebSocket radar** (see above), **§14 todos**, **§15–§18 photos** —
+  per the owner's scope order.
+- The delivered setup link uses the `#setup=` **fragment** form (also
+  supported: `?setup=` query) — fragments are not transmitted to the static
+  host, keeping the provisioning token out of CDN/access logs.
