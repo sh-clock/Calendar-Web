@@ -1,6 +1,6 @@
 /**
  * Store — Durable Object (SQLite-backed) implementing the calendar slice of
- * PROTOCOL v4.1 (Encrypted Clock Ecosystem wire specification, 2026-10-19).
+ * PROTOCOL v4.1 (Encrypted Clock Ecosystem wire specification, 2026-10-19) + the v4.2 calendar delta (docs/PROTOCOL-v4.2.md): evt:{cal}:{uid} + cmeta:{uuid} row types on the same opaque store.
  *
  * Scope (per user order, see WORKLOG.MD D1): calendar feature only. Photos
  * (§15–§18) and todos (§14) are NOT implemented; /status reports
@@ -15,7 +15,7 @@
  * verbatim, compares only the clear `ver`, and never reads `nonce`/`ct`.
  */
 
-const PROTO_VERSION = '4.1';                       // §22
+const PROTO_VERSION = '4.2';                       // §22 (v4.2: additive evt/cmeta row types; see docs/PROTOCOL-v4.2.md)
 const KDF_ITERS = 100000;                          // §2
 const ROW_CT_MAX = 65536;                          // §2 — ciphertext incl. tag
 const VER_U32_MAX = 4294967295;                    // §2 VER_WIDTH (u32)

@@ -201,12 +201,17 @@ export function effectiveEnd(ev) {
   return { ...ev.dtstart }; // zero-length timed event
 }
 
-/** Days a (possibly multi-day/all-day) event covers, inclusive. */
+/**
+ * Days a (possibly multi-day/all-day) event covers, inclusive (display).
+ * RFC 5545 §3.6.1: a DATE-value DTEND is NOT inclusive (event covers
+ * [DTSTART, DTEND)); a DATE-TIME end at 00:00:00 likewise excludes that
+ * day. Zero/negative spans clamp to the start day (defensive).
+ */
 export function spanDays(ev) {
   const end = effectiveEnd(ev);
   const lastDay =
     end.time === null || end.time === '00:00:00'
-      ? addDays(end.date, end.time === '00:00:00' ? -1 : 0)
+      ? addDays(end.date, -1)
       : end.date;
   return { first: ev.dtstart.date, last: lastDay >= ev.dtstart.date ? lastDay : ev.dtstart.date };
 }
@@ -310,32 +315,57 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
   } else {
     const rule = buildRRule(master);
     if (rule) {
+      // Upper bound = last microsecond OF toDay (not the next midnight):
+      // rrule.between(from, to, inc=true) includes instants EQUAL to the
+      // bounds, so a next-midnight bound would pull in toDay+1 occurrences.
       const fromMs = Date.UTC(+fromDay.slice(0, 4), +fromDay.slice(5, 7) - 1, +fromDay.slice(8, 10), 0, 0, 0);
-      const toMs = Date.UTC(+toDay.slice(0, 4), +toDay.slice(5, 7) - 1, +toDay.slice(8, 10), 24, 0, 0);
+      const toMs = Date.UTC(+toDay.slice(0, 4), +toDay.slice(5, 7) - 1, +toDay.slice(8, 10), 24, 0, 0) - 1;
       let occs;
       try {
         occs = rule.between(new Date(fromMs), new Date(toMs), true);
       } catch {
         occs = [];
       }
+      const isAllDayMaster = master.dtstart.time === null;
       const overridden = new Set(exceptions.map((e) => e.recurrenceId.date + '|' + (e.recurrenceId.time || '')));
       for (const o of occs) {
-        const wall = naiveUTCToWall(o.getTime());
-        const key = wall.date + '|' + wall.time;
-        if (master.exdates.some((x) => sameWall(x, wall))) continue; // EXDATE removal
+        const naiveWall = naiveUTCToWall(o.getTime()); // '00:00:00' even for all-day
+        const key = naiveWall.date + '|' + (isAllDayMaster ? '' : naiveWall.time);
+        const exdateHits = (x) =>
+          isAllDayMaster
+            ? x.time === null && x.date === naiveWall.date // DATE-valued EXDATE
+            : sameWall(x, naiveWall);
+        if (master.exdates.some(exdateHits)) continue; // EXDATE removal
         if (overridden.has(key)) continue; // replaced by its exception below
         // All-day masters keep DATE semantics on every occurrence (the
         // naive expansion yields 00:00:00; the model needs time === null).
-        const occStart = master.dtstart.time === null
-          ? { date: wall.date, time: null, tz: null }
-          : { ...wall, tz: master.dtstart.tz };
+        const occStart = isAllDayMaster
+          ? { date: naiveWall.date, time: null, tz: null }
+          : { ...naiveWall, tz: master.dtstart.tz };
         const comp = { ...master, dtstart: occStart };
-        out.push(mkOcc(comp, wall, false));
+        out.push(mkOcc(comp, isAllDayMaster ? { date: naiveWall.date, time: null } : naiveWall, false));
       }
     } else {
       // Unusable rule: fall back to the master's own start only (flagged
       // upstream as an expansion limitation, never silently dropped).
       const occ = mkOcc(master, null, false);
+      if (overlaps(occ)) out.push(occ);
+    }
+  }
+
+  // RDATE: additional explicit occurrence starts (RFC 5545 §3.8.5.2), with
+  // or without an RRULE. Match the master's value type (all-day RDATEs pair
+  // with DATE masters). EXDATE'd or exception-overridden instances are
+  // skipped; every other RDATE overlapping the range is an occurrence.
+  {
+    const overriddenSet = new Set(exceptions.map((e) => e.recurrenceId.date + '|' + (e.recurrenceId.time || '')));
+    for (const rd of master.rdates || []) {
+      if ((rd.time === null) !== (master.dtstart.time === null)) continue; // type mismatch: ignored
+      const wall = { date: rd.date, time: rd.time === null ? null : rd.time };
+      if (master.exdates.some((x) => sameWall(x, wall))) continue;
+      if (overriddenSet.has(wall.date + '|' + (wall.time || ''))) continue;
+      const comp = { ...master, dtstart: { date: rd.date, time: rd.time, tz: master.dtstart.tz } };
+      const occ = mkOcc(comp, { date: rd.date, time: rd.time }, false);
       if (overlaps(occ)) out.push(occ);
     }
   }

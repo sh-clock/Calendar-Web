@@ -18,7 +18,7 @@ import {
   decryptRow,
   rowAad,
 } from '../cli/bootstrap.mjs';
-import { capEvents } from '../js/calendar-core.js';
+import { capDerived } from '../js/calendar-core.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 /* ---------------- config ---------------- */
@@ -675,12 +675,13 @@ console.log('PHASE E — crypto E2E, AAD binding, dual-writer merge (§6/§13)')
   const day = '2026-11-16';
   const id = 'cal:' + day.replaceAll('-', '');
   const events = Array.from({ length: 20 }, (_, i) => ({
-    id: 'w:' + randomUUID(), date: day, hh: i % 24, mm: 0, title: 'Cap ' + i, priority: i % 5,
+    id: 'x:' + randomUUID(), date: day, hh: i % 24, mm: 0, title: 'Cap ' + i, priority: i % 5,
   }));
-  // Apply the same client-side rule the app uses, then write.
-  const capped = capEvents(events, 'w');
-  check('e7a capEvents drops 4 of 20 own', capped.events.length === 16 && capped.dropped.length === 4);
-  const enc = encryptRow(K, id, 1, { events: capped.events });
+  // Apply the same client-side derivation rule the app uses (v4.2: entries
+  // capped by (priority, id) order), then write.
+  const capped = capDerived(events);
+  check('e7a capDerived drops 4 of 20 (16/day)', capped.length === 16 && events.length === 20);
+  const enc = encryptRow(K, id, 1, { events: capped });
   const r = await raw('PUT', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(enc.nonce), ct: b64(enc.ct) } });
   // Read the row BACK from the server and decrypt it — the cap must be
   // visible in the STORED ciphertext, not just in the local construction.
@@ -797,7 +798,7 @@ console.log('PHASE V — version & status (§22, §10)');
 
 {
   const r = await raw('GET', '/version', { token: MAT.authUiHex });
-  check('v1 GET /version -> {"proto":"4.1"}', r.status === 200 && jparse(r.text)?.proto === '4.1', r.text);
+  check('v1 GET /version -> {"proto":"4.2"}', r.status === 200 && jparse(r.text)?.proto === '4.2', r.text);
   const r2 = await raw('GET', '/version', { token: MAT.authClockHex });
   check('v1b /version with CLOCK token', r2.status === 200);
 }

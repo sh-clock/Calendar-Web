@@ -484,6 +484,19 @@ function veventToProps(ev) {
       props.push({ name: 'EXDATE', params: g.params, value: g.values.join(',') });
     }
   }
+  if (ev.rdates.length > 0) {
+    // RDATE groups mirror EXDATE (RFC 5545 §3.8.5.2/§3.8.5.1).
+    const groups = new Map();
+    for (const dt of ev.rdates) {
+      const { value, params } = formatDTValue(dt);
+      const key = JSON.stringify(params);
+      if (!groups.has(key)) groups.set(key, { params, values: [] });
+      groups.get(key).values.push(value);
+    }
+    for (const g of groups.values()) {
+      props.push({ name: 'RDATE', params: g.params, value: g.values.join(',') });
+    }
+  }
   if (ev.summary !== '') props.push({ name: 'SUMMARY', params: [], value: escapeText(ev.summary) });
   if (ev.description !== null && ev.description !== undefined && ev.description !== '') {
     props.push({ name: 'DESCRIPTION', params: [], value: escapeText(ev.description) });
