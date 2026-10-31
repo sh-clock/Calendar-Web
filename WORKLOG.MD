@@ -2284,3 +2284,54 @@ as-is ("do not manually tweak it if possible").
   add vendor copying, add ci.yml (node unit tests on push) — PAT permits.
 - Audit: 6 parallel agents after implementation; visual audits (VLM) of all
   views in both themes; stress tests; fix until zero errors.
+
+## FULLCALENDAR REWORK — IMPLEMENTATION STATUS (2026-10-31)
+
+### Done (all pushed)
+- Vendored @fullcalendar/{core,daygrid,timegrid,interaction,multimonth,list}
+  6.1.22 official index.global.min.js bundles VERBATIM + MIT LICENSE.txt each
+  (js/vendor/fullcalendar/). Load order core→daygrid→timegrid→interaction→
+  multimonth→list; plugins referenced as FullCalendar.X.default (smoke-tested).
+- index.html: FC mount #calendar, 6 vendor script tags, settings modal surface,
+  topbar gear button; login/editor/recur/cal/freq modal markup retained.
+- js/app.js REWRITTEN (3170 lines): view layer = FC native (events source fn,
+  eventDrop/eventResize/select/dateClick/eventClick/viewDidMount/datesSet,
+  dayMaxEvents, nowIndicator, navLinks, headerToolbar). Backbone preserved
+  VERBATIM: unlock/lock/forget, syncAll/fetchRowsIntoState/ingestRow/
+  putRowRMW/applyRowLocally (A3 generation tracking), saveEvent/deleteEvent/
+  applyDayShift, editor + recurring-choice + custom-frequency + calendar
+  modals, clock preview, calendar list, corrupt-row policy.
+  NEW mutations (same putRowRMW pattern): applyDurationChange (resize),
+  applyAllDayConversion (timed<->all-day drops).
+  NEW settings module: theme(light/dark/system)/accent/firstDay/hour12/
+  slotDuration/weekNumbers/density/customDays, persisted
+  (clock_poc_settings_v44), legacy migrations (clock_poc_theme,
+  clock_poc_view_v43), live apply via CSS vars + calendar.resetOptions.
+- css/style.css rewritten: Proton tokens + app chrome + modal/editor styles
+  retained; Proton grid/TimeGrid/year ports REMOVED; FC theming via --fc-*
+  mapped to tokens (html-prefix specificity over runtime-injected styles);
+  dark theme block; density vars; settings-segment styles.
+- CI: deploy-pages.yml trigger fixed (was corrupted 'branches: ain]'), vendor
+  copying added; ci.yml added (core-unit + crypto-parity + syntax + vendor
+  integrity). NOTE: sandbox shell transport strips '[m' sequences from
+  command strings + terminal output (display artifact) — verify via od/grep
+  with patterns avoiding bracket-m, or the file tools.
+
+### Test evidence
+- core-unit 176/176; crypto-parity 38/38; api-suite 163/163; E2E e2e-fc.mjs
+  50/50 (0 page errors, 0 console errors; unlock<=5 req, save=1 PUT,
+  reload persistence, 3 syncs=3 req, focus=1 req, month drag=1 PUT + data,
+  week/day/custom/year/agenda views, recurring + exception drag, all-day
+  click-create, 2nd calendar, timed drag, drag-create, RESIZE=1 PUT + DTEND,
+  settings full flow + persistence, keyboard, delete=1 DELETE, calendar
+  visibility toggle, final reload).
+- Visual audit (VLM + programmatic cross-check): slot positions EXACT
+  (event top = slot 22.00 = 11:00); overlap = native side-by-side tiling;
+  VLM false positives documented; REAL bug found+fixed: mini calendar
+  firstDay (header formula + monthRows lead) — verified Mon/Sun/Sat.
+- Native FC behaviors CONFIRMED not bugs: resizers hidden until hover/selected
+  (FC CSS), month prev() re-anchors date to month start, today button disabled
+  when view contains today, title truncation = overflow:hidden clip (v6
+  native), all-day select end = exclusive.
+
+### Audit wave (this section) — 6 agents, findings below
