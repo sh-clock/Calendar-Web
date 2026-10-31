@@ -1243,14 +1243,16 @@ function setView(v) {
 
 /* ---------------- mini calendar (sidebar; drives fc.gotoDate) ---------------- */
 
-/** Weeks (Mon-first) covering the month, each row = 7 day strings. */
-function monthRows(ym) {
+/** Weeks covering the month (leading column = settings.firstDay), each
+ * row = 7 day strings. Used by the mini calendar (the main grid is
+ * FullCalendar's, which applies firstDay natively). */
+function monthRows(ym, firstDay = 1) {
   const [y, m] = ym.split('-').map(Number);
   const first = new Date(Date.UTC(y, m - 1, 1));
   const n = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const days = [];
   for (let d = 1; d <= n; d++) days.push(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
-  const lead = (first.getUTCDay() + 6) % 7; // Monday = 0
+  const lead = (first.getUTCDay() - firstDay + 7) % 7; // firstDay column = 0
   const pre = [];
   for (let i = lead; i > 0; i--) pre.push(shiftDay(days[0], -i));
   const total = pre.length + days.length;
@@ -1276,11 +1278,12 @@ function renderMiniCalendar() {
   const ym = currentYM();
   $('#minical-label').textContent = MONTHS[Number(ym.slice(5)) - 1] + ' ' + ym.slice(0, 4);
 
-  const { rows, monthDays } = monthRows(ym);
+  const { rows, monthDays } = monthRows(ym, settings.firstDay);
   const today = state.today || core.localToday();
-  // Weekday header aligned to the settings' first day.
   const dowNames = [];
-  for (let i = 0; i < 7; i++) dowNames.push(WEEKDAY_LONG[(i + settings.firstDay) % 7].slice(0, 2));
+  // WEEKDAY_LONG is Monday-first (index 0 = Monday); the column at position
+  // i shows weekday (i + firstDay + 6) % 7 (firstDay: 0=Sun, 1=Mon, 6=Sat).
+  for (let i = 0; i < 7; i++) dowNames.push(WEEKDAY_LONG[(i + settings.firstDay + 6) % 7].slice(0, 2));
   for (const wd of dowNames) grid.appendChild(el('div', 'wd', { text: wd }));
 
   const selected = fcCal ? localWallOf(fcCal.getDate()).date : today;
