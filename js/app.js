@@ -68,7 +68,14 @@ const state = {
   busy: false,
   batchOk: true,        // false when the server predates v4.3 (§5.1c fallback)
   syncing: false,       // one background sync at a time (§5.3)
+  navDay: null,         // sticky day-of-month for month/year navigation
 };
+
+/** Set the selected date everywhere (state + sticky nav day). */
+function setSelectedDate(day) {
+  state.selectedDate = day;
+  state.navDay = Number(day.slice(8));
+}
 
 /* ---------------- tiny DOM helpers ---------------- */
 
@@ -857,14 +864,19 @@ function navView(delta) {
     const [y, m] = state.viewYM.split('-').map(Number);
     const d = new Date(Date.UTC(y, m - 1 + step, 1));
     state.viewYM = d.toISOString().slice(0, 7);
-    // keep the selected date inside the shown month (Proton clamps)
+    // Keep the selected date inside the shown month WITHOUT destructively
+    // clamping the day-of-month (Oct 31 → Nov 30 → Oct 30 lost a day through
+    // the short-month round-trip): clamp from the STICKY nav day, which only
+    // explicit selections (click / Today / mini calendar) update.
     const [ny, nm] = state.viewYM.split('-').map(Number);
     const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
-    const day = Math.min(Number((state.selectedDate || core.localToday()).slice(8)), last);
-    state.selectedDate = state.viewYM + '-' + String(day).padStart(2, '0');
+    const wanted = state.navDay || Number((state.selectedDate || core.localToday()).slice(8));
+    // Assign DIRECTLY (not setSelectedDate): the clamped result must NOT
+    // overwrite the sticky nav day — only explicit selections do that.
+    state.selectedDate = state.viewYM + '-' + String(Math.min(Math.max(1, wanted), last)).padStart(2, '0');
   } else {
     const step = state.view === 'day' ? delta : delta * viewRangeDays().length;
-    state.selectedDate = shiftDay(state.selectedDate || core.localToday(), step);
+    setSelectedDate(shiftDay(state.selectedDate || core.localToday(), step));
     state.viewYM = state.selectedDate.slice(0, 7);
   }
   renderAll();
@@ -1019,7 +1031,7 @@ function renderMonth(root) {
         title: fmtDateLong.format(new Date(day + 'T00:00:00')),
       });
       b.addEventListener('click', () => {
-        state.selectedDate = day;
+        setSelectedDate(day);
         renderMonth();
         renderMiniCalendar();
         openMorePopover(day, b.getBoundingClientRect());
@@ -1259,7 +1271,7 @@ function timeGridDayButton(day, today) {
   b.appendChild(el('span', 'calendar-grid-heading-day', { text: WEEKDAY_LONG[(d.getDay() + 6) % 7] }));
   b.appendChild(el('span', 'calendar-grid-heading-number', { text: String(d.getDate()) }));
   b.addEventListener('click', () => {
-    state.selectedDate = day;
+    setSelectedDate(day);
     state.viewYM = day.slice(0, 7);
     renderAll();
   });
@@ -1630,7 +1642,7 @@ function renderYear(root) {
           b.appendChild(dot);
         }
         b.addEventListener('click', () => {
-          state.selectedDate = day;
+          setSelectedDate(day);
           state.viewYM = day.slice(0, 7);
           setView('month');
         });
@@ -1669,7 +1681,7 @@ function renderMiniCalendar() {
         'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
       });
       b.addEventListener('click', () => {
-        state.selectedDate = day;
+        setSelectedDate(day);
         state.viewYM = day.slice(0, 7);
         renderAll();
       });
@@ -3324,7 +3336,7 @@ function bind() {
   $('#btn-today').addEventListener('click', () => {
     state.today = core.localToday();
     state.viewYM = state.today.slice(0, 7);
-    state.selectedDate = state.today;
+    setSelectedDate(state.today);
     renderAll();
   });
   $('#btn-new-event').addEventListener('click', () => {
@@ -3459,7 +3471,7 @@ function boot() {
   refreshLoginUi();
   state.today = core.localToday();
   state.viewYM = state.today.slice(0, 7);
-  state.selectedDate = state.today;
+  setSelectedDate(state.today);
   try {
     const v = localStorage.getItem(LS_VIEW);
     if (VIEWS.includes(v)) state.view = v;
