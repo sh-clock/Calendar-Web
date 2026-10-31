@@ -98,6 +98,27 @@ A v4.2 worker returns the silent-drop empty 404 for this route; v4.3
 clients fall back to per-row `GET /rows/{id}` (see §5.1c and §8 for the
 browser-vs-non-browser nuance).
 
+### §9c PUT conditional mode (NEW in v4.3.1 — DAV compatibility)
+
+Clients MAY send standard HTTP conditional headers with `PUT /rows/{id}`:
+
+- `If-None-Match: *` — create only; if the row already exists the server
+  answers **412 Precondition Failed** (empty body) instead of the 200 echo.
+- `If-Match: "<ver>"` — update only if the stored `ver` equals the given
+  decimal ETag; on mismatch → **412** (empty body); on a missing row →
+  **404 with the `not_found` body** (§5). On match, the §9 RMW law applies
+  as usual (a `ver` greater than stored is stored and echoed with 200).
+- A malformed `If-Match` (not a quoted decimal ver) → `400 bad_if_match`.
+- Responses in this mode carry no envelope on failure — the client should
+  re-read the row (`GET`/`§9b`) to learn the current state, which is exactly
+  CalDAV conflict-handling behavior.
+
+This maps 1:1 onto CalDAV `PUT` with `If-Match`/`If-None-Match` so that
+DAV clients (the DAVx⁵ fork) get RFC 9110 §13.1.2 semantics with real
+status codes. The web client sends no conditional headers and keeps the
+200+echo arbitration of §9. The Worker still compares only the clear
+`ver` — it never inspects `nonce`/`ct` (threat model unchanged).
+
 ### §9 PUT /rows/{id} (UNCHANGED semantics, restated)
 
 - No stored row: accept any `ver ≥ 1`, store, echo the submitted

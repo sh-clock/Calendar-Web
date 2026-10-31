@@ -115,6 +115,12 @@ function badRequest(msg) {
   return json({ error: msg }, 400);
 }
 
+/** §9c: parse an ETag like "5" (quoted decimal ver) → 5, or null if malformed. */
+function parseEtagVer(header) {
+  const m = /^\s*"([0-9]{1,10})"\s*$/.exec(header);
+  return m ? Number(m[1]) : null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Bounded request body reading                                         */
 /* ------------------------------------------------------------------ */
@@ -518,10 +524,39 @@ export class Store {
     const ct = b64Decode(val.ct);
     if (!ct || ct.length > ROW_CT_MAX) return badRequest('bad_ct'); // §21
 
+    // §9c DAV-compat conditional mode: when the client sends standard HTTP
+    // conditional headers (If-Match / If-None-Match), arbitration failures
+    // are reported as REAL status codes (412, and 404 for a missing row with
+    // If-Match) instead of the 200+stored-echo shape the web client uses.
+    // The web client never sends these headers, so its behavior is unchanged;
+    // CalDAV clients (DAVx5 fork) get RFC 9110 §13.1.2 semantics. The worker
+    // still only compares the CLEAR ver — it never inspects nonce/ct.
+    const ifMatchHdr = req.headers.get('if-match');
+    const ifNoneMatchHdr = req.headers.get('if-none-match');
+    const conditional = ifMatchHdr !== null || ifNoneMatchHdr !== null;
+    const ifMatchVer = ifMatchHdr !== null ? parseEtagVer(ifMatchHdr) : null;
+    if ((ifMatchHdr !== null || ifNoneMatchHdr !== null) &&
+        (ifMatchHdr !== null && ifMatchVer === null)) {
+      return badRequest('bad_if_match'); // malformed If-Match (not a "ver" ETag)
+    }
+
     const existing = this.ctx.storage.sql
       .exec('SELECT ver, nonce, ct FROM rows WHERE id = ?', id)
       .toArray();
     const now = Math.floor(Date.now() / 1000);
+
+    if (conditional) {
+      if (ifMatchHdr !== null && existing.length === 0) {
+        // If-Match on a missing row: 404 (not_found WITH body, §5).
+        return json({ error: 'not_found' }, 404);
+      }
+      if (ifMatchHdr !== null && existing.length > 0 && existing[0].ver !== ifMatchVer) {
+        return new Response(null, { status: 412 }); // Precondition Failed
+      }
+      if (ifNoneMatchHdr !== null && ifNoneMatchHdr.trim() === '*' && existing.length > 0) {
+        return new Response(null, { status: 412 }); // Precondition Failed
+      }
+    }
 
     if (existing.length === 0) {
       this.ctx.storage.sql.exec(

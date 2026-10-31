@@ -52,7 +52,9 @@ export default {
     const stub = env.STORE.get(env.STORE.idFromName(DO_NAME));
 
     const headers = new Headers();
-    for (const h of ['authorization', 'content-type']) {
+    // §9c: conditional headers are forwarded so the DO can answer with real
+    // 412/404 status codes for DAV clients (If-Match/If-None-Match).
+    for (const h of ['authorization', 'content-type', 'if-match', 'if-none-match']) {
       const v = req.headers.get(h);
       if (v !== null) headers.set(h, v);
     }
