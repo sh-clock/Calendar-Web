@@ -65,3 +65,19 @@ The password is the designated test value `password` and the master key is a
 dummy generated at bootstrap — **nothing here is production-secure** (by
 explicit owner instruction). Credentials are delivered out-of-band and are
 never committed to this repository.
+
+## UI (v4.4): FullCalendar
+
+The calendar view layer is [FullCalendar v6.1.22](https://github.com/fullcalendar/fullcalendar)
+(MIT), vendored **verbatim** as the official prebuilt bundles
+(`js/vendor/fullcalendar/` — core, daygrid, timegrid, interaction,
+multimonth, list, each with its MIT licence). All rendering, drag & drop,
+resizing, selection, "+N more" popovers, the now-indicator and the toolbar
+are FullCalendar's own implementations, driven only through its documented
+options. The protocol (v4.3), the worker, the crypto layer and the sync
+engine are unchanged — see `protocol.md` and `docs/PROVENANCE.md`.
+
+Theme and appearance customisation lives under the **Settings** menu
+(top-right gear): light/dark/system theme, accent colour, first day of
+week, 12/24-hour time, time-grid slot size, week numbers, density and the
+custom-view day count — persisted per browser and applied live.

@@ -125,3 +125,41 @@ CLIENT only (the server stays content-blind, L1/D16):
   verbatim instead of destroying the row.
 - Client-side evt payload soft cap 200,000 chars (unreachable before the
   server's 64 KiB ciphertext law rejects the write).
+
+## FullCalendar rework (v4.4 UI, 2026-10-31)
+
+The view layer was replaced with vendored FullCalendar v6.1.22 (see
+docs/PROVENANCE.md). Native FullCalendar behaviours that differ from the
+previous Proton port — deliberately kept AS SHIPPED (user directive: do not
+tweak their drag/resize; copy verbatim):
+
+- **Event-title truncation is hard CLIP** (`overflow:hidden`, no ellipsis) —
+  FullCalendar v6's own CSS for `.fc-event-title`.
+- **Resize handles are hidden until hover/selection** (`.fc-event
+  .fc-event-resizer { display:none }` + `:hover/:selected` display:block) —
+  v6's own affordance design.
+- **Month-view `prev()` re-anchors the current date to the month start**
+  (range-start navigation), so a month→week switch after next/prev can show
+  a different week than "today's". Native navigation semantics.
+- **The `today` toolbar button is disabled when the current view already
+  contains today** — native state management.
+- **All-day select ranges are EXCLUSIVE at the end** (converted to the
+  editor's inclusive display-end with a −1 day shift).
+- **scrollTime is captured at calendar construction / resetOptions** — long
+  sessions re-entering day/week/custom views scroll to the unlock-time hour
+  rather than "now" (cosmetic; F-A5-5 accepted).
+- **Overlap tiling is side-by-side with width splitting** (native), and the
+  "+N more" popovers, now-indicator, navLinks and toolbar are native.
+- **Recurring timed↔all-day conversion drags are refused** (toast + revert):
+  converting flips the master's value type while RECURRENCE-ID exceptions
+  keep theirs, which the row grammar rejects (audit F-A1-4). Users edit such
+  events via the editor instead.
+- **White event text on the 20-colour Proton palette**: #F78400, #3CBB3A and
+  #B4A40E measure 2.5–2.6:1 against #FFFFFF (below WCAG 3:1). The palette
+  and chip styling are Proton-verbatim (ACCENT_COLORS); colours are
+  user-choosable. Inherited from the reference design, documented here
+  rather than silently altered.
+- **Pre-existing (not a rework regression, kept verbatim):** editing an
+  event created in a foreign timezone converts DTSTART to the browser's
+  wall time while the kept TZID parameter survives the RMW spread — the
+  event can shift on reload. Same behaviour as the pre-rework client.
