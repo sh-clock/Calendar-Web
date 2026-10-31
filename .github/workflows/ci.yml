@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit + protocol conformance (local workerless suites)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Pure-logic unit tests (calendar core)
+        run: node test/core-unit.mjs
+      - name: Crypto parity KATs (JS ↔ worker crypto)
+        run: node test/crypto-parity.mjs
+      - name: Syntax check the client entry points
+        run: |
+          node --check js/app.js
+          node --check js/api.js
+          node --check js/crypto.js
+          node --check js/ical.js
+          node --check js/calendar-core.js
+      - name: Vendored FullCalendar integrity (official v6.1.22 bundles present + banners)
+        run: |
+          for p in core daygrid timegrid interaction multimonth list; do
+            f="js/vendor/fullcalendar/$p/index.global.min.js"
+            test -s "$f" || { echo "MISSING $f"; exit 1; }
+            grep -q "FullCalendar" "$f" || { echo "BANNER MISSING in $f"; exit 1; }
+            test -s "js/vendor/fullcalendar/$p/LICENSE.txt" || { echo "MISSING license for $p"; exit 1; }
+          done
+          echo "vendored bundles OK"
