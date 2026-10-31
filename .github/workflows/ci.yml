@@ -18,10 +18,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
       - name: Pure-logic unit tests (calendar core)
         run: node test/core-unit.mjs
-      - name: Crypto parity KATs (JS ↔ worker crypto)
+      - name: Crypto parity KATs (JS client vs worker crypto)
         run: node test/crypto-parity.mjs
       - name: Syntax check the client entry points
         run: |
@@ -30,8 +29,9 @@ jobs:
           node --check js/crypto.js
           node --check js/ical.js
           node --check js/calendar-core.js
-      - name: Vendored FullCalendar integrity (official v6.1.22 bundles present + banners)
+      - name: Vendored FullCalendar integrity (official v6.1.22 bundles present)
         run: |
+          set -e
           for p in core daygrid timegrid interaction multimonth list; do
             f="js/vendor/fullcalendar/$p/index.global.min.js"
             test -s "$f" || { echo "MISSING $f"; exit 1; }
