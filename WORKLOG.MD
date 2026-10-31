@@ -649,3 +649,158 @@ BROWSER E2E + VLM record below).
 | 2026-10-31 | Main orchestrator | Worker §22 → 4.2; index.html cleaned; ical/core bug fixes (spanDays RFC-exclusive, RDATE expansion+serialization, between() bound, all-day key normalization). |
 | 2026-10-31 | Agents A/B/C + orchestrator | Audit wave 4: 1 blocker + 12 majors + 19 minors found; all majors + high-value minors fixed (see W4 table); +27 tests. |
 | 2026-10-31 | Main orchestrator | E2E + VLM visual audit; visual fixes (SVG icons, close-X, copy). Production verified v4.2 + cleaned. |
+
+## AUDIT WAVE 5 — AGENT F (fresh eyes: spec/docs + server + cross-cutting, 2026-10-31)
+
+Scope: docs/PROTOCOL-v4.2.md, docs/DEVIATIONS.md (v4.2 section), worker/src/*,
+test/api-suite.mjs PHASE V42, README/index.html/css cross-cutting, git hygiene.
+Full local suite RE-EXECUTED by this audit: core-unit 164/164 · crypto-parity
+38/38 · api-suite 138/138 · §19 phases ALL GREEN (matches the Task 2.1 record).
+Worker "one-line change" claim VERIFIED (git diff 27b6994..HEAD -- worker/ =
+PROTO_VERSION + 2 comment lines; zero content inspection — only comment
+mentions of evt/cmeta). Git: clean, synced with origin/main; no secrets ever
+committed (diff-filter=A scan + github_pat/ghp_/AKIA/hex64 scans clean).
+PHASE V42 241-char id math verified correct (4+36+1+200=241; 257→bad_id);
+phase cleans up after itself (v42.12). FINDINGS (2 BLOCKER, 5 MAJOR, 9 MINOR,
+5 INFO — full evidence in the audit report):
+
+- [F-B1 BLOCKER] .github/workflows/pages.yml:6 — `branches: ain]` (corrupted
+  from `[main]` since 7a925a6): the push trigger can only fire on a branch
+  literally named `ain]` → NO push ever deploys Pages; only manual dispatch
+  (which is what was verified). All v4.2 pushes never published.
+- [F-B2 BLOCKER] .github/workflows/pages.yml assemble step — `cp js/*.js` does
+  NOT copy js/vendor/rrule.mjs (nested dir + .mjs extension): any deploy that
+  DOES run ships a client whose module graph 404s (calendar-core.js imports
+  './vendor/rrule.mjs') → dead site. Even a fixed trigger deploys a broken
+  client until this is fixed.
+- [F-M1 MAJOR] docs/PROTOCOL-v4.2.md:104-107 — §13b hash description
+  inaccurate + under-specified: "128-bit FNV-derived" is not FNV (4-lane
+  FNV-1a-inspired mixer, non-FNV seeds, input mangling, UTF-16 code units);
+  the pid carries only 120 hash bits (h[12]/h[16] replaced by fixed '5'/'a'
+  nibbles) while js/calendar-core.js:502 claims "126 effective bits" (wrong —
+  verified by execution: 30 hex chars = 120 bits). A second client (davx5
+  fork) cannot reproduce projIdHash from the doc text → same event derives
+  different pids per client (duplicate bucket entries; the exact failure
+  class W4-3 fixed). Doc must specify the algorithm normatively (or mandate
+  verbatim port) and drop the FNV claim.
+- [F-M2 MAJOR] README.md — stale for v4.2: no v4.2/CalDAV/iCalendar mention,
+  docs/PROTOCOL-v4.2.md absent from the Layout table, "dependency-free client"
+  false (vendored js/vendor/rrule.mjs), and the "Running locally" .dev.vars
+  recipe (ALLOWED_ORIGIN=http://localhost:8787 only) makes the very next
+  command (`npm run test:local`) FAIL the CORS phases (x1/x3/x6/x8–x11 —
+  worker/src/index.js allowedOrigin is an exact-match list).
+- [F-M3 MAJOR] Licence/attribution gap: css/style.css:8-9 and js/app.js:5
+  reference "LICENSE" and "docs/PROVENANCE.md" — NEITHER exists in the repo;
+  package.json declares "license": "MIT" while app.js/style.css embed
+  GPL-3.0-ported Proton code (Commandment 8: licence attribution must be
+  preserved). Public repo → compliance exposure.
+- [F-M4 MAJOR] js/app.js saveEvent edit path (≈:1714-1759) ignores
+  form.calUuid — the editor's Calendar picker is enabled in edit mode but the
+  choice is silently discarded (event stays in the old evt:{cal}:{uid} row);
+  the documented move procedure (PROTOCOL-v4.2.md:90-92 DELETE+create) is
+  unimplemented.
+- [F-M5 MAJOR] The v4.1 base specification is not in the repo (docs/ ships
+  only the v4.2 delta + deviations; the base lives outside at upload/…):
+  "Everything not stated here is v4.1 verbatim" dangles normatively — the
+  davx5 fork cannot implement from the repo alone.
+- [F-MINOR] calendar-core.js:12 stale comment "entry ids use the x:{uid}
+  derived namespace" (they are x:{pid} — reintroduces the W4-3 confusion);
+  PROTOCOL:118 "priority +1 promotion" contradicts the code (all-day=1,
+  timed=2 under §13's "0 = highest" — all-day is numerically LOWER);
+  PROTOCOL:125 "(or via a fresh client bootstrap)" — a fresh client cannot
+  heal a corrupt bucket (failures are deterministic); only rotation (or admin
+  force-wipe) heals; PROTOCOL:150 "VALARM (one, …)" — the client writes N
+  alarms (notif-add); api-suite v42.11 is TAUTOLOGICAL (submits the stored
+  envelope itself → accept-vs-rebase indistinguishable for evt ids; submit a
+  fresh envelope to pin the echo); PHASE V42 header comment "empty manifest"
+  (3 seeded cal: rows exist; evt 256-char boundary (uid=215) untested — only
+  241/257); dead CSS: .is-drop-target/.calendar-daygrid-column-glow (no
+  drop-target highlight — drag UX gap), .isSelected, .popover-footer(+.left),
+  .modal-backdrop; missing CSS for emitted .corrupt-note/.eventpopover-inner/
+  .unstyled; VTIMEZONE: doc "NOT stored" vs code drops foreign VTIMEZONE on
+  any edit (contradicts ical.js's own never-drop header).
+- [F-INFO] default calendar auto-resurrects after deleting the last calendar
+  (syncAll bootstrap condition) — undocumented; DEVIATIONS "soft cap 200,000"
+  is a hard corrupt-reject on parse (unreachable server-side); .is-outside-
+  month emitted with no rule is intentional (D20 no dimming); production
+  claims (v4.2 deployed, 23 empty buckets) not verifiable from the repo; CF
+  API-token loss already recorded by the orchestrator.
+
+Positive verifications (evidence-based): CalDAV mapping table ↔ api.js wire
+shapes all match (manifest {rows:[{id,ver}]}, getRow envelope, putRow
+{ver,nonce,ct} + D14 identity, DELETE idempotent); DEVIATIONS v4.2 claims
+verified line-by-line in code (UID rules, cmeta schema, RRULE whitelist,
+corrupt classes, PT0S/PERIOD tolerance, 200k cap, title cap/(untitled));
+§22 quote accurate; index.html ↔ app.js: all 42 #id selectors exist; §13b
+pid grammar/determinism/disambiguation verified by execution (version nibble
+'5', variant nibble 'a'); repo WORKLOG.MD == parent WORKLOG.MD.
+
+## AUDIT AGENT D — WAVE-4 FIX VERIFICATION (2026-10-31, adversarial repros)
+
+Scope: prove the 9 wave-4 fix areas in js/calendar-core.js + js/ical.js wrong.
+Method: 115-check adversarial Node repro suite at `/home/z/my-project/audit-d/repro.mjs`
+(+ `hash-det.mjs` cross-process determinism). core-unit re-run: **164/164**.
+
+VERIFIED (fix works incl. adversarial): W4-1 span-aware lower bound (boundary-exact
+lower bound inclusive; upper edge no toDay+1 leak; timed 10-day + all-day 30-day spans;
+DST fall-back week wall-time stability; RDATE-before-window span overlap; end-at-midnight
+RFC exclusion). W4-2 instant-normalized keys (Z-form + foreign-TZID EXDATE/RECURRENCE-ID
+match Berlin/NY/Sydney/Tokyo; type mismatches correctly NOT matching: all-day↔Z, timed↔DATE).
+W4-3 projIdHash (10k random mulberry32 battery + structured battery: zero collisions vs
+distinct inputs; deterministic in-process AND across 3 separate node processes; all ids
+grammar-valid; two calendars same UID → distinct ids end-to-end through deriveWindowBuckets).
+W4-4 RDATE union dedupe (within one property, across properties, across tz forms
+Tokyo+Z/Berlin+Z, vs RRULE/EXDATE/RECURRENCE-ID instants; type-mismatch ignored; PERIOD
+tolerated). A8 floating UNTIL (time-of-day kept; UNTIL==occurrence inclusive across the
+Berlin Oct-25 fall-back; −1 min exclusive; DATE-form; UNTIL<DTSTART → 0). A9/A11/A14
+rejections (two masters, two UIDs, exception-without-rrule, UID 200/201 boundary, all 13
+single-occurring prop duplicates; EXDATE/RDATE multi-property legal; SECONDLY et al. rejected).
+A6/A7 params (TRIGGER RELATED=END + custom quoted + VALUE=DATE-TIME absolute; TEXT params
+LANGUAGE/ALTREP/X-GEO incl. quoted colon/comma; escaped TEXT; folding; byte-idempotent).
+A13 title cap (exactly 500 kept+validates; 501/600 sliced; multi-byte units).
+
+NEW FINDINGS (repros runnable at audit-d/repro.mjs; D changed NO code):
+
+| # | Sev | Finding |
+|---|-----|---------|
+| D1 | MAJOR | RECURRENCE-ID value-type ≠ DTSTART type (timed/Z RECURRENCE-ID on all-day master; DATE-form on timed master) is ACCEPTED by parseEvtPayload → occurrence not overridden → occurrence + exception both render on the same day → two bucket entries with the SAME projIdHash id → normalizeBucket null → app.js writeBucketRow PUTs a bucket its own reader rejects → permanent corrupt-flagged day (identical corruption class to W4-3/W4-4). Reject type-mismatched RECURRENCE-ID (RFC 5545 §3.8.4.4 requires DTSTART value-type match). |
+| D2 | MAJOR | EXDATE/RDATE property with MIXED parseable+unparseable values (e.g. `RDATE:20260101T120000Z,20260102T120000/PT1H`): the parseable prefix is pushed into rdates AND the whole line is kept verbatim (tolerated) → every parse→serialize cycle duplicates the parseable values (2→3→4→5 copies verified) → unbounded RMW growth → row eventually rejected at the 200k cap. Per-value tolerance or all-or-nothing per property. |
+| D3 | MINOR | ical.js veventFromProps `ev.dtend && ev.duration` truthiness: DURATION:PT0S (parses to 0) + DTEND bypasses dtend_and_duration — row ACCEPTED with mutually-exclusive props and DURATION:PT0S silently dropped on round-trip (never-drop violation; the wave's own requirement "PT0S with DURATION + DTEND must still throw" is broken). PT30M+DTEND still throws. |
+| D4 | MINOR | parseEvtPayload duplicate-RECURRENCE-ID check (calendar-core.js:164) compares wall STRINGS, not occKey instants → two exceptions with instant-equal RECURRENCE-IDs in different forms (Z + TZID) bypass → both render → duplicate ids → corrupt bucket. |
+| D5 | MINOR | Duplicate TRIGGER (or ACTION) inside one VALARM: last-wins; earlier prop silently dropped on round-trip (never-drop violation); row accepted. |
+| D6 | MINOR | DATE-TIME property params beyond TZID/VALUE are dropped on round-trip (DTSTART/DTEND/DTSTAMP/RECURRENCE-ID/EXDATE/RDATE) — incl. RFC-standard RANGE=THISANDFUTURE on RECURRENCE-ID: a davx5 "this & following" edit loses its marker permanently once this client rewrites the row. |
+| D7 | MINOR | deriveBucketEntries title cap `slice(0,500)` can split an astral surrogate pair (BMP prefix + ≥250 astral chars) → lone surrogate in the stored bucket title → U+FFFD in UTF-8 bytes. |
+| D8 | DOC | projIdHash comment "126 effective bits" → actually 120 (version/variant nibbles fixed; execution-verified on 10k). Cross-confirms F-M1 (same bug found independently, both by execution). |
+| D9 | DOC | wallToInstantUTC header comment still claims non-existent times resolve "to the transition instant": Sydney 2026-10-04 02:30 (nonexistent) → 2026-10-03T15:30Z (01:30 AEST), NOT the 16:00Z transition. A12 disposition said "doc-comment corrected only" — it wasn't (accurately). |
+| D10 | LIMIT | Ambiguous fall-back wall times resolve to the LATER offset (documented policy): a foreign Z-form EXDATE computed against the FIRST pass (20261025T003000Z for Berlin 02:30) does NOT match the ambiguous occurrence; local-form and later-pass Z-form do. Inherent wall-time-model edge, self-consistent, one day/year per event at that wall time. |
+
+Observations (no action): foreign-TZID RDATE renders at its authored wall time —
+consistent with the exception-rendering policy, instant keys correct (Tokyo+Z
+same-instant RDATEs dedupe correctly). First repro run's "696/10000 distinct"
+collision scare was a repro artifact (float-overflow LCG), not a hash bug.
+
+## AUDIT WAVE 5 (2026-10-31) — fix-verification + fresh eyes
+
+Agents D (core fix verification, 115 adversarial repros), E (UI verification
+— timed out; scope covered by orchestrator's in-browser B1-B5 checks), F
+(fresh-eyes spec/server/cross-cutting). Findings below; dispositions in the
+wave-5 fix commit.
+
+### Wave-5 findings (all verified by the agents with repros)
+
+| # | Src | Severity | Finding |
+|---|-----|----------|---------|
+| W5-1 | F1 | BLOCKER | pages.yml push trigger corrupted (`branches: ain]`) — pushes never deploy. |
+| W5-2 | F2 | BLOCKER | pages.yml assemble step does not copy js/vendor/rrule.mjs — deployed site 404s the module graph → dead client. |
+| W5-3 | D1 | MAJOR | RECURRENCE-ID value-type ≠ DTSTART type accepted → occurrence + exception both render → duplicate projIds → corrupt bucket. |
+| W5-4 | D2 | MAJOR | Mixed valid+unparseable EXDATE/RDATE values: valid prefix parsed AND whole line preserved verbatim → unbounded growth per round-trip. |
+| W5-5 | F3+D8 | MAJOR | §13b doc hash description inaccurate (not FNV, UTF-16 units, 120 effective bits not 126) — cross-client law must be normative. |
+| W5-6 | F4 | MAJOR | README stale (v4.1-only, dependency-free claim false, broken local CORS recipe). |
+| W5-7 | F5 | MAJOR | LICENSE/docs/PROVENANCE.md referenced but nonexistent; package.json MIT vs GPL-ported code conflict. |
+| W5-8 | F6 | MAJOR | Calendar change in the editor silently ignored (documented DELETE+create move unimplemented). |
+| W5-9 | F7 | MAJOR | v4.1 base spec not committed to the repo (dangling § citations; davx fork cannot implement from repo alone). |
+| W5-10 | D3/D4/D5/D6/D7, F8-F15 | MINOR | PT0S+DTEND check bypass; dup-RECURRENCE-ID wall-string compare; VALARM dup props; DT*/RECURRENCE-ID params dropped (RANGE=THISANDFUTURE); surrogate-split title cap; v42.11 tautology; dead drop-target CSS; .corrupt-note unstyled; doc priority/VALARM/self-heal wording; stale x:{uid} comment; VTIMEZONE drop vs never-drop contract. |
+
+Accepted: D10 (ambiguous fall-back first-pass Z-form EXDATE — inherent
+wall-time-model edge, ≤1 day/year, documented); F15 (VTIMEZONE not
+round-tripped — documented deviation; all clients carry tz databases).
