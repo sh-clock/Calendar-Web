@@ -924,3 +924,78 @@ is cloned at /home/z/my-project/davx, upstream bitfireAT/davx5-ose
 - App-side wiring (Android): AccountsActivity/CalendarsListActivity →
   the fork adds a "clock row store" account type whose collections map
   to cmeta rows; see app-ose module + ical4android AndroidCalendar.
+
+---
+
+## SESSION 2026-10-31 (post-crash) — USER BUG REPORT WAVE 6 + v4.3 REDESIGN
+
+User reports (verbatim, 2026-10-31 ~02:00):
+1. Protocol VERY slow — saving ONE event fires 58 requests.
+2. Calendar freezes upon "autosync" (excessive requests).
+3. Week/day views NOT implemented.
+4. Drag & drop fails with errors.
+5. Events disappear after save (CRUCIAL); user sees no test events.
++ Add ALL Proton Calendar features (dark mode etc., non-Proton-specific).
++ Protocol may be modified for efficiency → document at protocol.md.
++ Worker must remain blind to event data (threat model unchanged).
++ Stress test with parallel agents afterwards. Then davx5 fork.
+
+### Orchestrator evidence gathering (all reproduced on local dev worker + real Chromium):
+
+**E1 — request amplification (measured with Playwright request counter):**
+- unlock+initial sync on EMPTY store: 27 requests (1 config + 1 version + 1 manifest
+  + 1 cmeta + 23 unconditional cal: bucket GETs).
+- save ONE event: 29 requests (2 evt GETs + 1 evt PUT + manifest + 23 bucket GETs
+  + 1 bucket re-read + 1 bucket PUT). A recurring/multi-day event covering ~15
+  days ⇒ ~58 requests — matches the user's number exactly.
+- every manual sync with NO changes: 24 requests. 3 syncs = 72.
+- RELOAD: 28 requests. Drag: 29 requests.
+Root causes: (a) syncAll unconditionally GETs all 23 `cal:` bucket rows every
+sync; (b) every mutation re-runs a full syncAll + bucket re-derivation with
+GET+PUT per changed day; (c) putRowRMW always GETs before PUT even when the
+manifest already knows the ver.
+
+**E2 — disappearing events mechanism (code-proven):**
+- saveEvent: PUT(evt row) SUCCEEDS, then `await syncAll()` runs 24–58 requests
+  BEFORE renderAll(). ANY single failure (30s abort, rebase_exhausted,
+  bucket_corrupt, network) throws → "Save failed: …" toast + NO re-render →
+  the user believes the event was not saved although it IS on the server.
+- unlock(): same coupling — syncAll failure → LOGIN FAILS with a scary error
+  even though all data is fine. Hard proto-version gate can also lock users out.
+- Production forensics (decrypt with retained PoC dummy key): manifest has 23
+  `cal:` buckets + 1 cmeta + ZERO evt rows; buckets at ver 8/3/3 are EMPTY —
+  the user's events existed (bucket vers climbed) and were later deleted
+  server-side (most plausible: calendar-delete flow or per-event deletes during
+  testing; move path also deletes). Buckets were then re-derived empty.
+  Production ALSO has no test events from the developer (my tests ran against
+  local dev only) — must create visible test events after v4.3 deploy.
+
+**E3 — DnD:** month-grid drag actually WORKS for the simple case (Playwright
+drag moved an event −23 days; PUT fired). User-visible failures are dominated
+by E2's post-save syncAll failures ("Move failed: …" though the move landed).
+Recurring-drag + all-day-drag paths still need explicit verification.
+
+**E4 — no autosync exists at all** (user expected one); with the current sync
+cost, adding one would indeed freeze the UI.
+
+### v4.3 REDESIGN (user-approved protocol modification; see protocol.md):
+1. Client NEVER reads/writes `cal:` bucket rows. Clock preview derives locally
+   (pure function of evt rows). `cal:` rows are deprecated; one-time production
+   cleanup (they are a derived cache, never source of truth).
+2. NEW endpoint `POST /rows:batch` {ids:[…≤256]} → {rows:[envelope|missing]}
+   — worker stays blind (opaque envelope relay only).
+3. Sync = 1 manifest GET + ≤1 batch POST; no writes; failure-tolerant
+   (per-row errors → corrupt flags; render ALWAYS runs).
+4. Mutations: RMW fast path using manifest-known ver (1 PUT), local state
+   update + immediate render; rebase → re-fetch + rebuild (≤8).
+5. Autosync: 60s + on focus/visibility; never blocks UI; no overlay.
+6. Soft version gate: warn on mismatch, degrade to per-row GETs if batch
+   missing (4.2 workers keep working read/write).
+7. Week/day/custom/year views: Proton TimeGrid port (verbatim
+   splitTimeGridEventsPerDay + layout + timeGridMouseHandler + dateHelpers,
+   interval=30, MIN_DURATION=15, all-day header row numberOfRows=3 h=28px).
+8. Dark mode: Proton lumo-dark/dark-base.css tokens verbatim under
+   [data-theme="dark"]; toggle in topbar; prefers-color-scheme default.
+
+### v4.3 STATUS LOG
+- [in progress]
