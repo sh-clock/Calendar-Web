@@ -2335,3 +2335,58 @@ as-is ("do not manually tweak it if possible").
   native), all-day select end = exclusive.
 
 ### Audit wave (this section) — 6 agents, findings below
+
+## AUDIT WAVE DISPOSITIONS (2026-10-31, complete)
+
+Agents: A1 (backbone preservation), A3 (html/css/vendor), A4 (protocol/wire),
+A5 (settings/state), A2-FINAL (FC adapter code review) + orchestrator-executed
+A6 stress groups (agent context limits) + VLM visual audit with programmatic
+cross-verification. Findings files: /home/z/my-project/audit-d/fc-A*-*.md.
+
+### Fixed (all regression-tested — scripts/e2e-fc-fixes.mjs 25/25):
+- F-A1-1/2 BLOCKER: recurring-choice Cancel reached scope callbacks
+  (beginDelete EXDATE-deleted the occurrence!) → onCancel parameter; the
+  backbone callers keep their verbatim signature.
+- F-A1-3/6 BLOCKER: applyAllDayConversion kept stale VALUE=DATE params →
+  corrupt rows (dtProp prefers keptParams) → fresh params on rewritten values.
+- F-A1-4 BLOCKER: recurring timed↔all-day conversion corrupts (recId type
+  mismatch) → refused loudly, drag reverts.
+- F-A1-5 MAJOR: converted timed events floating → browser IANA tz.
+- F-A1-8/F-A1-9, F-A3-1..4, F-A5-1..4/6/7: datesSet today-refresh, verb
+  toasts, active-button specificity (beats FC's 0,4,0), theme-boot
+  precedence, accent via light+dark <style> (majors computed), reset writes
+  default LS_VIEW, accent validation, guarded settings reads + legacy key
+  cleanup, fmtTime honours hour12 (call sites updated).
+- F-A2-1 MAJOR (A2-FINAL): handleDateClick dead 'multimonth' prefix →
+  info.allDay branch; week/day all-day-strip clicks now create all-day
+  events (T8). multiMonth emits no dateClick natively (verified).
+
+### Accepted (documented in docs/DEVIATIONS.md):
+- F-A1-7/F-A5-6 residual bare localStorage reads in app.js outside settings
+  (pre-existing pattern; settings reads now guarded).
+- F-A3-5 a11y: 3 palette colors 2.5-2.6:1 vs white (Proton-verbatim palette).
+- F-A2-2 zero-length timed rendering (FC defaultTimedEventDuration 1h);
+  F-A2-3 floating events render as UTC (no in-app producer); F-A2-4
+  scrollTime captured at build; F-A2-5 startDelta ignored (resizableFromStart
+  false); F-A4-6 CORS preflight counting (Playwright); FC-native behaviours
+  (clip truncation, hover resizers, prev() re-anchoring, today-disabled,
+  JSON-wrapped row payloads — protocol v4.1 design).
+- F-A3-11 docs → DONE (PROVENANCE/README/DEVIATIONS updated).
+- Mini-calendar firstDay bug (found by VLM+verification) → FIXED.
+
+### Final evidence (this session):
+api-suite 163/163 ×3; core-unit 176/176; crypto-parity 38/38;
+e2e-fc 50/50; e2e-fc-fixes 25/25; stress-A6-edge 10/10; stress-A6-dnd 15/15
+(= 477 assertions, 0 failures, 0 page/console errors). GitHub Actions CI
+green (unit + deploy) on the audit-fix commits; Pages redeploying.
+
+### Verification notes (for the record):
+- Row payloads are JSON-wrapped by design (crypto.js encryptRow
+  JSON.stringify / decryptRow JSON.parse) — test helpers must JSON.parse
+  the decrypted plaintext (fixed in both E2E files).
+- The sandbox shell transport strips '[m' sequences from command strings
+  AND displayed output — verify bracket content via od -c / the file tools.
+- Test-geometry lessons recorded: FC month-grid event today = bottom-right
+  (drags must go left); .fc-timegrid-col rects are content-absolute inside
+  the scrolled container (compute click points from the visible scroller);
+  multiMonth has no .fc-multimonth-day class (dayGrid cells inside months).
