@@ -163,3 +163,17 @@ tweak their drag/resize; copy verbatim):
   event created in a foreign timezone converts DTSTART to the browser's
   wall time while the kept TZID parameter survives the RMW spread — the
   event can shift on reload. Same behaviour as the pre-rework client.
+
+### Adapter audit (A2) — accepted minors
+- **Zero-length timed events** (DTEND = DTSTART, creatable only by setting
+  identical editor times): FullCalendar drops a non-positive `end` and
+  renders the event at `defaultTimedEventDuration` (1 h); resizing such an
+  event anchors to the model start. Niche; the editor's swap rule makes
+  zero-length an explicit user choice.
+- **Floating (TZID-less) timed events** render as UTC rather than
+  observer-local (RFC 5545 §3.3.5). No in-app producer writes floating
+  times (editor and conversions always stamp the browser IANA zone);
+  latent interop edge for foreign clients only.
+- **`startDelta` on resize is ignored** — safe while
+  `eventResizableFromStart` stays at its default `false` (verified in the
+  vendored bundle).

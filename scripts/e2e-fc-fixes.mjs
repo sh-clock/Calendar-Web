@@ -335,6 +335,47 @@ ok('T7b: reset restores the DEFAULT view + legacy keys are cleaned',
   afterReset.lv === 'dayGridMonth' && afterReset.legacyTheme === null && afterReset.legacyView === null,
   JSON.stringify(afterReset));
 
+/* ============ T8: all-day-surface clicks create ALL-DAY events (F-A2-1) ============
+ * multiMonth (year view) does NOT emit dateClick in FullCalendar v6.1.22
+ * (verified empirically — native limitation); the real F-A2-1 surface is
+ * the WEEK/DAY all-day strip, where the old view-type branch produced a
+ * timed 00:00 event instead of an all-day one. */
+await page.click('.fc-timeGridWeek-button');
+await page.waitForTimeout(800);
+const adRow = await page.evaluate(() => {
+  // the all-day strip sits above the time grid (inside .fc-daygrid-body)
+  const el = document.querySelector('.fc-daygrid-body');
+  return el ? el.getBoundingClientRect().toJSON() : null;
+});
+if (adRow) {
+  // click an empty spot of the all-day strip (away from any event chip)
+  const chips = await page.evaluate(() => [...document.querySelectorAll('.fc-daygrid-event')].map(e => e.getBoundingClientRect().toJSON()));
+  let px = null;
+  for (let fx = 0.15; fx <= 0.9 && !px; fx += 0.1) {
+    const x = R(adRow.x + adRow.width * fx);
+    const y = R(adRow.y + adRow.height / 2);
+    if (!chips.some(c => x >= c.x - 2 && x <= c.x + c.width + 2 && y >= c.y - 2 && y <= c.y + c.height + 2)) px = { x, y };
+  }
+  if (px) {
+    await page.mouse.click(px.x, px.y);
+    await page.waitForTimeout(700);
+    const t8open = await page.locator('#editor-modal').isVisible();
+    ok('T8: all-day-strip click opens the editor', t8open);
+    if (t8open) {
+      const allDayChk = await page.locator('#editor-modal input[type=checkbox]').first().isChecked();
+      ok('T8: the pre-filled event is ALL-DAY (info.allDay branch)', allDayChk, 'checkbox=' + allDayChk);
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+    }
+  } else {
+    ok('T8: found an empty all-day strip spot', false, 'strip full of chips');
+  }
+} else {
+  ok('T8: all-day strip present in week view', false, 'no .fc-daygrid-body');
+}
+await page.click('.fc-dayGridMonth-button');
+await page.waitForTimeout(500);
+
 /* ============ wrap up ============ */
 console.log('\n=== RESULT: ' + pass + ' passed, ' + fail + ' failed ===');
 console.log('=== PAGE ERRORS (' + pageErrors.length + ') ===');

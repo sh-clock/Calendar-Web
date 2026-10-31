@@ -1278,7 +1278,12 @@ function handleSelect(info) {
 /** Plain click on an empty day/timeslot → create (Proton default duration). */
 function handleDateClick(info) {
   closeAllOverlays();
-  if (info.view.type.startsWith('dayGrid') || info.view.type.startsWith('multimonth')) {
+  // F-A2-1 (audit wave): branch on FullCalendar's OWN all-day signal — the
+  // previous view-type prefix test ('multimonth') never matched the real
+  // 'multiMonthYear' view type (camelCase), so year-view day clicks created
+  // timed 00:00 events; info.allDay is true on every all-day surface
+  // (dayGrid month, multiMonth year, the week/day all-day strip).
+  if (info.allDay) {
     beginCreate(localWallOf(info.date).date); // all-day (month-grid semantics)
     return;
   }
