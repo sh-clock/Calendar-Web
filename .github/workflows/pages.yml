@@ -31,9 +31,11 @@ jobs:
           enablement: true
       - name: Assemble site (static client only)
         run: |
-          mkdir -p _site/js _site/css
+          mkdir -p _site/js/vendor _site/css
           cp index.html _site/
           cp js/*.js _site/js/
+          cp js/vendor/rrule.mjs _site/js/vendor/rrule.mjs
+          cp js/vendor/rrule.LICENCE _site/js/vendor/rrule.LICENCE
           cp css/*.css _site/css/
           cp README.md _site/ 2>/dev/null || true
       - name: Upload artifact
