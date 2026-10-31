@@ -2181,3 +2181,38 @@ O(1) base64 canonicality check was additionally property-tested by me over
 - Worker DEPLOYED to production (version 0af7ea3f, §9d live). Live checks:
   etag present, 304 on match, 200 on stale, CORS allows conditional headers,
   pre-existing rows intact (additive migration, epoch starts at 0).
+
+## SESSION FINAL STATE (2026-10-31, this session complete)
+
+### davx5 fork (sh-clock/davx, branch row-store @ 2c9afe631) — CI FULLY GREEN
+- Rowstore CI (rowstore-ci.yml): Rowstore JVM tests ✓ (37/37: 21 adapter +
+  16 account/URL/crypto-parity KATs), Core unit tests ✓ (the :core row-store
+  wiring compiles against the real Android toolchain + upstream tests pass),
+  Build OSE debug APK ✓ (~39.5 MB artifact on every push — downloadable from
+  the Actions run; the 4 GB sandbox cannot build Android, CI is the gate).
+- Audit wave 1 (A1/A2/A3): 1 BLOCKER + 6 MAJOR + 8 MINOR fixed (see the
+  disposition entry above); compile errors found by CI round-trips (2) and
+  locally (mirror init script now lets the JVM suite run in the sandbox —
+  /home/z/my-project/scripts/aliyun-mirror.gradle, LOCAL-ONLY, never committed).
+- davx5 usage (user-facing): log in with URL = server, USERNAME = the 64-hex
+  AUTH_UI provisioning code (the ?setup= link value), PASSWORD = the calendar
+  password. Calendars appear as CalDAV collections; events sync 2-way with
+  §9c conflict semantics (server wins + re-download, like upstream).
+
+### calendar-web (sh-clock/Calendar-Web @ fe92525) — DEPLOYED + VERIFIED
+- Worker production 0af7ea3f (§9d live; 304/etag/CORS verified by curl).
+- Pages client live with the whole efficiency wave (verified: new code
+  served). Full local evidence: core-unit 176/176, crypto-parity 38/38,
+  api-suite 163/163 (incl. 10 §9d tests), E2E v43 40/40 (after the
+  E2E-caught CORS fix), probe-304 8/8.
+- protocol.md: §9d conditional read documented (additive v4.3, no version
+  bump — old clients/servers interoperate in both directions).
+
+### Deferred (next session, with reasons)
+- E3-2/E3-3/E3-5 rendering refactors (DnD rAF throttle, month-model mousedown
+  cache, incremental save rendering) — bigger refactors; deferred.
+- E1-3 per-request gate cache (§4 timing side-channel considerations).
+- davx5: instrumented emulator E2E (the CI runs unit tests + builds the APK;
+  a virtual-device job like upstream's synctools matrix would be the next
+  evidence level); calendar CREATION from davx5 (MKCALENDAR-analog); the
+  '/'-in-UID row-id grammar edge.
