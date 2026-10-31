@@ -999,3 +999,54 @@ cost, adding one would indeed freeze the UI.
 
 ### v4.3 STATUS LOG
 - [in progress]
+
+### v4.3 STATUS LOG (updated)
+- [x] protocol.md (repo root) — v4.3 normative spec (§9b batch, §13c local
+      derivation, §5 sync strategy, soft version gate, davx compliance notes)
+- [x] worker: POST /rows:batch + CORS POST + proto 4.3; deployed to production
+      (version cd628d74); production verified (batch, CORS preflight, version)
+- [x] client: read-only failure-tolerant sync (manifest + ≤1 batch POST),
+      RMW fast path (save = 1 PUT), autosync 60s + focus (never blocks UI),
+      soft version gate, no post-mutation sync chain
+- [x] views: day / week / custom (2-14 days) / year — Proton TimeGrid port
+      (splitTimeGridEventsPerDay, layout columns, MIN_DURATION=15, interval=30,
+      all-day row numberOfRows=3, now-line, scrollToNow, DayButtons)
+- [x] TimeGrid DnD: click/drag-create + event MOVE (day+minute snapping);
+      month-grid DnD preserved and generalized to the all-day row
+- [x] dark mode (Proton lumo-dark tokens verbatim) + theme toggle + FOUC guard
+- [x] keyboard: n/t/d/w/m/y/v/arrows; view persisted; custom-days picker
+- [x] wave-6 bug fixes (beyond the protocol redesign):
+      * setHighlight ReferenceError killed ALL month-grid click/drag-create
+        (pre-existing v4.2 bug — REAL, verified: console error, editor never
+        opened; fixed by removing the stray call)
+      * duplicate month render after the rAF gridRows remeasure (renderMonth
+        appended a second .daygrid-wrap without clearing view-root)
+      * new-calendar visibility (calVis persisted map not updated → new
+        calendar invisible until next sync in v4.3; v4.2 masked via syncAll)
+      * sticky-day navigation (VLM-audited): month/year nav destructively
+        clamped day-of-month through short months; now clamps from a sticky
+        navDay that only explicit selections update
+      * ver=0 create fast path (putRowRMW skipped the pre-GET)
+- [x] test evidence: core-unit 176/176, crypto-parity 38/38, api-suite
+      153/153 (incl. 15 new §9b batch conformance checks), local E2E 40/40
+      (save=1 PUT, sync=1 req idle, reload persistence, recurring exceptions,
+      multi-calendar colors, time-grid DnD, dark mode, keyboard, delete),
+      PRODUCTION E2E 18/18 with 6 total requests (live create/delete)
+- [x] production seeded with visible demo data: "My calendar" (user's) +
+      "Personal" (#EC3E7C) + 6 events (all-day welcome, MO-FR standup w/
+      VALARM, timed lunch, timed review, 3-day all-day trip, monthly RRULE);
+      23 deprecated cal: buckets removed (protocol.md §13c, one-time)
+      NOTE: initial seeding had a REAL bug (payloads not JSON-encoded →
+      browser decryptRow JSON.parse threw → rows unreadable). Root cause:
+      my seed script did not replicate crypto.js encryptRow's JSON.stringify
+      of the payload. §6 payloads are JSON values — evt rows carry the
+      VCALENDAR text JSON-encoded. Fixed + re-seeded + live-verified.
+- [x] VLM visual audits: month view ("catastrophic grid height" claim REFUTED
+      by measurement: 5×96px weeks in a 528px root — false positive; timed
+      chips as text+dot is verbatim Proton), week view (found the REAL
+      sticky-day navigation bug — fixed), dark mode audited visually.
+
+## AUDIT WAVE 7 (2026-10-31) — v4.3 parallel audit + stress (IN FLIGHT)
+Wave-7 focus: the ~1100 new/changed lines in js/app.js (sync engine,
+mutations, TimeGrid port, DnD), worker/src (batch), protocol.md, CSS, and
+stress coverage of common + niche use cases. Agents: see findings below.
