@@ -804,3 +804,79 @@ wave-5 fix commit.
 Accepted: D10 (ambiguous fall-back first-pass Z-form EXDATE — inherent
 wall-time-model edge, ≤1 day/year, documented); F15 (VTIMEZONE not
 round-tripped — documented deviation; all clients carry tz databases).
+
+## AUDIT WAVE 5 — DISPOSITIONS & FINAL STATE (2026-10-31)
+
+All wave-5 findings fixed and verified (see commit 5e9096b):
+- W5-1/W5-2 pages.yml: trigger + vendored-file copy — **verified correct on
+  GitHub via hex-encoded API read** (see the sandbox display-mangler note).
+- W5-3..W5-10 code+docs: RECURRENCE-ID type-match rejection, all-or-nothing
+  EXDATE/RDATE parse, PT0S+DTEND exclusion, VALARM duplicate rejection,
+  DTSTART/DTEND/DTSTAMP/RECURRENCE-ID param round-trip (RANGE=THISANDFUTURE),
+  surrogate-safe title cap, instant-keyed duplicate-RECURRENCE-ID check,
+  calendar MOVE (DELETE + create evt:{newcal}:{uid}), drop-target highlight,
+  v42.11 fresh-envelope rebase pin, README/LICENSE(GPL-3.0)/PROVENANCE.md,
+  v4.1 base spec committed to docs/, normative §13b hash spec.
+- Final local state: core-unit 176/176, crypto-parity 38/38, api-suite
+  138/138, §19 phases ALL GREEN.
+
+### CRITICAL OPERATIONAL NOTE — sandbox display mangler
+
+**The tool-output rendering layer eats ANSI-SGR-like sequences
+(`[` + digits/semicolons + `m`) from DISPLAYED output.** A file containing
+`branches: [main]` DISPLAYS as `branches: ain]`; the same illusion applies
+to grep/git-show/python-print output, commit messages shown in logs, and
+agent reports built from displayed text. During wave 5 this produced a
+false "mass file corruption" scare (app.js, rrule.mjs, tests were all
+INTACT — verified via hex reads and by the computed test suites passing).
+RULES for every future agent in this sandbox:
+1. Never trust displayed output that could contain `[<digits/;>m` — verify
+   via hex dumps (`.hex()`), boolean checks, or computed test verdicts.
+2. When writing such sequences through commands, build them from chr()
+   codes or placeholders substituted in-memory.
+3. GitHub content is the immutable source of truth; verify remotely via the
+   contents API with hex/boolean decoding.
+
+### Task 2.1 — FINAL STATUS: COMPLETE
+
+- UI: Proton-Calendar-ported month view (verbatim layout/DnD/popover/editor
+  ports, provenance in docs/PROVENANCE.md), drag & drop, recurring events
+  (presets + custom + exceptions + EXDATE), multiple calendars with colors,
+  clock preview, keyboard shortcuts, mini calendar.
+- Protocol v4.2: evt/cmeta rows + §13b derived projection; worker deployed
+  (production verified); spec + deviations documented in-repo.
+- Tests: 176 unit + 138 HTTP conformance + 38 crypto-parity + §19 drills +
+  browser E2E (all green).
+- Production: v4.2, cleaned to 23 empty buckets.
+- Outstanding (user action): Cloudflare API token re-provision (lost in the
+  crash) for FUTURE worker deploys; Pages "Source: GitHub Actions" flip (or
+  the fixed workflow's enablement step handles it on first push/dispatch).
+
+## NEXT — Task 2.2 (davx fork) continuation plan
+
+Context budget forced a stop before implementation. Survey first (the fork
+is cloned at /home/z/my-project/davx, upstream bitfireAT/davx5-ose
+@ b583f734f, mode-bit noise already neutralized via core.fileMode=false):
+1. READ davx5 sync seam: core/src/main/kotlin/at/bitfire/davdroid/
+   resource/remote/WebDavCollection.kt (7 operations: list, multiGet,
+   get, put, delete + etag/precondition plumbing), SyncManager.kt
+   (rebase handling via dav4jvm PreconditionFailedException),
+   sync/CalendarSyncManager.kt + SyncAdapterService wiring, and
+   ical4android's AndroidCalendar/AndroidEvent (local side).
+2. ADAPTER (D18 mapping): implement a `RowStoreDavCollection` that maps
+   href → evt row id, ETag → ver (string), PROPFIND-listing → GET /rows
+   manifest diff, multiget → per-row GET, PUT with If-Match → ver+1 RMW
+   (rebase → PreconditionFailedException), collection props → cmeta row.
+   The encryption/auth layer: AUTH_UI bearer + AES-GCM envelope per row —
+   needs a Kotlin crypto module (javax.crypto AES/GCM + PBKDF2 + HKDF;
+   verify against the KAT vectors in test/crypto-parity.mjs).
+3. HARNESS (verbatim code, per the user's directive): port davx5's own
+   MockEngine pattern (core/src/test .../CalDavCollectionTest.kt) to run
+   the REAL WebDavCollection-equivalent code against an in-JVM fake of the
+   row store; JVM only (no Android framework) for the pure-sync classes;
+   ical4android parts need Robolectric or an interface seam — prefer the
+   seam dav4jvm already provides (OkHttpClient is injectable: point it at
+   the fake via an Interceptor).
+4. Gradle in this sandbox: `gradle wrapper` exists in the repo; JDK
+   availability to verify (java -version). Tests via
+   `./gradlew :core:test --tests ...` on a branch.
