@@ -9,8 +9,17 @@
     // Theme boot (FOUC guard): decide light/dark BEFORE first paint.
     (function () {
       try {
-        var t = localStorage.getItem('clock_poc_theme');
+        var t = null;
+        try { var s = JSON.parse(localStorage.getItem('clock_poc_settings_v44') || 'null'); if (s && s.theme) t = s.theme; } catch (e) {}
         if (t !== 'light' && t !== 'dark') {
+          t = localStorage.getItem('clock_poc_theme'); // legacy v4.3 key
+          if (t !== 'light' && t !== 'dark') {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          } else if (t === null || t === undefined) {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+        }
+        if (t === 'system') {
           t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
         document.documentElement.dataset.theme = t;
@@ -33,8 +42,8 @@
     </div>
     <div class="right">
       <span id="proto-badge" class="badge proto"></span>
-      <button id="btn-theme" class="button button-ghost icon-only" type="button" title="Switch to dark theme" aria-label="Switch to dark theme">
-        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z" stroke-linejoin="round"/></svg>
+      <button id="btn-settings" class="button button-ghost icon-only" type="button" title="Settings" aria-label="Settings" hidden>
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2" stroke-linecap="round"/></svg>
       </button>
       <button id="btn-sync" class="button button-ghost" hidden>Sync</button>
       <button id="btn-lock" class="button button-ghost" hidden>Lock</button>
@@ -108,29 +117,20 @@
           </div>
         </aside>
 
-        <!-- ---------- main area ---------- -->
+        <!-- ---------- main area: FullCalendar mount (toolbar is rendered
+             by FullCalendar itself via headerToolbar) ---------- -->
         <div id="main-area">
-          <div id="toolbar">
-            <button id="btn-today" class="button button-outline" type="button">Today</button>
-            <button id="btn-prev" class="button button-ghost icon-only" type="button" aria-label="Previous">‹</button>
-            <button id="btn-next" class="button button-ghost icon-only" type="button" aria-label="Next">›</button>
-            <h2 id="month-label" class="current-range"></h2>
-            <span class="grow"></span>
-            <div id="view-selector" class="view-selector" role="group" aria-label="View"></div>
-          </div>
-
-          <div id="view-root" class="view-root"></div>
+          <div id="calendar" class="view-root"></div>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- ============ event popover (read-only, saved events; also the
-       "+N more"/day list surface) ============ -->
+  <!-- ============ event popover (read-only, saved events) ============ -->
   <div id="popover-backdrop" hidden></div>
   <div id="event-popover" class="eventpopover" hidden role="dialog" aria-modal="false"></div>
 
-  <!-- ============ event editor (Proton EventForm, modal surface) ============ -->
+  <!-- ============ event editor (modal surface) ============ -->
   <div id="editor-backdrop" hidden></div>
   <div id="editor-modal" class="modal-two" hidden role="dialog" aria-modal="true"></div>
 
@@ -146,7 +146,22 @@
   <div id="freq-backdrop" hidden></div>
   <div id="freq-modal" class="modal-two modal-two--small" hidden role="dialog" aria-modal="true"></div>
 
+  <!-- ============ settings (theme & customisation) ============ -->
+  <div id="settings-backdrop" hidden></div>
+  <div id="settings-modal" class="modal-two modal-two--small" hidden role="dialog" aria-modal="true" aria-label="Settings"></div>
+
   <div id="toasts" aria-live="polite"></div>
+
+  <!-- FullCalendar v6.1.22 (MIT, (c) Adam Shaw) — official prebuilt bundles,
+       vendored VERBATIM from npm @fullcalendar/*@6.1.22 (see
+       js/vendor/fullcalendar/*/LICENSE.txt). Core first: it defines the
+       FullCalendar global namespace; plugins bind onto it. -->
+  <script src="js/vendor/fullcalendar/core/index.global.min.js"></script>
+  <script src="js/vendor/fullcalendar/daygrid/index.global.min.js"></script>
+  <script src="js/vendor/fullcalendar/timegrid/index.global.min.js"></script>
+  <script src="js/vendor/fullcalendar/interaction/index.global.min.js"></script>
+  <script src="js/vendor/fullcalendar/multimonth/index.global.min.js"></script>
+  <script src="js/vendor/fullcalendar/list/index.global.min.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

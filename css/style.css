@@ -1,12 +1,15 @@
 /*
- * Calendar PoC v4.2 — UI styled after Proton Calendar (ProtonMail WebClients,
- * GPL-3.0). Design tokens below are extracted VERBATIM from:
- *   packages/colors/themes/dist/snow.theme.css      (color custom properties)
- *   packages/styles/scss/lib/_config.scss           (sizes, z-indexes, fonts)
- *   packages/styles/scss/base/custom-properties/_init.scss (radii, shadows)
- *   applications/calendar/src/app/styles/_*.scss    (calendar grid + chips)
- * Values reproduced under GPL-3.0 with attribution (see LICENSE and
- * docs/PROVENANCE.md).
+ * Calendar PoC v4.4 — UI powered by FullCalendar v6.1.22 (MIT, vendored at
+ * js/vendor/fullcalendar/ — official prebuilt bundles, unmodified). The
+ * FullCalendar look is customised ONLY through its documented CSS custom
+ * properties (--fc-*) and public class names (.fc-button, .fc-toolbar…),
+ * mapped onto the app's Proton-derived design tokens.
+ *
+ * Design tokens below are extracted VERBATIM from ProtonMail WebClients
+ * (GPL-3.0): packages/colors/themes/dist/snow.theme.css (light) and
+ * packages/colors/themes/src/lumo-dark/dark-base.css (dark), structure from
+ * packages/styles/scss/lib/_config.scss. Values reproduced under GPL-3.0
+ * with attribution (see LICENSE and docs/PROVENANCE.md).
  */
 
 [hidden] { display: none !important; }
@@ -80,14 +83,6 @@
   --font-weight-normal: 400;
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
-
-  /* calendar (_config.scss of the calendar app) */
-  --calendar-aside-width: 60px;   /* $calendar-aside-width: rem(60) */
-  --calendar-hour-height: max(3rem, calc((100vh - 136px) / 24)); /* $calendar-hour-height */
-  --calendar-grid-border: 1px solid var(--border-weak);
-  --calendar-gridcell-margin: 10px;
-  --calendar-gridcell-gutter: 3px;
-  --dayevent-height: 28px;
 }
 
 * { box-sizing: border-box; }
@@ -152,14 +147,13 @@ input, select, textarea { font: inherit; color: var(--text-norm); }
 }
 
 main { height: calc(100% - var(--header-height)); }
-/* v4.3 wave-7 B1 root cause: #app must give #layout a DEFINITE height —
-   without it `#layout { height: 100% }` resolved to auto (content height),
-   letting the time grid render 1152px tall with the bottom half below the
-   viewport (clipped by #layout's overflow:hidden, unreachable). */
+/* wave-7 B1 root cause: #app must give #layout a DEFINITE height — without it
+   the grid resolved to content height and the bottom half fell below the
+   viewport. */
 #app { height: 100%; }
 #layout { display: flex; height: 100%; overflow: hidden; }
 
-/* ---------- sidebar (width + bg per _navigation.scss / _optionals.scss) ---------- */
+/* ---------- sidebar ---------- */
 #sidebar {
   width: var(--width-sidebar); flex: 0 0 var(--width-sidebar);
   background: var(--background-norm); border-right: 1px solid var(--border-weak);
@@ -173,7 +167,7 @@ main { height: calc(100% - var(--header-height)); }
 }
 .head-note { color: var(--text-hint); font-weight: var(--font-weight-normal); font-size: 11px; }
 
-/* mini calendar (_minicalendar.scss, verbatim metrics) */
+/* mini calendar */
 .minicalendar-head { display: flex; align-items: center; gap: 2px; padding: 4px 4px 8px; }
 .minicalendar-month-label { flex: 1; font-weight: var(--font-weight-bold); font-size: 13px; }
 .minicalendar-grid {
@@ -246,112 +240,13 @@ main { height: calc(100% - var(--header-height)); }
 .clock-ev.none { color: var(--text-hint); }
 .clock-ev.err { color: var(--signal-danger); }
 
-/* ---------- main area ---------- */
-#main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; height: 100%; }
-#toolbar {
-  display: flex; align-items: center; gap: 4px; padding: 10px 16px;
-  border-bottom: 1px solid var(--border-weak);
-}
-.current-range { margin: 0 0 0 10px; font-size: 20px; font-weight: var(--font-weight-bold); }
-/* ---------- month daygrid (applications/calendar/src/app/styles/_daygrid.scss,
-   _monthgrid.scss, _eventcell.scss — ported) ---------- */
-.calendar-daygrid-days { display: flex; }
-.calendar-daygrid-days > div {
-  flex: 1; text-align: center; padding: 12px 6px; font-size: 17px;
-  overflow: hidden; text-overflow: ellipsis;
-}
-.calendar-daygrid-days .day-fullname { font-weight: var(--font-weight-semibold); }
-.calendar-daygrid-days > div.is-today .day-fullname { color: var(--primary); }
-.calendar-daygrid-rows { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.daygrid-week { flex: 1; display: flex; flex-direction: column; min-height: 96px; position: relative; border-block-end: var(--calendar-grid-border); }
-.calendar-daygrid-columns { display: flex; pointer-events: none; position: absolute; inset: 0 0 auto 0; top: 0; height: 100%; }
-.calendar-daygrid-column { flex: 1; }
-.calendar-daygrid-column:not(:last-child) { border-inline-end: var(--calendar-grid-border); }
-.daygrid-daybuttons { display: flex; position: relative; z-index: 1; }
-.calendar-monthgrid-day {
-  flex: 1; text-align: center; padding: 4px; border: none; background: transparent;
-  cursor: pointer; border-radius: 0;
-}
-.calendar-monthgrid-day-number {
-  display: flex; margin: 0 auto; width: 1.75em; height: 1.75em;
-  align-items: center; justify-content: center;
-  border-radius: var(--border-radius-md);
-  border: 1px solid transparent;
-  transition: background-color .15s ease-out, color .15s ease-out, border-color .15s ease-out;
-  font-size: 14px;
-}
-.calendar-monthgrid-day:hover .calendar-monthgrid-day-number,
-.calendar-monthgrid-day:focus-visible .calendar-monthgrid-day-number {
-  background-color: var(--interaction-default-hover);
-}
-.calendar-monthgrid-day:focus-visible { outline: none; }
-.calendar-monthgrid-day:focus-visible .calendar-monthgrid-day-number {
-  outline: var(--focus-ring-size) solid var(--focus-ring);
-}
-.calendar-monthgrid-day[aria-current='date'] .calendar-monthgrid-day-number {
-  color: var(--primary); border-color: var(--primary); font-weight: var(--font-weight-bold);
-}
-.calendar-monthgrid-day.selected .calendar-monthgrid-day-number {
-  background: var(--primary); color: var(--primary-contrast);
-}
-.daygrid-rowevents { position: relative; flex: 1; min-height: 0; }
-.daygrid-rowevents.is-drop-target { background: var(--interaction-norm-minor-2); border-radius: var(--border-radius-sm); }
+/* ---------- main area: the FullCalendar mount ----------
+   FullCalendar renders its own toolbar + grid inside #calendar; it observes
+   container resizes itself (v6). */
+#main-area { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+#calendar { flex: 1; min-width: 0; min-height: 0; }
 
-/* event chips (_eventcell.scss, ported) */
-.calendar-dayeventcell {
-  position: absolute;
-  top: var(--top-custom, 0px); left: var(--left-custom, 0%);
-  width: var(--w-custom, 14.2857%); height: var(--h-custom, 1.75rem);
-  padding-inline-end: var(--calendar-gridcell-margin);
-  padding-block-start: var(--calendar-gridcell-gutter);
-  white-space: nowrap; z-index: 0;
-}
-.calendar-dayeventcell-inner {
-  min-height: 100%;
-  display: flex; align-items: center; text-align: left;
-  border: solid; border-block-start-width: 1px; border-block-start-color: var(--color-alt);
-  border-inline-start-width: 5px; border-inline-start-color: var(--color-alt);
-  border-inline-end-width: 0; border-block-end-width: 0;
-  padding: 2px 0.5em;
-  border-radius: var(--border-radius-sm);
-  background-color: var(--color-main); color: var(--foreground, #fff);
-  cursor: pointer;
-  transition: all .1s ease-out, opacity .5s ease-out, background-color .15s ease-in-out;
-  overflow: hidden;
-}
-.calendar-dayeventcell .flex-line { display: flex; flex-wrap: nowrap; align-items: center; min-width: 0; flex: 1; }
-.calendar-dayeventcell-circle {
-  width: 4px; height: 4px; flex: 0 0 4px; border-radius: 50%;
-  background: var(--color-main); margin-inline-end: 8px;
-}
-.calendar-dayeventcell-time { margin-inline-end: 0.25em; }
-.calendar-dayeventcell-title { font-weight: var(--font-weight-semibold); }
-.calendar-dayeventcell .chip-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.calendar-dayeventcell-inner.isNotAllDay {
-  border: none; background: none; color: var(--text-norm);
-  padding-inline: 0.5em;
-}
-.calendar-dayeventcell-inner.isNotAllDay:hover,
-.calendar-dayeventcell-inner.isNotAllDay:focus-visible {
-  background-color: var(--interaction-default-hover);
-}
-.calendar-dayeventcell-inner.isNotAllDay:active { background-color: var(--interaction-default-active); }
-.calendar-dayeventcell-inner.isCancelled { text-decoration: line-through; opacity: 0.6; }
-.calendar-dayeventcell-inner.isSelected {
-  z-index: 6; border-color: rgb(0 0 0 / 0.4); box-shadow: var(--shadow-norm);
-}
-.calendar-dayeventcell-inner.isDragging { opacity: 0.4; }
-.calendar-dayeventcell-more { font-size: 12px; color: var(--text-weak); }
-.calendar-dayeventcell-more:hover { color: var(--text-norm); }
-.chip-ghost {
-  position: absolute; z-index: 5; pointer-events: none;
-  border-radius: var(--border-radius-sm);
-  background: var(--interaction-norm-minor-1); border: 1px dashed var(--interaction-norm);
-  color: var(--interaction-norm-major-2); font-size: 12px; font-weight: var(--font-weight-semibold);
-  padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
-/* ---------- popovers (_eventpopover.scss, verbatim metrics) ---------- */
+/* ---------- popovers ---------- */
 .eventpopover {
   position: absolute; z-index: var(--z-floating-frames);
   background: var(--background-norm); color: var(--text-norm);
@@ -374,21 +269,15 @@ main { height: calc(100% - var(--header-height)); }
 .popover-iconrow { display: flex; gap: 10px; padding: 5px 0; font-size: 14px; align-items: flex-start; }
 .popover-iconrow .ic { flex: 0 0 auto; margin-top: 3px; color: var(--text-weak); }
 .popover-iconrow .content { min-width: 0; word-break: break-word; white-space: pre-wrap; }
-.popover-footer {
-  display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px;
-  padding-top: 14px; border-top: 1px solid var(--border-weak);
-}
-.popover-footer .left { margin-right: auto; }
-/* Backdrops: the event popover keeps a TRANSPARENT full-screen catcher
-   (Proton popovers don't dim); every MODAL backdrop dims (ModalTwo). */
+/* Backdrops: the event popover keeps a TRANSPARENT full-screen catcher;
+   every MODAL backdrop dims. */
 #popover-backdrop { position: fixed; inset: 0; z-index: calc(var(--z-floating-frames) - 1); }
-#editor-backdrop, #recur-backdrop, #cal-backdrop, #freq-backdrop {
+#editor-backdrop, #recur-backdrop, #cal-backdrop, #freq-backdrop, #settings-backdrop {
   position: fixed; inset: 0; z-index: calc(var(--z-modals) - 1);
   background: var(--backdrop-norm);
 }
 
-/* ---------- modals (ModalTwo) ---------- */
-.modal-backdrop { position: fixed; inset: 0; background: var(--backdrop-norm); z-index: calc(var(--z-modals) - 1); }
+/* ---------- modals ---------- */
 .modal-two {
   position: fixed; z-index: var(--z-modals);
   top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -401,13 +290,14 @@ main { height: calc(100% - var(--header-height)); }
 .modal-two--small { width: min(440px, calc(100vw - 32px)); }
 .modal-two h1 { font-size: 20px; margin: 0 0 16px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.modal-head h1 { margin: 0; }
 .modal-footer {
   display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px;
   padding-top: 16px; border-top: 1px solid var(--border-weak);
 }
 .modal-footer .left { margin-right: auto; }
 
-/* ---------- event form (EventForm icon rows) ---------- */
+/* ---------- event form (editor) ---------- */
 .eventform .form-row { display: flex; gap: 10px; padding: 7px 0; align-items: flex-start; }
 .eventform .form-row > .ic { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 9px; color: var(--text-weak); }
 .eventform .form-row-body { flex: 1; min-width: 0; }
@@ -439,7 +329,7 @@ main { height: calc(100% - var(--header-height)); }
 .eventform .cal-dot { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 14px; }
 .eventform .cal-select-row select { flex: 1; }
 
-/* color palette picker */
+/* color palette picker (calendar + settings accent) */
 .palette-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; margin: 8px 0 4px; }
 .palette-swatch {
   width: 22px; height: 22px; border-radius: 50%; border: none; cursor: pointer;
@@ -450,6 +340,25 @@ main { height: calc(100% - var(--header-height)); }
 
 /* recurring choice modal */
 .recur-choices button { display: block; width: 100%; text-align: left; margin-bottom: 6px; padding: 10px 12px; }
+
+/* ---------- settings modal ---------- */
+.settings-form .palette-grid { grid-template-columns: repeat(6, 1fr); }
+.settings-segment {
+  display: inline-flex; align-items: center; gap: 2px;
+  border: 1px solid var(--border-weak); border-radius: var(--border-radius-md);
+  padding: 2px; background: var(--interaction-default);
+}
+.settings-segment-button {
+  border: none; background: transparent; cursor: pointer;
+  padding: 4px 12px; border-radius: var(--border-radius-sm);
+  font-size: 13px; color: var(--text-weak); white-space: nowrap;
+}
+.settings-segment-button:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
+.settings-segment-button:focus-visible { outline: var(--focus-ring-size) solid var(--focus-ring); }
+.settings-segment-button.is-selected {
+  background: var(--interaction-norm); color: var(--interaction-norm-contrast);
+  font-weight: var(--font-weight-semibold);
+}
 
 /* ---------- login card ---------- */
 #login { display: flex; justify-content: center; align-items: flex-start; padding-top: 8vh; height: 100%; overflow: auto; }
@@ -473,7 +382,7 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
 .err { color: var(--signal-danger); min-height: 18px; font-size: 13px; margin-top: 10px; }
 .card .button-primary { width: 100%; margin-top: 16px; padding: 9px 14px; }
 
-/* ---------- toasts (notifications) ---------- */
+/* ---------- toasts ---------- */
 #toasts { position: fixed; right: 16px; bottom: 16px; z-index: var(--z-notifications); display: flex; flex-direction: column; gap: 8px; }
 .toast {
   background: var(--background-invert); color: #fff; border-radius: var(--border-radius-md);
@@ -483,210 +392,163 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
 .toast.err { background: var(--signal-danger); }
 .toast.warn { background: var(--signal-warning); color: #000; }
 
-/* ---------- responsive (calendar breakpoints: small 870) ---------- */
-@media (max-width: 870px) {
-  #layout { flex-direction: column; }
-  #sidebar { width: 100%; flex: 0 0 auto; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border-weak); }
-  .calendar-daygrid-days > div { font-size: 13px; }
-  .calendar-daygrid-days .day-shortname { display: inline; }
-  .calendar-daygrid-days .day-fullname { display: none; }
-  .daygrid-week { min-height: 72px; }
-  .eventpopover { width: calc(100vw - 24px); }
-}
-.calendar-daygrid-days .day-shortname { display: none; }
-
-/* modal-head h1 (editor): tighter inside the head row */
-.modal-head h1 { margin: 0; }
-
 /* corrupt-row notice (sidebar) */
 .corrupt-note { color: var(--signal-danger); font-size: 12px; }
 
 /* ==================================================================
-   v4.3 — view system (day/week/month/custom/year), TimeGrid, dark mode
+   FullCalendar theming — documented --fc-* custom properties and public
+   class names, mapped onto the Proton-derived tokens above. The `html`
+   prefix lifts specificity above FullCalendar's runtime-injected rules
+   (which define the same variables on `.fc`); the dark block follows the
+   light block so equal-specificity order resolves correctly.
    ================================================================== */
 
-/* ---------- view root & month grid container (was #daygrid) ---------- */
-.view-root { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.daygrid-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
-.daygrid-wrap .calendar-daygrid-rows { min-height: 480px; }
+html .fc {
+  --fc-border-color: var(--border-weak);
+  --fc-page-bg-color: var(--background-norm);
+  --fc-neutral-bg-color: var(--background-weak);
+  --fc-list-event-hover-bg-color: var(--background-weak);
+  --fc-highlight-color: var(--interaction-norm-minor-1); /* select/ghost wash */
+  --fc-today-bg-color: var(--background-weak);           /* neutral today wash */
+  --fc-now-indicator-color: var(--primary);
+  --fc-more-link-bg-color: var(--background-norm);
+  --fc-non-business-color: var(--background-weak);
+  --fc-event-selected-overlay-color: rgb(0 0 0 / 0.25);
+  --fc-event-resizer-dot-border-color: rgb(255 255 255 / 0.7);
+  font-family: inherit;
+}
 
-/* ---------- view selector (Proton segmented control) ---------- */
-.view-selector {
-  display: inline-flex; align-items: center; gap: 2px;
-  border: 1px solid var(--border-weak); border-radius: var(--border-radius-md);
-  padding: 2px; background: var(--interaction-default);
+/* Toolbar (headerToolbar): Proton Button atoms applied to FullCalendar's
+   public .fc-button classes. */
+html .fc .fc-button {
+  background: var(--interaction-default);
+  color: var(--text-weak);
+  border: 1px solid transparent;
+  border-radius: var(--border-radius-md);
+  padding: 5px 12px;
+  font-weight: var(--font-weight-normal);
+  font-size: 13px;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color .15s ease-out, color .15s ease-out, border-color .15s ease-out;
 }
-.view-selector .view-button {
-  border: none; background: transparent; cursor: pointer;
-  padding: 4px 12px; border-radius: var(--border-radius-sm);
-  font-size: 13px; color: var(--text-weak); white-space: nowrap;
+html .fc .fc-button:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
+html .fc .fc-button:active { background: var(--interaction-default-active); }
+html .fc .fc-button:focus, html .fc .fc-button:focus-visible {
+  outline: var(--focus-ring-size) solid var(--focus-ring);
+  box-shadow: none;
 }
-.view-selector .view-button:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
-.view-selector .view-button:focus-visible { outline: var(--focus-ring-size) solid var(--focus-ring); }
-.view-selector .view-button.is-selected {
-  background: var(--interaction-norm); color: var(--interaction-norm-contrast);
+html .fc .fc-button:disabled { background: var(--interaction-weak); color: var(--text-disabled); cursor: default; }
+html .fc .fc-button-primary {
+  background: var(--interaction-default);
+  color: var(--text-norm);
+  border-color: var(--border-norm);
+}
+html .fc .fc-button-primary:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
+html .fc .fc-button-primary:disabled {
+  background: var(--interaction-default);
+  color: var(--text-disabled);
+  border-color: var(--border-weak);
+}
+/* The ACTIVE view button (fc-button-active) = Proton selected segment. */
+html .fc .fc-button-active {
+  background: var(--interaction-norm);
+  color: var(--interaction-norm-contrast);
+  border-color: transparent;
   font-weight: var(--font-weight-semibold);
 }
-.view-selector .custom-days-select {
-  width: auto; padding: 4px 6px; font-size: 13px; margin-left: 2px;
-}
-
-/* ---------- TimeGrid (week / day / custom) — _grid.scss port ---------- */
-.calendar-row-heading {
-  background: var(--background-norm);
-  box-shadow: var(--shadow-norm);
-  z-index: 3;
-}
-.calendar-first-row-heading { display: flex; }
-/* B3 (upstream _aside.scss): the aside column is 60px everywhere. */
-.calendar-aside { width: var(--calendar-aside-width, 60px); flex: 0 0 var(--calendar-aside-width, 60px); }
-.calendar-first-row-heading .calendar-grid-heading { flex: 1; }
-.calendar-fullday-row { display: flex; }
-.calendar-fullday-row .flex-1 { flex: 1; min-width: 0; position: relative; }
-.calendar-time-fullday {
-  list-style: none; margin: 0; padding: 0; position: relative;
-  height: calc(3 * var(--dayevent-height)); /* Proton actualRows max = 3 */
-  min-height: calc(3 * var(--dayevent-height));
-}
-.calendar-primary-timezone-cell {
-  width: var(--calendar-aside-width, 60px);
-  display: flex; flex-direction: column; justify-content: flex-end;
-  border-inline-end: var(--calendar-grid-border);
-}
-.calendar-primary-timezone-cell--header {
-  font-size: 11px; color: var(--text-hint); text-align: center; padding: 2px 0 6px;
-}
-.calendar-time-grid {
-  flex: 1; overflow: auto; min-height: 0;
-  overscroll-behavior: contain;
-}
-.calendar-time-grid .main-area-content { min-width: 0; }
-.timegrid-flex { display: flex; align-items: stretch; }
-.timegrid-flex .hour-texts {
-  width: var(--calendar-aside-width, 60px);
-  border-inline-end: var(--calendar-grid-border);
-  flex: 0 0 var(--calendar-aside-width, 60px);
-}
-.calendar-grid-timeBlock {
-  height: var(--calendar-hour-height, max(3rem, calc((100vh - 136px) / 24)));
-  position: relative;
-}
-.calendar-grid-timeText {
-  position: absolute; top: 0; right: 8px; transform: translateY(-50%);
-  font-size: 11px; color: var(--text-hint); white-space: nowrap;
-}
-.calendar-grid-gridcells { display: flex; flex: 1; position: relative; }
-.calendar-grid-gridcells .calendar-grid-hours {
-  position: absolute; inset: 0; display: flex; pointer-events: none;
-}
-.calendar-grid-hourLine {
-  height: var(--calendar-hour-height, max(3rem, calc((100vh - 136px) / 24)));
-  position: relative;
-}
-.calendar-grid-hourLine::after {
-  content: ''; position: absolute; left: 0; right: 0; top: -1px;
-  border-top: var(--calendar-grid-border);
-}
-.calendar-grid-gridcell {
-  flex: 1; position: relative; min-width: 0;
-  margin-inline-end: var(--calendar-gridcell-margin);
-}
-.calendar-grid-gridcell::after {
-  content: ''; position: absolute; left: -1px; top: 0; bottom: 0;
-  border-left: var(--calendar-grid-border); pointer-events: none;
-}
-.calendar-grid-gridcell.timegrid-day { height: calc(24 * var(--calendar-hour-height, max(3rem, calc((100vh - 136px) / 24)))); }
-/* Day buttons in the week/day header (DayButtons.tsx). */
-.calendar-grid-heading {
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 8px 4px; border: none; background: transparent; cursor: pointer;
-  font-size: 16px; color: var(--text-norm);
-}
-.calendar-grid-heading-day { color: var(--text-weak); font-size: 13px; }
-.calendar-grid-heading-number {
-  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
-  border-radius: var(--border-radius-sm); border: 1px solid transparent;
-  transition: background-color .15s ease-out;
-}
-.calendar-grid-heading:hover .calendar-grid-heading-number { background: var(--interaction-default-hover); }
-.calendar-grid-heading:focus-visible { outline: none; }
-.calendar-grid-heading:focus-visible .calendar-grid-heading-number {
+html .fc .fc-button-active:hover { background: var(--interaction-norm-major-1); color: var(--interaction-norm-contrast); }
+html .fc .fc-button-active:focus, html .fc .fc-button-active:focus-visible {
   outline: var(--focus-ring-size) solid var(--focus-ring);
 }
-.calendar-grid-heading[aria-current='date'] .calendar-grid-heading-day { color: var(--primary); }
-.calendar-grid-heading[aria-current='date'] .calendar-grid-heading-number {
-  border-color: var(--primary); color: var(--primary);
+html .fc .fc-toolbar-title {
+  font-size: 20px;
+  font-weight: var(--font-weight-bold);
+  color: var(--text-norm);
+  margin: 0;
 }
-.calendar-grid-heading[aria-pressed='true'] .calendar-grid-heading-number {
-  background: var(--primary); color: var(--primary-contrast);
-}
-.calendar-grid-heading[aria-pressed='true'][aria-current='date'] .calendar-grid-heading-number {
-  background: var(--primary); color: var(--primary-contrast); border-color: var(--primary);
-}
-/* Part-day event chips (PartDayEventView, ported). */
-.calendar-eventcell {
-  position: absolute;
-  padding-inline-end: var(--calendar-gridcell-gutter);
-  z-index: 1; min-width: 0;
-}
-.calendar-eventcell-inner {
-  height: 100%; display: flex; flex-direction: column; justify-content: flex-start;
-  border-inline-start: 3px solid var(--color-alt);
+html .fc .fc-toolbar-chunk { gap: 2px; }
+html .fc .fc-toolbar-chunk .fc-button + .fc-button { margin-left: 2px; }
+
+/* Day-grid cells: today's date number in the accent colour (Proton style),
+   nav-link hover. */
+html .fc .fc-daygrid-day-number, html .fc .fc-daygrid-day.fc .fc-daygrid-day-number {
+  color: var(--text-norm);
+  padding: 2px 4px;
   border-radius: var(--border-radius-sm);
-  background-color: var(--color-main); color: var(--foreground, #fff);
-  padding: 2px 6px; cursor: pointer; overflow: hidden;
-  font-size: 12px; line-height: 1.25;
-  transition: opacity .5s ease-out, background-color .15s ease-in-out;
+  font-weight: var(--font-weight-normal);
 }
-.calendar-eventcell-inner .calendar-eventcell-time { color: rgb(255 255 255 / 0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.calendar-eventcell-title { font-weight: var(--font-weight-semibold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.calendar-eventcell.size-sm .calendar-eventcell-inner { font-size: 11px; }
-.calendar-eventcell.size-xs .calendar-eventcell-inner { font-size: 10px; }
-.calendar-eventcell.size-2xs .calendar-eventcell-inner { font-size: 9px; }
-.calendar-eventcell.isCancelled .calendar-eventcell-inner { text-decoration: line-through; opacity: 0.6; }
-.calendar-eventcell-inner.isDragging { opacity: 0.4; }
-.calendar-eventcell:focus-visible { outline: none; }
-.calendar-eventcell:focus-visible .calendar-eventcell-inner {
-  outline: var(--focus-ring-size) solid var(--focus-ring);
+html .fc .fc-day-today .fc-daygrid-day-number {
+  color: var(--primary);
+  font-weight: var(--font-weight-bold);
 }
-.chip-ghost-time .calendar-eventcell-inner { background: var(--interaction-norm-minor-2); }
-.chip-ghost-time.is-create .calendar-eventcell-inner {
-  background: var(--interaction-norm-minor-1);
-  border: 1px dashed var(--interaction-norm);
+html .fc .fc-daygrid-day-number:hover, html .fc .fc-daygrid-day-number:focus:hover {
+  background: var(--interaction-default-hover);
 }
-.chip-ghost-time { pointer-events: none; z-index: 5; }
-.chip-ghost-time .calendar-eventcell-title { color: var(--interaction-norm-major-2); }
-/* Now line (_grid.scss calendar-grid-nowHourLine, verbatim). */
-.calendar-grid-nowHourLine {
-  position: absolute; left: 0; right: calc(-1 * var(--calendar-gridcell-margin));
-  border-block-end: 2px solid var(--primary);
-  box-shadow: var(--shadow-norm);
-  pointer-events: none; z-index: 8;
+html .fc .fc-day-other .fc-daygrid-day-number { color: var(--text-weak); }
+
+/* Event chips: per-event backgroundColor/borderColor come from the event
+   source (Proton accent shades); cancelled occurrences strike through. */
+html .fc .fc-event {
+  border-radius: var(--border-radius-sm);
+  font-size: 12px;
+  cursor: pointer;
 }
-.calendar-grid-nowHourLine::before {
-  content: ''; position: absolute; top: -3px; left: -4px;
-  width: 7px; height: 7px; border-radius: 50%;
-  background-color: var(--primary);
+html .fc .fc-event.fc-event-cancelled { text-decoration: line-through; opacity: 0.6; }
+html .fc .fc-daygrid-event { border-radius: var(--border-radius-sm); }
+html .fc .fc-daygrid-event .fc-event-title { font-weight: var(--font-weight-semibold); }
+html .fc .fc-timegrid-event { border-radius: var(--border-radius-sm); font-size: 12px; }
+html .fc .fc-timegrid-event .fc-event-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html .fc .fc-list-event:hover td { background: var(--fc-list-event-hover-bg-color); }
+
+/* "+N more" link (native FullCalendar more-popover). */
+html .fc .fc-daygrid-more-link {
+  color: var(--text-weak);
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+  padding: 1px 4px;
+}
+html .fc .fc-daygrid-more-link:hover { color: var(--text-norm); }
+html .fc .fc-more-popover .fc-popover-body { padding: 4px; }
+html .fc .fc-popover {
+  background: var(--background-norm);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--border-radius-lg);
+  box-shadow: var(--shadow-lifted);
+  overflow: hidden;
+}
+html .fc .fc-popover-header {
+  background: var(--background-weak);
+  color: var(--text-norm);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-weak);
 }
 
-/* ---------- year view ---------- */
-.yeargrid-wrap {
-  flex: 1; overflow: auto; padding: 16px;
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 20px; align-content: start;
-}
-.yeargrid-month { min-width: 0; }
-.yeargrid-month-label {
-  font-weight: var(--font-weight-bold); font-size: 14px; margin-bottom: 6px; text-align: center;
-}
-.yeargrid-grid { font-size: 11px; }
-.yearday-dot {
-  position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%);
-  width: 5px; height: 5px; border-radius: 50%; pointer-events: none;
+/* Now indicator (native). */
+html .fc .fc-timegrid-now-indicator-line { border-color: var(--primary); border-width: 2px; }
+html .fc .fc-timegrid-now-indicator-arrow { border-color: var(--primary); }
+
+/* Week-number gutter (settings toggle). */
+html .fc .fc-timegrid-axis-frame, html .fc .fc-daygrid-week-number {
+  color: var(--text-hint);
+  font-size: 11px;
 }
 
-/* ---------- dark theme (Proton lumo-dark/dark-base.css tokens, verbatim;
-   GPL-3.0, see docs/PROVENANCE.md) ---------- */
+/* Scrollbars inside the calendar: match the app. */
+html .fc .fc-scroller::-webkit-scrollbar { width: 10px; height: 10px; }
+html .fc .fc-scroller::-webkit-scrollbar-thumb {
+  background: var(--interaction-weak-major-2);
+  border-radius: 5px;
+}
+html .fc .fc-scroller::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- density (settings): compact tightens the shell + chips ---------- */
+html[data-density="compact"] { --width-sidebar: 220px; --header-height: 48px; }
+html[data-density="compact"] .fc .fc-event { font-size: 11px; }
+html[data-density="compact"] .fc .fc-toolbar-title { font-size: 17px; }
+html[data-density="compact"] .fc .fc-daygrid-day-number { padding: 1px 3px; }
+
+/* ---------- dark theme (Proton lumo-dark tokens, verbatim) ---------- */
 [data-theme="dark"] {
   color-scheme: dark;
   --primary: #8a6eff;
@@ -736,5 +598,28 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
 [data-theme="dark"] .toast.ok { background: var(--signal-success); color: #ffffff; }
 [data-theme="dark"] .toast.err { background: var(--signal-danger); color: var(--signal-danger-contrast); }
 [data-theme="dark"] .toast.warn { background: var(--signal-warning); color: #241a00; }
-[data-theme="dark"] .calendar-dayeventcell-inner.isNotAllDay { color: var(--text-norm); }
-[data-theme="dark"] .calendar-eventcell-inner .calendar-eventcell-time { color: rgb(255 255 255 / 0.85); }
+
+/* FullCalendar dark overrides (same specificity shape as light, later in
+   source order → wins). */
+html[data-theme="dark"] .fc {
+  --fc-border-color: var(--border-weak);
+  --fc-page-bg-color: var(--background-norm);
+  --fc-neutral-bg-color: var(--background-weak);
+  --fc-list-event-hover-bg-color: var(--interaction-default-hover);
+  --fc-highlight-color: var(--interaction-norm-minor-1);
+  --fc-today-bg-color: var(--background-weak);
+  --fc-now-indicator-color: var(--primary);
+  --fc-more-link-bg-color: var(--background-norm);
+  --fc-non-business-color: rgb(0 0 0 / 0.2);
+  --fc-event-resizer-dot-border-color: rgb(0 0 0 / 0.55);
+}
+html[data-theme="dark"] .fc .fc-daygrid-day-number { color: var(--text-norm); }
+html[data-theme="dark"] .fc .fc-day-today .fc-daygrid-day-number { color: var(--primary); }
+html[data-theme="dark"] .fc .fc-day-other .fc-daygrid-day-number { color: var(--text-hint); }
+
+/* ---------- responsive ---------- */
+@media (max-width: 870px) {
+  #layout { flex-direction: column; }
+  #sidebar { width: 100%; flex: 0 0 auto; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border-weak); }
+  .eventpopover { width: calc(100vw - 24px); }
+}

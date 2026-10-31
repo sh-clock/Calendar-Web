@@ -1,35 +1,29 @@
 /**
- * app.js — web client orchestration for PROTOCOL v4.3 (calendar domain),
- * UI ported from Proton Calendar (ProtonMail WebClients, GPL-3.0).
+ * app.js — web client orchestration for PROTOCOL v4.3 (calendar domain).
  *
- * Provenance of ported logic (see docs/PROVENANCE.md):
- *  - Month-grid layout: applications/calendar/src/app/components/calendar/
- *    layout.ts + useDayGridEventLayout.ts + splitDayEventsInInterval.ts
- *    (GPL-3.0) — ported verbatim below (layout(), dayGridRowLayout()).
- *  - Drag & drop (month): .../calendar/interactions/dayGridMouseHandler.ts +
- *    mouseHelpers/{mathHelpers,domHelpers}.ts (GPL-3.0) — ported verbatim
- *    (dayGridMouseDown(), getTargetIndex(), blockClick()).
- *  - Week/day/custom time grid: .../calendar/TimeGrid.tsx + TimeGrid/* +
- *    splitTimeGridEventsPerDay.ts + interactions/timeGridMouseHandler.ts +
- *    mouseHelpers/dateHelpers.ts (GPL-3.0) — ported below
- *    (splitTimeGridEventsPerDay(), getTargetMinutes(), getSnappedDate(),
- *    timeGridMouseDown()).
- *  - Event colors: packages/colors/gen-accent-shades.ts formula.
- *  - Default calendar name/color: packages/shared/lib/calendar/constants.ts
- *    DEFAULT_CALENDAR = { name: 'My calendar', color: ACCENT_COLORS[0] }.
- *  - Default event duration: DEFAULT_EVENT_DURATION = 30 (minutes).
- *  - Dark theme tokens: packages/colors/themes/src/lumo-dark/dark-base.css.
- *  Visual tokens live in css/style.css (verbatim values, commented).
+ * UI LAYER: FullCalendar v6.1.22 (MIT, (c) Adam Shaw) — official prebuilt
+ * bundles vendored VERBATIM at js/vendor/fullcalendar/ (see each package's
+ * LICENSE.txt). All view rendering, drag & drop, resizing, event layout,
+ * "+N more" popovers, the toolbar and the now-indicator are FullCalendar's
+ * OWN implementations, driven through its documented options
+ * (headerToolbar / events / eventDrop / eventResize / select / dateClick /
+ * eventClick / navLinks / nowIndicator / dayMaxEvents). No FullCalendar
+ * internals are patched or tweaked.
  *
- * v4.3 model (protocol.md — REPOSITORY ROOT, normative):
+ * BACKBONE (protocol v4.3 — protocol.md, REPOSITORY ROOT, normative — is
+ * UNCHANGED by this rework; only the view layer was replaced):
  *  - `cmeta:{uuid}` rows → calendars (name, color).
  *  - `evt:{cal}:{uid}` rows → source of truth, RFC 5545 payloads.
- *  - `cal:{yyyymmdd}` day buckets → DEPRECATED: never read or written by
- *    this client; the clock preview is a LOCAL derivation (§13c).
  *  - Sync = read-only manifest diff + POST /rows:batch (§9b) — 1–2 requests,
  *    failure-tolerant, ALWAYS renders. Mutations RMW the row directly,
  *    update local state and re-render — NO post-mutation sync chain (§5).
  *  - Autosync: 60 s poll + focus/visibility (never blocks the UI).
+ *
+ * Provenance of retained ports (see docs/PROVENANCE.md): calendar colors
+ * (Proton ACCENT_COLORS + gen-accent-shades formula), editor/recurrence
+ * semantics, DEFAULT_CALENDAR, DEFAULT_EVENT_DURATION. The previous
+ * Proton-ported view/DnD layer was REPLACED by FullCalendar (this file's
+ * history in git preserves the GPL-3.0 port for reference).
  */
 
 import { deriveKeys, importRowKey, encryptRow, decryptRow } from './crypto.js';
@@ -41,17 +35,22 @@ const DEFAULT_SERVER_URL = 'https://calendar-poc.sh-clock.workers.dev';
 const LS_TOKEN = 'clock_poc_auth_ui';
 const LS_SERVER = 'clock_poc_server';
 const LS_CALVIS = 'clock_poc_calvis_v42';
-const LS_VIEW = 'clock_poc_view_v43';
-const LS_THEME = 'clock_poc_theme';
+const LS_VIEW = 'clock_poc_view_fc6'; // FC view ids (supersedes clock_poc_view_v43)
+const LS_SETTINGS = 'clock_poc_settings_v44';
+const LS_THEME = 'clock_poc_theme'; // legacy pre-settings key (migrated)
 const REBASE_MAX = 8;
-const DAY_EVENT_HEIGHT = 28;   // Proton DAY_EVENT_HEIGHT (px)
-const CREATE_SENSITIVITY = 20; // Proton dayGridMouseHandler CREATE_SENSITIVITY
 const AUTOSYNC_MS = 60000;     // v4.3 §5.3: 60 s poll while visible
-const TOTAL_MINUTES = 24 * 60; // Proton TimeGrid totalMinutes
 const MIN_DURATION = 15;       // Proton splitTimeGridEventsPerDay MIN_DURATION
-const TIMEGRID_INTERVAL = 30;  // Proton TimeGrid interval (30 min snapping)
+const DEFAULT_EVENT_DURATION = 30; // Proton DEFAULT_EVENT_DURATION (minutes)
 
-const VIEWS = ['day', 'week', 'month', 'custom', 'year'];
+/** FullCalendar view ids offered in the toolbar (order = toolbar order). */
+const VIEWS = ['timeGridDay', 'timeGridWeek', 'dayGridMonth', 'multiMonthYear', 'listYear', 'custom'];
+
+/** Map legacy v4.3 view names to FullCalendar view ids (one-time migration). */
+function migrateView(v) {
+  const map = { day: 'timeGridDay', week: 'timeGridWeek', month: 'dayGridMonth', year: 'multiMonthYear', custom: 'custom' };
+  return map[v] || v;
+}
 
 const state = {
   api: null,
@@ -60,27 +59,16 @@ const state = {
   evt: new Map(),       // rowId -> { ver, parsed } (evt rows)
   corrupt: new Map(),   // rowId -> { reason, ver } (undecryptable/unparseable rows)
   today: null,
-  viewYM: null,
-  selectedDate: null,
-  view: 'month',        // 'day' | 'week' | 'month' | 'custom' | 'year'
-  customDays: 5,        // custom-view day count (2..14)
-  gridRows: 3,          // measured visible chip rows (Proton useLayoutEffect)
+  view: 'dayGridMonth', // FullCalendar view id
   busy: false,
   batchOk: true,        // false when the server predates v4.3 (§5.1c fallback)
   syncing: false,       // one background sync at a time (§5.3)
   manifestEtag: null,   // §9 conditional read: last manifest etag (null = full fetch)
-  navDay: null,         // sticky day-of-month for month/year navigation
   dirty: new Map(),       // row id → mutation generation (A3 race protection)
   deletedLocally: new Map(), // row id → generation (A3: no resurrect)
   mutGen: 0,            // bumped on every completed mutation
   lastCorruptCount: 0,  // A5: suppress repeated corrupt toasts
 };
-
-/** Set the selected date everywhere (state + sticky nav day). */
-function setSelectedDate(day) {
-  state.selectedDate = day;
-  state.navDay = Number(day.slice(8));
-}
 
 /* ---------------- tiny DOM helpers ---------------- */
 
@@ -152,7 +140,6 @@ function closeAllOverlays() {
 
 const locale = undefined; // browser default
 const fmtTime = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' });
-const fmtTimeSec = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
 const fmtDateLong = new Intl.DateTimeFormat(locale, {
   weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
 });
@@ -189,6 +176,12 @@ const WEEKDAY_LONG = (() => {
   for (let i = 0; i < 7; i++) {
     out.push(new Intl.DateTimeFormat(locale, { weekday: 'long' }).format(new Date(2023, 0, 2 + i)));
   }
+  return out;
+})();
+
+const MONTHS = (() => {
+  const out = [];
+  for (let m = 0; m < 12; m++) out.push(new Intl.DateTimeFormat(locale, { month: 'long' }).format(new Date(2026, m, 15)));
   return out;
 })();
 
@@ -265,6 +258,87 @@ function syncCalVisible() {
   for (const [uuid, on] of calVis) if (on && state.cals.has(uuid)) calVisible.add(uuid);
 }
 
+/* ---------------- settings (theme & customisation) ----------------
+ * The theme settings live UNDER the settings menu (user directive): the
+ * topbar gear opens one modal holding every customisation. Every change
+ * applies LIVE (DOM tokens immediately; FullCalendar options via
+ * resetOptions) and persists to localStorage. */
+
+const SETTINGS_KEYS = ['theme', 'accent', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view'];
+
+const SETTINGS_DEFAULTS = {
+  theme: 'system',            // 'light' | 'dark' | 'system'
+  accent: '#6d4aff',          // Proton primary (snow theme verbatim)
+  firstDay: 1,                // 0=Sun, 1=Mon (current app default), 6=Sat
+  hour12: null,               // null = locale default | true | false
+  slotDuration: '00:30:00',   // timeGrid slot (Proton interval analogue)
+  weekNumbers: false,
+  density: 'comfortable',     // 'comfortable' | 'compact'
+  customDays: 5,              // custom view days (2..14)
+  view: 'dayGridMonth',       // default view on unlock
+};
+
+let settings = { ...SETTINGS_DEFAULTS };
+
+function loadSettings() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_SETTINGS) || 'null');
+    if (o && typeof o === 'object') {
+      for (const k of SETTINGS_KEYS) if (o[k] !== undefined) settings[k] = o[k];
+    }
+  } catch { /* ignore */ }
+  // Legacy migration: v4.3 stored the theme under its own key.
+  if (!localStorage.getItem(LS_SETTINGS) && localStorage.getItem(LS_THEME)) {
+    const t = localStorage.getItem(LS_THEME);
+    if (t === 'light' || t === 'dark') settings.theme = t;
+  }
+  // Legacy migration: v4.3 view name → FullCalendar view id.
+  try {
+    const old = localStorage.getItem('clock_poc_view_v43');
+    if (old && !localStorage.getItem(LS_VIEW)) {
+      const m = migrateView(old);
+      if (VIEWS.includes(m)) settings.view = m;
+    }
+  } catch { /* ignore */ }
+  settings.customDays = Math.max(2, Math.min(14, Number(settings.customDays) || 5));
+  if (!VIEWS.includes(settings.view)) settings.view = 'dayGridMonth';
+  if (!['light', 'dark', 'system'].includes(settings.theme)) settings.theme = 'system';
+  if (!['00:15:00', '00:30:00', '01:00:00'].includes(settings.slotDuration)) settings.slotDuration = '00:30:00';
+  if (!['comfortable', 'compact'].includes(settings.density)) settings.density = 'comfortable';
+  if (![0, 1, 6].includes(settings.firstDay)) settings.firstDay = 1;
+}
+
+function saveSettings() {
+  safeSetItem(LS_SETTINGS, JSON.stringify(settings));
+}
+
+/** Resolve 'system' to a concrete theme using the OS preference. */
+function resolvedTheme() {
+  if (settings.theme === 'system') {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  return settings.theme === 'dark' ? 'dark' : 'light';
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = resolvedTheme();
+}
+
+/** Apply the FULL settings state: DOM tokens + FullCalendar options.
+ * `live` — rebuild the calendar options (resetOptions re-processes view
+ * specs, so slotDuration/firstDay/formats/weekNumbers/duration all apply). */
+function applySettings({ fc = true } = {}) {
+  applyTheme();
+  document.documentElement.dataset.density = settings.density;
+  const root = document.documentElement.style;
+  root.setProperty('--primary', settings.accent);
+  root.setProperty('--interaction-norm', settings.accent);
+  root.setProperty('--interaction-norm-minor-1', settings.accent + '2b');
+  root.setProperty('--interaction-norm-minor-2', settings.accent + '17');
+  root.setProperty('--focus-outline', settings.accent);
+  if (fc && fcCal) fcCal.resetOptions(buildFcOptions());
+}
+
 /* ---------------- provisioning & boot (unchanged from v4.1 client) ---------------- */
 
 function serverUrl() {
@@ -312,8 +386,6 @@ async function unlock() {
     state.api = new Api(url, authUiHex);
     state.rowKey = await importRowKey(kData);
     state.today = core.localToday();
-    state.viewYM = state.viewYM || state.today.slice(0, 7);
-    state.selectedDate = state.selectedDate || state.today;
     // v4.3 §5.4 — SOFT version gate: a mismatch degrades features (per-row
     // GETs instead of §9b batch) but NEVER locks the user out of their data.
     // E2-2: the gate runs CONCURRENTLY with the first sync — the batch path is
@@ -363,6 +435,9 @@ function showApp() {
   $('#btn-sync').hidden = false;
   $('#btn-lock').hidden = false;
   $('#btn-forget').hidden = false;
+  $('#btn-settings').hidden = false;
+  ensureCalendar(); // construct + render the FullCalendar instance once
+  renderAll();
 }
 
 function lock() {
@@ -378,14 +453,10 @@ function lock() {
   // MUST do a full manifest fetch (a 304 against a cleared state would
   // render an empty calendar).
   state.manifestEtag = null;
-  // E5-5: purge module-scope references to decrypted data so plaintext event
-  // titles/descriptions do not survive Lock in the JS heap: the rendered
-  // time-grid model and any half-open editor target.
-  timeGridModel.days = [];
-  timeGridModel.timeEvents = [];
-  timeGridModel.perDay = new Map();
-  timeGridModel.gridEl = null;
-  timeGridModel.renderedSig = null;
+  // E5-5: purge plaintext event data so titles/descriptions do not survive
+  // Lock in the JS heap: the FullCalendar event store and any half-open
+  // editor target.
+  if (fcCal) { try { fcCal.removeAllEvents(); } catch { /* not rendered yet */ } }
   editor.mode = null;
   editor.scope = null;
   editor.target = null;
@@ -396,6 +467,7 @@ function lock() {
   $('#btn-sync').hidden = true;
   $('#btn-lock').hidden = true;
   $('#btn-forget').hidden = true;
+  $('#btn-settings').hidden = true;
 }
 
 function forgetBrowser() {
@@ -776,16 +848,11 @@ async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
   throw new Error('rebase_exhausted: ' + id);
 }
 
-
 /* ---------------- occurrence → view event model ---------------- */
 
 const diffDays = (a, b) =>
   Math.round((new Date(a + 'T00:00:00Z') - new Date(b + 'T00:00:00Z')) / 86400000);
 const shiftDay = (d, n) => core.addDays(d, n);
-
-function wallShift(dt, days) {
-  return { date: shiftDay(dt.date, days), time: dt.time, tz: dt.tz };
-}
 
 /** Hours between two wall {date,time} (naive; display-classification only). */
 function wallHours(a, b) {
@@ -795,7 +862,8 @@ function wallHours(a, b) {
 
 /**
  * All view events overlapping [firstDay, lastDay] (inclusive), from visible
- * calendars only. Mirrors Proton's CalendarViewEvent essentials.
+ * calendars only. Mirrors Proton's CalendarViewEvent essentials. Feeds the
+ * FullCalendar event source, the event popover and the clock preview.
  */
 function viewEventsForRange(firstDay, lastDay) {
   const out = [];
@@ -833,7 +901,7 @@ function viewEventsForRange(firstDay, lastDay) {
       });
     }
   }
-  // Deterministic order for layout(): start, then all-day first, then title.
+  // Deterministic order: start, then all-day first, then title.
   out.sort((a, b) => {
     if (a.start.date !== b.start.date) return a.start.date < b.start.date ? -1 : 1;
     const at = a.start.time || '00:00';
@@ -848,276 +916,326 @@ function viewEventsForRange(firstDay, lastDay) {
   return out;
 }
 
-/* ---------------- Proton month-grid layout (VERBATIM PORT) ----------------
- * layout.ts (GPL-3.0): collision groups + columns; the "column" result is the
- * chip STACK ROW within the week, "columns" the group's stack depth. */
+/* ==================================================================
+ * FullCalendar bridge (view layer — everything in this section drives
+ * FullCalendar v6.1.22 through its DOCUMENTED options only; its DnD,
+ * resizing, layout and popovers are used exactly as shipped).
+ * ================================================================== */
 
-function getCollisionGroups(events) {
-  let maxEnd = -1;
-  let tmp = [];
-  const out = [];
-  events.forEach((event, i, arr) => {
-    const { start, end } = event;
-    const isIntersect = start < maxEnd;
-    if (isIntersect) {
-      maxEnd = Math.max(maxEnd, end);
-      tmp.push(event);
-    } else {
-      if (tmp.length) out.push(tmp);
-      maxEnd = end;
-      tmp = [event];
-    }
-    if (arr.length - 1 === i) out.push(tmp);
-  });
-  return out;
+let fcCal = null; // the FullCalendar.Calendar instance (created on unlock)
+
+/** Plugin classes from the vendored global bundles (verified by smoke test). */
+function fcPlugins() {
+  return [
+    window.FullCalendar.DayGrid.default,
+    window.FullCalendar.TimeGrid.default,
+    window.FullCalendar.Interaction.default,
+    window.FullCalendar.MultiMonth.default,
+    window.FullCalendar.List.default,
+  ];
 }
 
-function getColumns(group) {
-  return group.reduce((columns, event, i) => {
-    for (let j = 0; j < columns.length; ++j) {
-      const column = columns[j];
-      const isIntersect = event.start < column.end;
-      if (!isIntersect) {
-        column.indices.push(i);
-        column.end = Math.max(column.end, event.end);
-        return columns;
-      }
-    }
-    columns.push({ indices: [i], end: event.end });
-    return columns;
-  }, []);
-}
-
-/** Proton layout(): events (sorted by start) → [{column, columns}] per event. */
-function layout(events) {
-  const groups = getCollisionGroups(events);
-  return groups.reduce((acc, group) => {
-    const columns = getColumns(group);
-    group.forEach((event, j) => {
-      const columnIndex = columns.findIndex(({ indices }) => indices.indexOf(j) !== -1);
-      acc.push({ column: columnIndex, columns: columns.length });
-    });
-    return acc;
-  }, []);
-}
-
-/** splitDayEventsInInterval port: view events → day-index ranges in a week row. */
-function splitDayEventsInInterval(events, minDay, maxDay) {
-  return events.reduce((acc, ev, i) => {
-    const startDate = ev.start.date < minDay ? minDay : ev.start.date;
-    const isDisplayedMultipleDays = ev.isAllDay || ev.isAllPartDay;
-    let endDay = isDisplayedMultipleDays ? (ev.spanLast > maxDay ? maxDay : ev.spanLast) : startDate;
-    if (startDate > endDay) return acc;
-    // Part-day events starting before the row range are shown in a previous row.
-    if (!isDisplayedMultipleDays && startDate > ev.start.date) return acc;
-    const startIndex = diffDays(startDate, minDay);
-    const calendarDaysDifference = isDisplayedMultipleDays ? diffDays(endDay, startDate) : 0;
-    acc.push({ idx: i, start: startIndex, end: startIndex + calendarDaysDifference + 1, id: ev.uniqueId });
-    return acc;
-  }, []);
-}
-
-/** useDayGridEventLayout port (one week row). Returns chip placement list. */
-function dayGridRowLayout(eventsInRow, numberOfRows) {
-  const laidOut = layout(eventsInRow);
-  const getIsAllSingle = (summary, start, end) => {
-    for (let i = start; i < end; ++i) {
-      if (!summary[i] || summary[i].more !== 1) return false;
-    }
-    return true;
+/** Local (browser) wall components of a Date — for create/convert paths. */
+function localWallOf(date) {
+  const p = (n) => String(n).padStart(2, '0');
+  return {
+    date: date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()),
+    time: p(date.getHours()) + ':' + p(date.getMinutes()) + ':' + p(date.getSeconds()),
   };
-  let maxRows = 0;
-  const summary = {};
-  laidOut.forEach(({ column: eventRow }, i) => {
-    const { start, end } = eventsInRow[i];
-    maxRows = Math.max(maxRows, eventRow + 1);
-    for (let d = start; d < end; ++d) {
-      if (!summary[d]) summary[d] = { more: 0, events: [] };
-      summary[d].events.push(i);
-      if (eventRow >= numberOfRows) summary[d].more++;
-    }
-  });
-  const styles = [];
-  laidOut.forEach(({ column: eventRow }, i) => {
-    const { start, end } = eventsInRow[i];
-    const isHidden = eventRow >= numberOfRows;
-    const isAllSingle = isHidden && getIsAllSingle(summary, start, end);
-    if (isAllSingle) {
-      for (let d = start; d < end; ++d) summary[d].more = 0;
-    }
-    if (summary[start] && summary[start].more > 0 && isHidden) return;
-    styles.push({ idx: i, dayIdx: start, type: 'event', row: eventRow, start, end });
-  });
-  const moreDays = [];
-  for (const d of Object.keys(summary)) {
-    const dayIdx = +d;
-    if (summary[dayIdx].more > 0) moreDays.push({ idx: dayIdx, dayIdx, type: 'more' });
-  }
-  // Proton getSortedEventsAndMoreDays: by dayIdx, events before more.
-  const sorted = [...styles, ...moreDays].sort((a, b) => {
-    if (a.dayIdx !== b.dayIdx) return a.dayIdx - b.dayIdx;
-    if (a.type === b.type) return 0;
-    return a.type === 'event' ? -1 : 1;
-  });
-  return { eventsInRow, styles: sorted, summary, maxRows };
 }
 
-/* ---------------- rendering ---------------- */
+/** One view event → a FullCalendar EventInput.
+ *  - all-day occurrences: date strings (end EXCLUSIVE — RFC DTEND semantics).
+ *  - timed occurrences: real instants (wall+TZID → UTC Date) so FullCalendar
+ *    renders in the browser's timezone (RFC 5545 semantics; DST-correct).
+ *  - id: uniqueId (rowId#recId) — stable across refetches; the app-side view
+ *    event rides along in extendedProps.ev (popover / mutations). */
+function fcEventInput(ev) {
+  const tz = ev.component.dtstart.tz || 'UTC';
+  let start;
+  let end;
+  let allDay;
+  if (ev.isAllDay) {
+    allDay = true;
+    start = ev.start.date;
+    end = core.addDays(ev.spanLast, 1); // display-inclusive → exclusive
+  } else {
+    allDay = false;
+    start = core.wallToInstantUTC({ date: ev.start.date, time: ev.start.time || '00:00:00' }, tz);
+    const endTime = ev.end.time === null ? '00:00:00' : ev.end.time;
+    end = core.wallToInstantUTC({ date: ev.end.date, time: endTime }, tz);
+    if (end.getTime() <= start.getTime()) end = new Date(start.getTime()); // zero-length
+  }
+  const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
+  return {
+    id: ev.uniqueId,
+    title: ev.title || '',
+    start,
+    end,
+    allDay,
+    backgroundColor: colorMain,
+    borderColor: colorAlt,
+    textColor: '#FFFFFF',
+    extendedProps: { ev },
+  };
+}
 
-/* ---------------- view system (v4.3: day / week / month / custom / year) ---------------- */
+/** FullCalendar event source: expand the decrypted model over the requested
+ * range (synchronous, ZERO network — the sync engine owns the wire). */
+function fcEventsSource(fetchInfo, successCallback, failureCallback) {
+  try {
+    const a = localWallOf(fetchInfo.start);
+    const b = localWallOf(fetchInfo.end);
+    const events = viewEventsForRange(a.date, core.addDays(b.date, -1)).map(fcEventInput);
+    successCallback(events);
+  } catch (e) {
+    failureCallback(e);
+  }
+}
 
-/** Proton VIEWS — the subset this client implements (constants.ts). */
+/** The single source of FullCalendar options (settings + state derived). */
+function buildFcOptions() {
+  const hour12 = settings.hour12 === null ? undefined : !!settings.hour12;
+  const timeFmt = { hour: 'numeric', minute: '2-digit', meridiem: 'narrow', ...(hour12 === undefined ? {} : { hour12 }) };
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return {
+    plugins: fcPlugins(),
+    initialView: state.view,
+    headerToolbar: {
+      start: 'prev,next today',
+      center: 'title',
+      end: 'timeGridDay,timeGridWeek,dayGridMonth,multiMonthYear,listYear,custom',
+    },
+    height: '100%',
+    expandRows: true,
 
+    /* ---- event data ---- */
+    events: fcEventsSource,
+    editable: true,          // FullCalendar's own drag & drop + resizing
+    selectable: true,        // FullCalendar's own drag-to-create
+    selectMirror: true,
+    unselectAuto: true,
+    eventStartEditable: true,
+    eventDurationEditable: true,
+    dayMaxEvents: true,      // native "+N more"
+    nowIndicator: true,      // native now-line
+    navLinks: true,          // native day-number navigation
+    navLinkDayClick: 'timeGridDay',
+    navLinkWeekClick: 'timeGridWeek',
+
+    /* ---- callbacks (the ONLY glue to the backbone) ---- */
+    viewDidMount: onViewDidMount,
+    eventClick: handleEventClick,
+    eventDrop: handleEventDrop,
+    eventResize: handleEventResize,
+    select: handleSelect,
+    dateClick: handleDateClick,
+
+    /* ---- appearance / customisation (settings menu) ---- */
+    firstDay: settings.firstDay,
+    weekNumbers: !!settings.weekNumbers,
+    slotDuration: settings.slotDuration,
+    slotLabelInterval: settings.slotDuration === '00:15:00' ? '01:00:00' : undefined,
+    scrollTime: p(now.getHours()) + ':' + p(now.getMinutes()) + ':00',
+    eventTimeFormat: timeFmt,
+    slotLabelFormat: timeFmt,
+    titleFormat: { year: 'numeric', month: 'long' },
+    views: {
+      custom: { type: 'timeGrid', duration: { days: settings.customDays }, buttonText: 'Custom' },
+      timeGridDay: { buttonText: 'Day' },
+      timeGridWeek: { buttonText: 'Week' },
+      dayGridMonth: { buttonText: 'Month' },
+      multiMonthYear: { buttonText: 'Year' },
+      listYear: { buttonText: 'Agenda' },
+    },
+    eventClassNames: (arg) => (arg.event.extendedProps.ev && arg.event.extendedProps.ev.isCancelled ? ['fc-event-cancelled'] : []),
+    moreLinkClick: 'popover', // native "+N more" popover
+  };
+}
+
+/** FullCalendar viewDidMount: keep state.view/settings/LS_VIEW in sync with
+ * toolbar view switches (documented callback — fires on every view mount). */
+function onViewDidMount(info) {
+  const v = info.view.type;
+  if (v !== state.view) {
+    state.view = v;
+    settings.view = v;
+    saveSettings();
+    try { localStorage.setItem(LS_VIEW, v); } catch { /* ignore */ }
+  }
+  renderMiniCalendar();
+}
+
+/** Construct + render the calendar once (on first unlock). */
+function ensureCalendar() {
+  if (fcCal) return;
+  fcCal = new window.FullCalendar.Calendar($('#calendar'), buildFcOptions());
+  fcCal.render();
+}
+
+/** Re-apply FullCalendar options after a settings change (resetOptions is
+ * the documented way to change view-affecting options live; plain setOption
+ * does NOT rebuild view specs like the custom view's duration). */
+function fcApplyOptions() {
+  if (fcCal) fcCal.resetOptions(buildFcOptions());
+}
+
+/* ---------------- FullCalendar → backbone handlers ---------------- */
+
+/** Click on an event chip → read-only popover (backbone UI, unchanged). */
+function handleEventClick(info) {
+  info.jsEvent.preventDefault();
+  const ev = info.event.extendedProps.ev;
+  if (!ev) return;
+  openEventPopover(ev, info.el.getBoundingClientRect());
+}
+
+/** Duration → {days, minutes} (FullCalendar Duration objects carry
+ * days/milliseconds; minutes may carry across-midnight drags). */
+function fcDurationToParts(d) {
+  if (!d) return { days: 0, minutes: 0 };
+  return { days: d.days || 0, minutes: Math.round((d.milliseconds || 0) / 60000) };
+}
+
+/**
+ * Drop (move). FullCalendar's own DnD computes the delta; the backbone's
+ * applyDayShift performs the RMW (wall-clock day+minute shift, recurring
+ * scope choice, A1 exception semantics). info.revert() puts the chip back
+ * on failure/cancel — FullCalendar's documented revert mechanism, unmodified.
+ */
+function handleEventDrop(info) {
+  const ev = info.event.extendedProps.ev;
+  if (!ev) { info.revert(); return; }
+  const { days, minutes } = fcDurationToParts(info.delta);
+  const toAllDay = !!info.event.allDay;
+  const wasAllDay = ev.isAllDay;
+  const dropDay = info.event.allDay ? localWallOf(info.event.start).date : null;
+
+  // Cross-slot conversion (timed ↔ all-day): a separate mutation shape.
+  if (toAllDay !== wasAllDay) {
+    applyWithScope(ev, {
+      title: 'Convert event',
+      run: (scope) => applyAllDayConversion(ev, scope, {
+        toAllDay,
+        day: toAllDay ? dropDay : localWallOf(info.event.start).date,
+        time: toAllDay ? null : localWallOf(info.event.start).time,
+      }),
+      revert: info.revert,
+    });
+    return;
+  }
+
+  applyWithScope(ev, {
+    title: 'Move recurring event',
+    run: (scope) => applyDayShift(ev, days, scope, minutes),
+    revert: info.revert,
+  });
+}
+
+/**
+ * Resize (duration change): new-backbone mutation applyDurationChange —
+ * shifts ONLY the end (dtend) by the resized delta, same putRowRMW pattern
+ * as every other mutation. startDelta is 0 for one-edge resizes.
+ */
+function handleEventResize(info) {
+  const ev = info.event.extendedProps.ev;
+  if (!ev) { info.revert(); return; }
+  const { days, minutes } = fcDurationToParts(info.endDelta);
+  applyWithScope(ev, {
+    title: 'Resize recurring event',
+    run: (scope) => applyDurationChange(ev, days, minutes, scope),
+    revert: info.revert,
+  });
+}
+
+/** Shared mutation wrapper: recurring scope choice → busy → run → revert on
+ * failure; toasts mirror the backbone's move/resize UX. */
+function applyWithScope(ev, { title, run, revert }) {
+  const apply = async (scope) => {
+    try {
+      setBusy(true, 'Saving…');
+      await run(scope);
+      toast('Event updated.', 'ok', 2000);
+    } catch (e) {
+      toast('Update failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+      if (revert) revert();
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (ev.isRecurring || ev.isException) {
+    openRecurringChoice(title, (choice) => {
+      if (choice === 'cancel') { if (revert) revert(); return; }
+      apply(choice === 'exception' ? 'exception' : 'master');
+    });
+  } else {
+    apply('master');
+  }
+}
+
+/**
+ * Drag-to-create (FullCalendar select). all-day selections open the editor
+ * with an inclusive day range; timed selections with wall start/end minutes
+ * (beginCreateTimeGrid normalises minute carry across midnight).
+ */
+function handleSelect(info) {
+  fcCal.unselect();
+  closeAllOverlays();
+  if (info.allDay) {
+    // FullCalendar all-day select end is EXCLUSIVE; the editor takes the
+    // display-INCLUSIVE last day (beginCreateRange semantics).
+    const last = core.addDays(localWallOf(info.end).date, -1);
+    beginCreateRange(localWallOf(info.start).date, last);
+    return;
+  }
+  const startW = localWallOf(info.start);
+  const endW = localWallOf(info.end);
+  const mins = (w) => +w.time.slice(0, 2) * 60 + +w.time.slice(3, 5);
+  // Total minutes from the SELECTED day (multi-day timed selects carry).
+  const totalM = diffDays(endW.date, startW.date) * 1440 + (mins(endW) - mins(startW));
+  beginCreateTimeGrid(startW.date, mins(startW), Math.max(mins(startW) + MIN_DURATION, mins(startW) + totalM));
+}
+
+/** Plain click on an empty day/timeslot → create (Proton default duration). */
+function handleDateClick(info) {
+  closeAllOverlays();
+  if (info.view.type.startsWith('dayGrid') || info.view.type.startsWith('multimonth')) {
+    beginCreate(localWallOf(info.date).date); // all-day (month-grid semantics)
+    return;
+  }
+  const w = localWallOf(info.date);
+  const m = +w.time.slice(0, 2) * 60 + +w.time.slice(3, 5);
+  beginCreateTimeGrid(w.date, m, m + DEFAULT_EVENT_DURATION);
+}
+
+/* ---------------- rendering (view refresh) ---------------- */
+
+/** Render everything from the CURRENT decrypted state. The grid itself is
+ * FullCalendar's — refetchEvents re-runs the (synchronous) event source. */
 function renderAll() {
   state.today = state.today || core.localToday();
-  const root = viewRoot();
-  // B4: a data-refresh rebuild replaces the scroll container — carry the
-  // user's scroll position across the rebuild instead of snapping to 0.
-  const prevScroll = document.querySelector('.calendar-time-grid');
-  const prevTop = prevScroll ? prevScroll.scrollTop : null;
-  root.replaceChildren();
-  if (state.view === 'month') {
-    renderMonth(root);
-  } else if (state.view === 'year') {
-    renderYear(root);
-  } else {
-    renderTimeGrid(root, viewRangeDays());
-    if (prevTop !== null) {
-      const next = document.querySelector('.calendar-time-grid');
-      if (next) next.scrollTop = prevTop;
-    }
-  }
-  renderToolbar();
-  renderMiniCalendar();
+  if (fcCal) fcCal.refetchEvents();
   renderCalendarList();
+  renderMiniCalendar();
   renderClockPreview();
 }
 
-function viewRoot() {
-  return $('#view-root');
-}
-
-/** Days shown by the active view (Proton eachDayOfInterval(dateRange)). */
-function viewRangeDays() {
-  const sel = state.selectedDate || state.today || core.localToday();
-  if (state.view === 'day') return [sel];
-  if (state.view === 'week') {
-    const dow = (new Date(sel + 'T00:00:00Z').getUTCDay() + 6) % 7; // Monday = 0
-    const monday = shiftDay(sel, -dow);
-    const out = [];
-    for (let i = 0; i < 7; i++) out.push(shiftDay(monday, i));
-    return out;
-  }
-  // custom: N consecutive days starting at the selected date (2..14)
-  const n = Math.max(2, Math.min(14, state.customDays));
-  const out = [];
-  for (let i = 0; i < n; i++) out.push(shiftDay(sel, i));
-  return out;
-}
-
-/** Navigate the active view one step (Proton navigation arrows). */
-function navView(delta) {
-  if (state.view === 'month' || state.view === 'year') {
-    const step = state.view === 'month' ? delta : delta * 12;
-    const [y, m] = state.viewYM.split('-').map(Number);
-    const d = new Date(Date.UTC(y, m - 1 + step, 1));
-    state.viewYM = d.toISOString().slice(0, 7);
-    // Keep the selected date inside the shown month WITHOUT destructively
-    // clamping the day-of-month (Oct 31 → Nov 30 → Oct 30 lost a day through
-    // the short-month round-trip): clamp from the STICKY nav day, which only
-    // explicit selections (click / Today / mini calendar) update.
-    const [ny, nm] = state.viewYM.split('-').map(Number);
-    const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
-    const wanted = state.navDay || Number((state.selectedDate || core.localToday()).slice(8));
-    // Assign DIRECTLY (not setSelectedDate): the clamped result must NOT
-    // overwrite the sticky nav day — only explicit selections do that.
-    state.selectedDate = state.viewYM + '-' + String(Math.min(Math.max(1, wanted), last)).padStart(2, '0');
-  } else {
-    const step = state.view === 'day' ? delta : delta * viewRangeDays().length;
-    setSelectedDate(shiftDay(state.selectedDate || core.localToday(), step));
-    state.viewYM = state.selectedDate.slice(0, 7);
-  }
-  renderAll();
-}
-
-/** Toolbar label for the active view (Proton current-range). */
-function viewLabel() {
-  const today = state.today || core.localToday();
-  if (state.view === 'month') {
-    return MONTHS[Number(state.viewYM.slice(5)) - 1] + ' ' + state.viewYM.slice(0, 4);
-  }
-  if (state.view === 'year') {
-    return state.viewYM.slice(0, 4);
-  }
-  const days = viewRangeDays();
-  const a = days[0];
-  const b = days[days.length - 1];
-  if (state.view === 'day') {
-    return fmtDateLong.format(new Date(a + 'T00:00:00')) + (a === today ? ' · today' : '');
-  }
-  const fmtRange = new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' });
-  const yr = new Intl.DateTimeFormat(locale, { year: 'numeric' });
-  const sameYear = a.slice(0, 4) === b.slice(0, 4);
-  return (
-    fmtRange.format(new Date(a + 'T00:00:00')) +
-    ' – ' +
-    (sameYear ? '' : yr.format(new Date(a + 'T00:00:00')) + ' ') +
-    fmtRange.format(new Date(b + 'T00:00:00')) +
-    ', ' + yr.format(new Date(b + 'T00:00:00'))
-  );
-}
-
-/** Segmented view switcher + custom-day picker (Proton ViewSelector). */
-function renderToolbar() {
-  $('#month-label').textContent = viewLabel();
-  const seg = $('#view-selector');
-  if (!seg.dataset.bound) {
-    seg.dataset.bound = '1';
-    for (const v of VIEWS) {
-      const b = el('button', 'view-button', {
-        type: 'button',
-        text: v === 'custom' ? 'Custom' : v.charAt(0).toUpperCase() + v.slice(1),
-        'aria-pressed': 'false',
-        title: v + ' view',
-        dataset: { view: v },
-      });
-      b.addEventListener('click', () => setView(v));
-      seg.appendChild(b);
-    }
-    const pick = el('select', 'custom-days-select', {
-      'aria-label': 'Custom view days', title: 'Custom view — number of days',
-    });
-    for (let n = 2; n <= 14; n++) {
-      pick.appendChild(el('option', null, { value: String(n), text: n + ' days' }));
-    }
-    pick.value = String(state.customDays);
-    pick.addEventListener('change', () => {
-      state.customDays = Math.max(2, Math.min(14, Number(pick.value) || 5));
-      setView('custom');
-    });
-    seg.appendChild(pick);
-  }
-  for (const b of seg.querySelectorAll('.view-button')) {
-    b.classList.toggle('is-selected', b.dataset.view === state.view);
-    b.setAttribute('aria-pressed', b.dataset.view === state.view ? 'true' : 'false');
-  }
-  seg.querySelector('.custom-days-select').hidden = state.view !== 'custom';
-}
-
+/** Switch the FullCalendar view (toolbar buttons call this via view-did-mount
+ * state tracking; keyboard shortcuts call it directly). */
 function setView(v) {
   if (!VIEWS.includes(v)) return;
   state.view = v;
   try { localStorage.setItem(LS_VIEW, v); } catch { /* ignore */ }
-  renderAll();
+  settings.view = v;
+  saveSettings();
+  if (fcCal && fcCal.view.type !== v) fcCal.changeView(v);
+  renderMiniCalendar();
 }
 
-const MONTHS = (() => {
-  const out = [];
-  for (let m = 0; m < 12; m++) out.push(new Intl.DateTimeFormat(locale, { month: 'long' }).format(new Date(2026, m, 15)));
-  return out;
-})();
+/* ---------------- mini calendar (sidebar; drives fc.gotoDate) ---------------- */
 
-/** Weeks (Mon-first) covering the month of viewYM, each row = 7 day strings. */
+/** Weeks (Mon-first) covering the month, each row = 7 day strings. */
 function monthRows(ym) {
   const [y, m] = ym.split('-').map(Number);
   const first = new Date(Date.UTC(y, m - 1, 1));
@@ -1137,783 +1255,42 @@ function monthRows(ym) {
   return { rows, monthDays: new Set(days) };
 }
 
-function renderMonth(root) {
-  root = root || viewRoot();
-  root.replaceChildren(); // ALWAYS start clean (the rAF re-render appends)
-  const wrap = el('div', 'daygrid-wrap is-month-view');
-  const head = el('div', 'calendar-daygrid-days');
-  head.id = 'grid-head';
-  const rowsWrap = el('div', 'calendar-daygrid-rows');
-  rowsWrap.id = 'grid-rows';
-  rowsWrap.dataset.dnd = 'daygrid';
-  wrap.append(head, rowsWrap);
-  root.appendChild(wrap);
-  head.replaceChildren();
-  rowsWrap.replaceChildren();
-
-  const today = state.today || core.localToday();
-  const todayDow = (new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7;
-  const isTodayMonth = state.viewYM === today.slice(0, 7);
-
-  // Weekday header (Proton: long name; today's weekday highlighted).
-  for (let i = 0; i < 7; i++) {
-    const d = el('div', i === todayDow && isTodayMonth ? 'is-today' : '');
-    d.append(
-      el('span', 'day-fullname', { text: WEEKDAY_LONG[i] }),
-      el('span', 'day-shortname', { text: WEEKDAY_LONG[i][0] })
-    );
-    head.appendChild(d);
-  }
-
-  const { rows, monthDays } = monthRows(state.viewYM);
-  const events = viewEventsForRange(rows[0][0], rows[rows.length - 1][6]);
-  const numberOfRows = Math.max(state.gridRows, 0);
-
-  rows.forEach((days, rowIndex) => {
-    const week = el('div', 'daygrid-week');
-    const cols = el('div', 'calendar-daygrid-columns');
-    for (const day of days) cols.appendChild(el('div', 'calendar-daygrid-column'));
-    week.appendChild(cols);
-
-    // Day buttons (Proton DayButtons: number, aria-current for today).
-    const buttons = el('div', 'daygrid-daybuttons');
-    for (const day of days) {
-      const inMonth = monthDays.has(day);
-      const b = el('button', 'calendar-monthgrid-day' +
-        (inMonth ? '' : ' is-outside-month') +
-        (day === state.selectedDate ? ' selected' : ''), {
-        type: 'button',
-        'aria-current': day === today ? 'date' : null,
-        'aria-pressed': day === state.selectedDate ? 'true' : null,
-        'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
-        title: fmtDateLong.format(new Date(day + 'T00:00:00')),
-      });
-      b.addEventListener('click', () => {
-        setSelectedDate(day);
-        // B8: clicking an OUTSIDE-month day navigates to its month (the
-        // mini calendar does the same); in-month clicks keep the view.
-        if (!inMonth) state.viewYM = day.slice(0, 7);
-        renderMonth();
-        renderMiniCalendar();
-        openMorePopover(day, b.getBoundingClientRect());
-      });
-      b.appendChild(el('span', 'calendar-monthgrid-day-number', { text: String(Number(day.slice(8))) }));
-      buttons.appendChild(b);
-    }
-    week.appendChild(buttons);
-
-    // Event chips area — the DnD row element (data-row).
-    const rowEventsEl = el('div', 'daygrid-rowevents unstyled', { role: 'list', 'data-row': String(rowIndex) });
-    // NOTE: splitDayEventsInInterval indexes into the array it is GIVEN —
-    // keep one filtered array and index into THAT (never the full list).
-    const rowEvents = events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0]));
-    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], days[6]);
-    const laid = dayGridRowLayout(eventsInRow, numberOfRows);
-    for (const s of laid.styles) {
-      if (s.type === 'more') {
-        rowEventsEl.appendChild(moreChip(s.dayIdx, days, laid.summary, rowEvents, eventsInRow, numberOfRows));
-      } else {
-        rowEventsEl.appendChild(eventChip(s, eventsInRow[s.idx] ? rowEvents[eventsInRow[s.idx].idx] : null, days));
-      }
-    }
-    week.appendChild(rowEventsEl);
-    rowsWrap.appendChild(week);
-  });
-
-  $('#month-label').textContent = viewLabel();
-
-  // Proton useLayoutEffect: measure the first row, derive the visible chip rows.
-  requestAnimationFrame(() => {
-    const first = rowsWrap.querySelector('.daygrid-rowevents');
-    if (!first) return;
-    const h = first.getBoundingClientRect().height || 100;
-    const n = Math.max(Math.floor(h / DAY_EVENT_HEIGHT), 1) - 1;
-    if (n !== state.gridRows) {
-      state.gridRows = n;
-      renderMonth();
-    }
-  });
+/** The month the MAIN calendar is showing (FullCalendar's current date). */
+function currentYM() {
+  const d = fcCal ? fcCal.getDate() : new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
-
-/** One event chip (Proton FullDayEvent / PartDayEvent, month view). */
-function eventChip(style, ev, days) {
-  if (!ev) return el('div');
-  const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
-  const n = (days && days.length) || 7; // row day count (7 in month/week)
-  const chip = el('div', 'calendar-dayeventcell', {
-    style:
-      `--top-custom:${style.row * DAY_EVENT_HEIGHT}px;` +
-      `--left-custom:${(style.start / n) * 100}%;` +
-      `--w-custom:${((style.end - style.start) / n) * 100}%;` +
-      `--h-custom:${DAY_EVENT_HEIGHT}px;` +
-      `--color-main:${colorMain};--color-alt:${colorAlt};--foreground:#fff;`,
-    tabindex: '0',
-    role: 'listitem',
-  });
-  const inner = el('div', 'calendar-dayeventcell-inner' +
-    (ev.isAllDay || ev.isAllPartDay ? '' : ' isNotAllDay') +
-    (ev.isCancelled ? ' isCancelled' : ''));
-  const line = el('div', 'flex-line');
-  if (!ev.isAllDay && !ev.isAllPartDay) {
-    line.appendChild(el('span', 'calendar-dayeventcell-circle'));
-    const t = ev.start.time === null ? '' : showTime(ev.start);
-    if (t) line.appendChild(el('span', 'calendar-dayeventcell-time', { text: t }));
-  } else if (!ev.isAllDay && ev.isAllPartDay && ev.start.time !== null) {
-    const t = showTime(ev.start);
-    if (t) line.appendChild(el('span', 'calendar-dayeventcell-time', { text: t }));
-  }
-  line.appendChild(el('span', 'calendar-dayeventcell-title chip-text', { text: ev.title || '' }));
-  inner.appendChild(line);
-  chip.appendChild(inner);
-  chip.addEventListener('mouseup', (e) => {
-    // DnD owns mousedown; a plain mouseup without drag opens the popover.
-    if (!dragState.moved) {
-      e.stopPropagation();
-      openEventPopover(ev, chip.getBoundingClientRect());
-    }
-  });
-  chip.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      const r = chip.getBoundingClientRect();
-      openEventPopover(ev, { left: r.left + 5, right: r.left + 5, top: r.top, bottom: r.bottom });
-    }
-  });
-  return chip;
-}
-
-/** The "+N more" chip (Proton MoreFullDayEvent trigger). */
-function moreChip(dayIdx, days, summary, events, eventsInRow, numberOfRows) {
-  const more = summary[dayIdx].more;
-  const n = (days && days.length) || 7; // row day count (7 in month/week)
-  const chip = el('div', 'calendar-dayeventcell', {
-    role: 'listitem', // S2: list semantics parity with eventChip
-    style:
-      `--top-custom:${numberOfRows * DAY_EVENT_HEIGHT}px;` +
-      `--left-custom:${(dayIdx / n) * 100}%;` +
-      `--w-custom:${(1 / n) * 100}%;` +
-      `--h-custom:${DAY_EVENT_HEIGHT}px;`,
-  });
-  const b = el('button', 'button button-ghost calendar-dayeventcell-more', {
-    type: 'button', text: '+' + more + ' more',
-  });
-  b.addEventListener('mouseup', (e) => {
-    if (!dragState.moved) {
-      e.stopPropagation();
-      openMorePopover(days[dayIdx], chip.getBoundingClientRect());
-    }
-  });
-  chip.appendChild(b);
-  return chip;
-}
-
-/* ---------------- TimeGrid (day / week / custom views) — Proton port ----------------
- * applications/calendar/src/app/components/calendar/TimeGrid.tsx +
- * TimeGrid/{DayButtons,DayEvents,HourLines,HourTexts}.tsx +
- * splitTimeGridEventsPerDay.ts (GPL-3.0), adapted to the wall-time model. */
-
-const minutesOf = (dt) => (dt.time === null ? 0 : +dt.time.slice(0, 2) * 60 + +dt.time.slice(3, 5));
-
-function nowMinutes() {
-  const d = new Date();
-  return d.getHours() * 60 + d.getMinutes();
-}
-
-/** Rendered-model cache for the time-grid mouse handler (Proton passes the
- * same data into handleTimeGridMouseDown at mousedown time). */
-const timeGridModel = { days: [], timeEvents: [], perDay: new Map(), gridEl: null, renderedSig: null };
-
-/**
- * splitTimeGridEventsPerDay.ts port (verbatim semantics): events → per-day
- * LayoutEvent [{idx, start(minutes), end(minutes), id}], clamped into the
- * day range, MIN_DURATION=15 floor, midnight-end special case skipped.
- */
-function splitTimeGridEventsPerDay(events, days) {
-  const byDay = new Map(days.map((d) => [d, []]));
-  const minDate = days[0];
-  const maxDate = days[days.length - 1];
-  events.forEach((ev, i) => {
-    // Clamp like startOfDay(max(start, min)) / endOfDay(min(end, max)).
-    const startDay = ev.start.date < minDate ? minDate : ev.start.date;
-    const endInstantDay = ev.end.date; // the day the END wall time falls on
-    const endDay = endInstantDay > maxDate ? maxDate : endInstantDay;
-    if (startDay > endDay) return;
-    for (let d = startDay; d <= endDay; d = shiftDay(d, 1)) {
-      if (!byDay.has(d)) continue; // day not shown in this view
-      const startTime = d === ev.start.date ? minutesOf(ev.start) : 0;
-      const endTime = d === endInstantDay ? minutesOf(ev.end) : TOTAL_MINUTES;
-      // Special case: part-day event ending at midnight shows nothing on the
-      // second day (Proton: endTime === 0 && !isSameDay(start, end)).
-      if (endTime === 0 && d !== ev.start.date) continue;
-      const startTimeWithMin =
-        TOTAL_MINUTES - startTime < MIN_DURATION ? TOTAL_MINUTES - MIN_DURATION : startTime;
-      const endTimeWithMin =
-        endTime - startTimeWithMin < MIN_DURATION ? startTimeWithMin + MIN_DURATION : endTime;
-      byDay.get(d).push({ idx: i, start: startTimeWithMin, end: endTimeWithMin, id: ev.uniqueId });
-    }
-  });
-  return byDay;
-}
-
-/**
- * DayEvents.tsx getEventsLaidOut port: layout() (the verbatim month-grid
- * collision/columns engine) over a day's minute-ranges → absolute CSS props.
- * Returns size ('sm'|'xs'|'2xs') for short events (Proton getSize).
- */
-function timeGridEventStyles(eventsInDay) {
-  return layout(eventsInDay).map(({ column, columns }, i) => {
-    const { start, end } = eventsInDay[i];
-    const duration = end - start;
-    const size =
-      duration < 30 && duration >= 25 ? 'sm' :
-      duration < 25 && duration >= 20 ? 'xs' :
-      duration < 20 ? '2xs' : undefined;
-    const toP = (n) => (n * 100).toFixed(4) + '%';
-    return {
-      idx: eventsInDay[i].idx,
-      size,
-      duration,
-      style: {
-        top: toP(start / TOTAL_MINUTES),
-        left: toP(column / columns),
-        height: toP(duration / TOTAL_MINUTES),
-        width: toP(1 / columns),
-      },
-    };
-  });
-}
-
-/** One part-day chip (Proton PartDayEvent / PartDayRegularEvent). */
-function partDayChip(ls, ev) {
-  const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
-  const chip = el('div', 'calendar-eventcell' +
-    (ls.size ? ' size-' + ls.size : '') +
-    (ev.isCancelled ? ' isCancelled' : ''), {
-    style:
-      `top:${ls.style.top};left:${ls.style.left};width:${ls.style.width};height:${ls.style.height};` +
-      `--color-main:${colorMain};--color-alt:${colorAlt};--foreground:#fff;`,
-    tabindex: '0',
-    role: 'listitem',
-  });
-  const inner = el('div', 'calendar-eventcell-inner');
-  // B7 (upstream PartDayRegularEvent): the full "start – end" range only
-  // fits when the part is ≥ 50 minutes; shorter chips show the start only.
-  const timeText = ev.start.time === null
-    ? ''
-    : showTime(ev.start) + (ev.end.time !== null && (ls.duration || 0) >= 50
-        ? ' – ' + showTime(ev.end)
-        : '');
-  if (timeText) inner.appendChild(el('div', 'calendar-eventcell-time', { text: timeText }));
-  inner.appendChild(el('div', 'calendar-eventcell-title', { text: ev.title || '' }));
-  chip.appendChild(inner);
-  chip.addEventListener('mouseup', (e) => {
-    if (!dragState.moved) {
-      e.stopPropagation();
-      openEventPopover(ev, chip.getBoundingClientRect());
-    }
-  });
-  chip.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      const r = chip.getBoundingClientRect();
-      openEventPopover(ev, { left: r.left + 5, right: r.left + 5, top: r.top, bottom: r.bottom });
-    }
-  });
-  return chip;
-}
-
-/** TimeGrid DayButtons.tsx port (weekday + date number button). */
-function timeGridDayButton(day, today) {
-  const d = new Date(day + 'T00:00:00');
-  const b = el('button', 'calendar-grid-heading', {
-    type: 'button',
-    'aria-current': day === today ? 'date' : null,
-    'aria-pressed': day === state.selectedDate ? 'true' : null,
-    'aria-label': fmtDateLong.format(d),
-    title: fmtDateLong.format(d),
-  });
-  b.appendChild(el('span', 'calendar-grid-heading-day', { text: WEEKDAY_LONG[(d.getDay() + 6) % 7] }));
-  b.appendChild(el('span', 'calendar-grid-heading-number', { text: String(d.getDate()) }));
-  b.addEventListener('click', () => {
-    setSelectedDate(day);
-    state.viewYM = day.slice(0, 7);
-    renderAll();
-  });
-  return b;
-}
-
-/** The primary-timezone label (Proton shows the tz name in the aside). */
-function tzShort() {
-  try {
-    return Intl.DateTimeFormat(locale, { timeZoneName: 'short' })
-      .formatToParts(new Date())
-      .find((p) => p.type === 'timeZoneName').value;
-  } catch {
-    return '';
-  }
-}
-
-/** Render day/week/custom views (TimeGrid.tsx structure, verbatim layout). */
-function renderTimeGrid(root, days) {
-  const today = state.today || core.localToday();
-  const events = viewEventsForRange(days[0], days[days.length - 1]);
-  // Proton: time events must be chronologically ordered for the layout.
-  const timeEvents = events
-    .filter((ev) => !ev.isAllDay)
-    .sort((a, b) => (a.start.date + (a.start.time || '')).localeCompare(b.start.date + (b.start.time || '')));
-  const dayEvents = events.filter((ev) => ev.isAllDay);
-
-  const viewClass = days.length > 2 ? 'is-week-view' : 'is-day-view';
-
-  /* ---- heading: day buttons row + all-day row (Proton calendar-row-heading) ---- */
-  const heading = el('div', 'calendar-row-heading ' + viewClass);
-  const firstRow = el('div', 'calendar-first-row-heading');
-  // Wave-7 B3: the leading aside spacer (60px) keeps the day buttons ALIGNED
-  // with the day columns (upstream TimeGrid renders .calendar-aside first).
-  firstRow.appendChild(el('div', 'calendar-aside calendar-first-row-spacer'));
-  for (const day of days) firstRow.appendChild(timeGridDayButton(day, today));
-  heading.appendChild(firstRow);
-
-  const fulldayRow = el('div', 'calendar-fullday-row');
-  const aside = el('div', 'calendar-aside calendar-primary-timezone-cell');
-  aside.appendChild(el('div', 'calendar-primary-timezone-cell--header', { text: tzShort() }));
-  fulldayRow.appendChild(aside);
-  const fdWrap = el('div', 'flex-1 relative');
-  const fdList = el('ul', 'calendar-time-fullday unstyled daygrid-rowevents', {
-    role: 'list', 'data-row': '0', 'data-dnd': 'daygrid',
-  });
-  const eventsInRow = splitDayEventsInInterval(dayEvents, days[0], days[days.length - 1]);
-  const laid = dayGridRowLayout(eventsInRow, 3); // Proton: numberOfRows = 3
-  // Wave-7 B5: upstream actualRows = max(min(maxRows, numberOfRows + 1), 1)
-  // — the all-day row grows with content (up to 4 chip rows) instead of the
-  // fixed 84px, and the "+N more" chip stays INSIDE the heading.
-  const actualRows = Math.max(Math.min(laid.maxRows || 1, 3 + 1), 1);
-  fdList.style.height = actualRows * DAY_EVENT_HEIGHT + 'px';
-  fdList.style.minHeight = DAY_EVENT_HEIGHT + 'px';
-  for (const s of laid.styles) {
-    if (s.type === 'more') {
-      fdList.appendChild(moreChip(s.dayIdx, days, laid.summary, dayEvents, eventsInRow, 3));
-    } else {
-      fdList.appendChild(eventChip(s, eventsInRow[s.idx] ? dayEvents[eventsInRow[s.idx].idx] : null, days));
-    }
-  }
-  fdWrap.appendChild(fdList);
-  fulldayRow.appendChild(fdWrap);
-  heading.appendChild(fulldayRow);
-  root.appendChild(heading);
-
-  /* ---- scrollable time grid ---- */
-  const scroll = el('div', 'calendar-time-grid flex-1 ' + viewClass);
-  const content = el('div', 'relative main-area-content');
-  const flex = el('div', 'timegrid-flex');
-  const hourTexts = el('div', 'calendar-aside calendar-primary-timezone-cell hour-texts');
-  for (let h = 0; h < 24; h++) {
-    const block = el('div', 'calendar-grid-timeBlock');
-    if (h !== 0) {
-      block.appendChild(el('span', 'calendar-grid-timeText', {
-        text: fmtTime.format(new Date(2000, 0, 1, h)),
-      }));
-    }
-    hourTexts.appendChild(block);
-  }
-  const columns = el('div', 'calendar-grid-gridcells timegrid-columns');
-  const hoursEl = el('div', 'calendar-grid-hours', { 'aria-hidden': 'true' }); // B14 (upstream HourLines)
-  for (let h = 0; h < 24; h++) hoursEl.appendChild(el('div', 'calendar-grid-hourLine'));
-  columns.appendChild(hoursEl);
-  const perDay = splitTimeGridEventsPerDay(timeEvents, days);
-  for (const day of days) {
-    const col = el('div', 'calendar-grid-gridcell timegrid-day', {
-      role: 'region',
-      'aria-label': fmtDateLong.format(new Date(day + 'T00:00:00')),
-    });
-    for (const ls of timeGridEventStyles(perDay.get(day) || [])) {
-      col.appendChild(partDayChip(ls, timeEvents[ls.idx]));
-    }
-    if (day === today) {
-      col.appendChild(el('div', 'calendar-grid-nowHourLine', {
-        style: `top:${((nowMinutes() / TOTAL_MINUTES) * 100).toFixed(4)}%;`,
-      }));
-    }
-    columns.appendChild(col);
-  }
-  flex.append(hourTexts, columns);
-  content.appendChild(flex);
-  scroll.appendChild(content);
-  root.appendChild(scroll);
-
-  timeGridModel.days = days;
-  timeGridModel.timeEvents = timeEvents;
-  timeGridModel.perDay = perDay;
-  timeGridModel.gridEl = columns;
-
-  // Proton useLayoutEffect: scrollToNow on MOUNT. Wave-7 B4: only when the
-  // view/range actually CHANGED (user navigation) — a data refresh (autosync
-  // every 60 s) must never yank the scroll position.
-  const sig = state.view + '|' + days[0] + '|' + days[days.length - 1];
-  if (sig !== timeGridModel.renderedSig) {
-    timeGridModel.renderedSig = sig;
-    requestAnimationFrame(() => {
-      const timeTop = nowMinutes() / TOTAL_MINUTES;
-      const timeRect = columns.getBoundingClientRect();
-      const headingRect = heading.getBoundingClientRect();
-      const scrollRect = scroll.getBoundingClientRect();
-      scroll.scrollTop = timeRect.height * timeTop - scrollRect.height / 2 + headingRect.height / 2;
-    });
-  }
-}
-
-/* ---- TimeGrid interactions: timeGridMouseHandler.ts port (GPL-3.0) ---- */
-
-/** dateHelpers.ts getSnappedMinutes (verbatim). */
-function getSnappedMinutes(minutes, interval) {
-  return Math.floor((minutes / 60) * (60 / interval)) * interval;
-}
-
-/** dateHelpers.ts getTargetMinutes (verbatim). */
-function getTargetMinutes(pageY, top, height, totalMinutes, interval) {
-  const targetMinutes = getRelativePosition(pageY, top, height) * totalMinutes;
-  const hourInMinutes = Math.floor(targetMinutes / 60) * 60;
-  const snappedMinutes = getSnappedMinutes(targetMinutes % 60, interval);
-  return hourInMinutes + snappedMinutes;
-}
-
-/** Ghost chip while time-grid dragging (Proton renders a temporary event). */
-let tgGhost = null;
-function drawTimeGridGhost(day, startMin, endMin, title, isCreate) {
-  removeTimeGridGhost();
-  const col = [...timeGridModel.gridEl.querySelectorAll('.timegrid-day')].find(
-    (c) => c.getAttribute('aria-label') === fmtDateLong.format(new Date(day + 'T00:00:00'))
-  );
-  if (!col) return;
-  const g = el('div', 'calendar-eventcell chip-ghost-time' + (isCreate ? ' is-create' : ''), {
-    style:
-      `top:${((startMin / TOTAL_MINUTES) * 100).toFixed(4)}%;` +
-      `height:${((Math.max(MIN_DURATION, endMin - startMin) / TOTAL_MINUTES) * 100).toFixed(4)}%;` +
-      `left:2%;width:96%;`,
-  });
-  g.appendChild(el('div', 'calendar-eventcell-inner', {}));
-  g.appendChild(el('div', 'calendar-eventcell-title', { text: title || '' }));
-  col.appendChild(g);
-  tgGhost = g;
-}
-function removeTimeGridGhost() {
-  if (tgGhost && tgGhost.parentNode) tgGhost.remove();
-  tgGhost = null;
-}
-
-/** timeGridMouseHandler.ts — capture-phase entry (document mousedown). */
-function handleTimeGridMouseDown(e) {
-  if (e.button !== 0) return;
-  const gridEl = timeGridModel.gridEl;
-  if (!gridEl) return;
-  if (!(e.target instanceof HTMLElement)) return;
-  if (!gridEl.contains(e.target)) return;
-  const days = timeGridModel.days;
-  if (!days.length) return;
-
-  // Wave-7 B2: reset the drag marker on EVERY mousedown (the day-grid
-  // handler does the same) — without this, after one drag every later plain
-  // click on a chip was still treated as a drag and never opened the popover.
-  dragState.moved = false;
-
-  const rect = gridEl.getBoundingClientRect();
-  const targetDate = getTargetIndex(e.pageX, rect.left, rect.width, days.length);
-  const targetMinutes = getTargetMinutes(e.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
-
-  const dayContainer = gridEl.children[targetDate + 1]; // +1 for the hour lines
-
-  // If hitting the days container or the day container itself → CREATE.
-  if (gridEl === e.target || dayContainer === e.target) {
-    return createDragCreateTimeGrid({ e, targetDate, targetMinutes, days });
-  }
-
-  const targetIndex = findContainingParent(dayContainer, e.target);
-  if (targetIndex < 0) return;
-
-  const day = days[targetDate];
-  if (!day) return;
-  const eventsInDay = timeGridModel.perDay.get(day) || [];
-  if (targetIndex >= eventsInDay.length) return;
-  const { idx } = eventsInDay[targetIndex];
-  const ev = timeGridModel.timeEvents[idx];
-  if (!ev) return;
-  // Proton getType: normal events only get DRAG_EVENT_MOVE (resize is
-  // booking-only) — verbatim behaviour.
-  createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days });
-}
-
-/** B9: createAutoScroll port (upstream mouseHelpers/domHelpers.ts) — while
- * dragging near the time-grid's top/bottom edge, scroll it so drags can
- * extend beyond the visible area. Returns a stop() handle. */
-function createTimeGridAutoScroll() {
-  const scrollEl = document.querySelector('.calendar-time-grid');
-  if (!scrollEl) return { onMouseMove: () => {}, onMouseUp: () => {} };
-  let stopped = false;
-  const EDGE = 40; // px
-  const onMouseMove = (e) => {
-    if (stopped) return;
-    const r = scrollEl.getBoundingClientRect();
-    if (e.clientY < r.top + EDGE) scrollEl.scrollTop -= 12;
-    else if (e.clientY > r.bottom - EDGE) scrollEl.scrollTop += 12;
-  };
-  const onMouseUp = () => { stopped = true; };
-  return { onMouseMove, onMouseUp };
-}
-
-/** timeGridMouseHandler.ts createDragCreateMouseDown (ported). */
-function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
-  const startDate = days[targetDate];
-  let endTargetMinutes;
-  let oldMouseY = -1; // CREATE_STATE_INIT
-  let result = null;
-  const autoScroll = createTimeGridAutoScroll();
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  const handleMouseMove = (me) => {
-    me.preventDefault();
-    me.stopPropagation();
-    autoScroll.onMouseMove(me);
-    if (oldMouseY === -1) oldMouseY = me.pageY;
-    if (oldMouseY !== -2 && Math.abs(oldMouseY - me.pageY) < CREATE_SENSITIVITY) return;
-    oldMouseY = -2; // CREATE_STATE_ACTIVE
-    dragState.moved = true;
-
-    const rect = timeGridModel.gridEl.getBoundingClientRect();
-    const newEndTargetDate = getTargetIndex(me.pageX, rect.left, rect.width, days.length);
-    const newEndTargetMinutes = getTargetMinutes(me.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
-    if (newEndTargetDate === targetDate && newEndTargetMinutes === endTargetMinutes) return;
-    endTargetMinutes = newEndTargetMinutes;
-    // Proton: only allow d&d on the same day — endTargetDate = targetDate.
-    const isAfter = endTargetMinutes >= targetMinutes;
-    if (isAfter) {
-      const newEnd = Math.min(TOTAL_MINUTES, endTargetMinutes + TIMEGRID_INTERVAL);
-      result = { startMinutes: targetMinutes, endMinutes: newEnd };
-    } else {
-      // Dragged upwards: the end is ABOVE the start — swap (Proton isAfter
-      // logic) and clamp so no value exceeds the day (B1).
-      result = { startMinutes: endTargetMinutes, endMinutes: Math.min(targetMinutes, TOTAL_MINUTES) };
-    }
-    drawTimeGridGhost(startDate, result.startMinutes, result.endMinutes, '', true);
-  };
-
-  const handleMouseUp = () => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    document.removeEventListener('mousemove', handleMouseMove, true);
-    autoScroll.onMouseUp();
-    removeTimeGridGhost();
-    if (result) {
-      beginCreateTimeGrid(startDate, result.startMinutes, result.endMinutes);
-    } else {
-      // Simple click: default 30-minute event at the snapped time. Clamp the
-      // start so the 30-minute window cannot reach 24:00 (B1) — the last
-      // startable minute is 23:30.
-      const startM = Math.min(targetMinutes, TOTAL_MINUTES - 30);
-      const endM = Math.min(TOTAL_MINUTES, startM + 30);
-      beginCreateTimeGrid(startDate, startM, Math.max(endM, startM + MIN_DURATION));
-    }
-  };
-
-  document.addEventListener('mouseup', handleMouseUp, true);
-  document.addEventListener('mousemove', handleMouseMove, true);
-  blockClick();
-}
-
-/** Open the editor for a timed event created on the time grid.
- * Wave-7 B1 (BLOCKER): minutes ≥ 1440 must CARRY into the next day (Proton
- * getNewTime semantics) — writing a '24:00' wall time produced DTEND
- * T240000, which the strict parser rejects → a corrupt row with a false
- * success toast. */
-function beginCreateTimeGrid(day, startMinutes, endMinutes) {
-  closeAllOverlays();
-  const uuid = defaultCalendarUuid();
-  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
-  const p2 = (n) => String(Math.floor(n)).padStart(2, '0');
-  const norm = (mins) => {
-    let d = day;
-    let m = Math.round(mins);
-    while (m >= 1440) { d = shiftDay(d, 1); m -= 1440; } // carry (Proton roll)
-    while (m < 0) { d = shiftDay(d, -1); m += 1440; }
-    return { date: d, time: p2(m / 60) + ':' + p2(m % 60) };
-  };
-  const start = norm(startMinutes);
-  const end = norm(endMinutes);
-  editor.mode = 'create';
-  editor.scope = null;
-  editor.target = null;
-  editor.custom = null;
-  openEditor({
-    title: '',
-    allDay: false,
-    start,
-    end,
-    freq: '',
-    calUuid: uuid,
-    location: '',
-    notifs: [],
-    description: '',
-  });
-}
-
-/** timeGridMouseHandler.ts createDragMoveEvent (ported; MOVE type only). */
-function createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days }) {
-  let oldTargetDate = targetDate;
-  let oldTargetMinutes = targetMinutes;
-  let currentTargetDate;
-  let currentTargetMinutes;
-  let result = null;
-  const autoScroll = createTimeGridAutoScroll();
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  const handleMouseMove = (me) => {
-    autoScroll.onMouseMove(me);
-    const rect = timeGridModel.gridEl.getBoundingClientRect();
-    currentTargetDate = getTargetIndex(me.pageX, rect.left, rect.width, days.length);
-    currentTargetMinutes = getTargetMinutes(me.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
-    if (oldTargetDate === currentTargetDate && oldTargetMinutes === currentTargetMinutes) return;
-    oldTargetDate = currentTargetDate;
-    oldTargetMinutes = currentTargetMinutes;
-    dragState.moved = true;
-
-    const diffDate = currentTargetDate - targetDate;
-    const diffMinutes = currentTargetMinutes - targetMinutes;
-    result = { diffDate, diffMinutes };
-
-    // Ghost at the shifted position (same day column as the pointer).
-    // B6: multi-day timed events render per-day PARTS — the ghost must use
-    // the part's start minutes on the pointer's day (0 for continuation
-    // days), not the event's original start minutes.
-    const day = days[Math.max(0, Math.min(days.length - 1, currentTargetDate))];
-    const partStart = day === ev.start.date ? minutesOf(ev.start) : 0;
-    const startMin = Math.max(0, partStart + diffMinutes);
-    const partEnd = day === ev.spanLast ? Math.min(TOTAL_MINUTES, minutesOf(ev.end) + diffMinutes) : TOTAL_MINUTES;
-    drawTimeGridGhost(day, startMin, Math.max(partEnd, startMin + MIN_DURATION), ev.title || '', false);
-  };
-
-  const handleMouseUp = () => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    document.removeEventListener('mousemove', handleMouseMove, true);
-    autoScroll.onMouseUp();
-    removeTimeGridGhost();
-    timeGridModel.gridEl.querySelectorAll('.isDragging').forEach((n) => n.classList.remove('isDragging'));
-    if (result) {
-      finishTimeGridMove(ev, result.diffDate, result.diffMinutes);
-    }
-    // else: plain click — the chip's own mouseup opens the popover.
-  };
-
-  document.addEventListener('mouseup', handleMouseUp, true);
-  document.addEventListener('mousemove', handleMouseMove, true);
-  blockClick();
-  const chip = e.target.closest('.calendar-eventcell');
-  if (chip) chip.querySelector('.calendar-eventcell-inner')?.classList.add('isDragging');
-}
-
-async function finishTimeGridMove(ev, diffDate, diffMinutes) {
-  if (!diffDate && !diffMinutes) return;
-  const apply = async (scope) => {
-    try {
-      setBusy(true, 'Moving event…');
-      await applyDayShift(ev, diffDate, scope, diffMinutes);
-      toast('Event moved.', 'ok', 2000);
-    } catch (e) {
-      toast('Move failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
-    } finally {
-      setBusy(false);
-    }
-  };
-  if (ev.isRecurring || ev.isException) {
-    openRecurringChoice('Move recurring event', apply);
-  } else {
-    await apply('master');
-  }
-}
-
-/* ---------------- year view (Proton YEAR: 12 month grids) ---------------- */
-
-function renderYear(root) {
-  const year = state.viewYM.slice(0, 4);
-  const today = state.today || core.localToday();
-  const wrap = el('div', 'yeargrid-wrap');
-  const events = viewEventsForRange(year + '-01-01', year + '-12-31');
-  const daysWithEvents = new Map(); // day -> [calUuid…]
-  for (const ev of events) {
-    for (let d = ev.dispFirst; d <= ev.dispLast; d = shiftDay(d, 1)) {
-      if (!daysWithEvents.has(d)) daysWithEvents.set(d, []);
-      daysWithEvents.get(d).push(ev.calUuid);
-    }
-  }
-  for (let m = 1; m <= 12; m++) {
-    const ym = year + '-' + String(m).padStart(2, '0');
-    const box = el('div', 'yeargrid-month');
-    box.appendChild(el('div', 'yeargrid-month-label', { text: MONTHS[m - 1] }));
-    const grid = el('div', 'minicalendar-grid yeargrid-grid');
-    for (let i = 0; i < 7; i++) {
-      grid.appendChild(el('div', 'wd', { text: WEEKDAY_LONG[i].slice(0, 2) }));
-    }
-    const { rows, monthDays } = monthRows(ym);
-    for (const week of rows) {
-      for (const day of week) {
-        const calIds = daysWithEvents.get(day) || [];
-        const b = el('button', 'minicalendar-day' +
-          (monthDays.has(day) ? '' : ' out') +
-          (day === today ? ' today' : '') +
-          (day === state.selectedDate ? ' selected' : ''), {
-          type: 'button',
-          text: String(Number(day.slice(8))),
-          'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
-        });
-        if (calIds.length > 0) {
-          const dot = el('span', 'yearday-dot');
-          dot.style.background = calendarColor(calIds[0]);
-          b.appendChild(dot);
-        }
-        b.addEventListener('click', () => {
-          setSelectedDate(day);
-          state.viewYM = day.slice(0, 7);
-          setView('month');
-        });
-        grid.appendChild(b);
-      }
-    }
-    box.appendChild(grid);
-    wrap.appendChild(box);
-  }
-  root.appendChild(wrap);
-}
-
-/* ---------------- mini calendar ---------------- */
 
 function renderMiniCalendar() {
   const grid = $('#minical-grid');
+  if (!grid) return;
   grid.replaceChildren();
-  const ym = state.viewYM;
+  const ym = currentYM();
   $('#minical-label').textContent = MONTHS[Number(ym.slice(5)) - 1] + ' ' + ym.slice(0, 4);
 
   const { rows, monthDays } = monthRows(ym);
   const today = state.today || core.localToday();
-  for (let i = 0; i < 7; i++) {
-    grid.appendChild(el('div', 'wd', { text: WEEKDAY_LONG[i].slice(0, 2) }));
-  }
+  // Weekday header aligned to the settings' first day.
+  const dowNames = [];
+  for (let i = 0; i < 7; i++) dowNames.push(WEEKDAY_LONG[(i + settings.firstDay) % 7].slice(0, 2));
+  for (const wd of dowNames) grid.appendChild(el('div', 'wd', { text: wd }));
+
+  const selected = fcCal ? localWallOf(fcCal.getDate()).date : today;
   for (const week of rows) {
     for (const day of week) {
       const cls = [
         'minicalendar-day',
         monthDays.has(day) ? '' : 'out',
         day === today ? 'today' : '',
-        day === state.selectedDate ? 'selected' : '',
+        day === selected ? 'selected' : '',
       ].filter(Boolean).join(' ');
       const b = el('button', cls, {
         type: 'button', text: String(Number(day.slice(8))),
         'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
       });
       b.addEventListener('click', () => {
-        setSelectedDate(day);
-        state.viewYM = day.slice(0, 7);
-        renderAll();
+        if (fcCal) fcCal.gotoDate(day);
+        renderMiniCalendar();
       });
       grid.appendChild(b);
     }
@@ -1929,6 +1306,7 @@ function calendarColor(uuid) {
 
 function renderCalendarList() {
   const ul = $('#calendar-list');
+  if (!ul) return;
   ul.replaceChildren();
   $('#no-calendars').hidden = state.cals.size > 0;
   let openMenu = null;
@@ -1985,6 +1363,7 @@ function renderCalendarList() {
 
 function renderClockPreview() {
   const panel = $('#clock-list');
+  if (!panel) return;
   panel.replaceChildren();
   const today = state.today || core.localToday();
   // v4.3: derived in-memory from evt rows (protocol.md §13c) — ZERO requests,
@@ -2011,7 +1390,7 @@ function renderClockPreview() {
   }
 }
 
-/* ---------------- event popover (read-only, Proton EventPopover port) ---------------- */
+/* ---------------- event popover (read-only) ---------------- */
 
 function popoverSurface() { return $('#event-popover'); }
 
@@ -2115,52 +1494,6 @@ function notificationLabel(minutes) {
   return (minutes / 1440) + ' day' + (minutes >= 2880 ? 's' : '') + ' before';
 }
 
-/* ---------------- "+N more" / day popover ---------------- */
-
-function openMorePopover(day, anchor) {
-  closeAllOverlays();
-  const events = viewEventsForRange(day, day).filter((ev) => ev.dispFirst <= day && day <= ev.dispLast);
-  const box = el('div');
-  box.appendChild(el('h1', 'eventpopover-title', {
-    text: events.length + ' event' + (events.length === 1 ? '' : 's') + ' · ' +
-      fmtDateMed.format(new Date(day + 'T00:00:00')),
-  }));
-  const list = el('div');
-  if (events.length === 0) {
-    list.appendChild(el('p', 'hint', { text: 'No events this day.' }));
-  } else {
-    for (const ev of events) {
-      const row = el('div', 'popover-iconrow');
-      const [main, alt] = genAccentShades(calendarColor(ev.calUuid));
-      const dot = el('span', 'calendar-dayeventcell-circle');
-      dot.style.background = main;
-      const chip = el('button', 'calendar-dayeventcell-inner' +
-        (ev.isAllDay || ev.isAllPartDay ? '' : ' isNotAllDay'));
-      chip.style.setProperty('--color-main', main);
-      chip.style.setProperty('--color-alt', alt);
-      chip.style.position = 'relative';
-      chip.style.top = '0';
-      chip.style.left = '0';
-      chip.style.width = '100%';
-      chip.style.height = DAY_EVENT_HEIGHT + 'px';
-      const line = el('div', 'flex-line');
-      if (!ev.isAllDay && !ev.isAllPartDay) {
-        line.appendChild(dot);
-        const t = showTime(ev.start);
-        if (t) line.appendChild(el('span', 'calendar-dayeventcell-time', { text: t }));
-      }
-      line.appendChild(el('span', 'calendar-dayeventcell-title chip-text', { text: ev.title || '' }));
-      chip.appendChild(line);
-      chip.addEventListener('click', () => { closePopover(); openEventPopover(ev, chip.getBoundingClientRect()); });
-      row.appendChild(chip);
-      list.appendChild(row);
-    }
-  }
-  box.appendChild(list);
-  const pop = openPopover(box);
-  positionPopover(pop, anchor);
-}
-
 /* ---------------- modal helpers ---------------- */
 
 function openModalSurface(modal, backdrop, close) {
@@ -2175,7 +1508,7 @@ function closeModalSurface(modal, backdrop) {
   popOverlay(modal);
 }
 
-/* ---------------- event editor (Proton EventForm port, modal) ---------------- */
+/* ---------------- event editor (modal) ---------------- */
 
 const editor = {
   mode: null,      // 'create' | 'edit'
@@ -2220,6 +1553,64 @@ function beginCreate(dateStr) {
       : { date: day, time: '01:00' },
     freq: '',
     calUuid: defaultCalendarUuid(),
+    location: '',
+    notifs: [],
+    description: '',
+  });
+}
+
+/** Open the editor for a timed event created on the time grid.
+ * Wave-7 B1 (BLOCKER): minutes ≥ 1440 must CARRY into the next day (Proton
+ * getNewTime semantics) — writing a '24:00' wall time produced DTEND
+ * T240000, which the strict parser rejects → a corrupt row with a false
+ * success toast. */
+function beginCreateTimeGrid(day, startMinutes, endMinutes) {
+  closeAllOverlays();
+  const uuid = defaultCalendarUuid();
+  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
+  const p2 = (n) => String(Math.floor(n)).padStart(2, '0');
+  const norm = (mins) => {
+    let d = day;
+    let m = Math.round(mins);
+    while (m >= 1440) { d = shiftDay(d, 1); m -= 1440; } // carry (Proton roll)
+    while (m < 0) { d = shiftDay(d, -1); m += 1440; }
+    return { date: d, time: p2(m / 60) + ':' + p2(m % 60) };
+  };
+  const start = norm(startMinutes);
+  const end = norm(endMinutes);
+  editor.mode = 'create';
+  editor.scope = null;
+  editor.target = null;
+  editor.custom = null;
+  openEditor({
+    title: '',
+    allDay: false,
+    start,
+    end,
+    freq: '',
+    calUuid: uuid,
+    location: '',
+    notifs: [],
+    description: '',
+  });
+}
+
+/** Multi-day all-day create (month-grid drag). */
+function beginCreateRange(startDay, endDay) {
+  closeAllOverlays();
+  const uuid = defaultCalendarUuid();
+  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
+  editor.mode = 'create';
+  editor.scope = null;
+  editor.target = null;
+  editor.custom = null;
+  openEditor({
+    title: '',
+    allDay: true,
+    start: { date: startDay, time: '00:00' },
+    end: { date: endDay, time: '00:00' }, // display-inclusive; save converts to DTEND
+    freq: '',
+    calUuid: uuid,
     location: '',
     notifs: [],
     description: '',
@@ -2844,7 +2235,7 @@ async function deleteEvent(ev, scope) {
   toast('Event deleted.', 'ok', 2000);
 }
 
-/* ---- drag & drop save ---- */
+/* ---- drag & drop / resize mutations ---- */
 
 /**
  * Shift an event by whole days AND minutes (wall-clock arithmetic; a time
@@ -2924,6 +2315,170 @@ async function applyDayShift(ev, days, scope, minutes = 0) {
   renderAll();
 }
 
+/**
+ * RESIZE (FullCalendar eventResize): shift ONLY the end boundary by whole
+ * days + minutes (dtstart untouched). scope 'exception' resizes the
+ * exception component (creating it when the user resizes a plain occurrence
+ * of a recurring series — same semantics as applyDayShift). DURATION-only
+ * components are materialised to a DTEND (effectiveEnd + delta) so the new
+ * boundary is explicit. Rejects non-positive results (the caller reverts).
+ */
+async function applyDurationChange(ev, days, minutes, scope) {
+  const shiftDt = (dt, d, m) => {
+    if (!dt) return dt;
+    const shiftedDate = shiftDay(dt.date, d);
+    if (dt.time === null || m === 0) {
+      return { date: shiftedDate, time: dt.time, tz: dt.tz };
+    }
+    const secs = +dt.time.slice(0, 2) * 3600 + +dt.time.slice(3, 5) * 60 + +dt.time.slice(6, 8) + m * 60;
+    const dayCarry = Math.floor(secs / 86400);
+    const rem = ((secs % 86400) + 86400) % 86400;
+    const p = (n, w) => String(n).padStart(w || 2, '0');
+    return {
+      date: shiftDay(shiftedDate, dayCarry),
+      time: `${p(Math.floor(rem / 3600))}:${p(Math.floor((rem % 3600) / 60))}:${p(rem % 60)}`,
+      tz: dt.tz,
+    };
+  };
+  const target = ev;
+  const localRow = state.evt.get(target.rowId) || null;
+  const res = await putRowRMW(target.rowId, (payload) => {
+    let p;
+    try { p = core.parseEvtPayload(payload); } catch { p = null; }
+    if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
+    const events = p.calendar.events;
+    const isException = scope === 'exception';
+    const idx = isException
+      ? events.findIndex((e) => e.recurrenceId && e.recurrenceId.date === target.recId.date &&
+          (e.recurrenceId.time || '') === (target.recId.time || ''))
+      : events.findIndex((e) => e.recurrenceId === null);
+    const old = idx >= 0
+      ? events[idx]
+      : {
+          uid: p.uid,
+          dtstamp: null,
+          dtstart: target.component.dtstart,
+          dtend: target.component.dtend,
+          duration: null,
+          recurrenceId: target.recId
+            ? { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz }
+            : null,
+          rrule: null,
+          exdates: [],
+          rdates: [],
+          summary: target.component.summary || '',
+          description: target.component.description || null,
+          location: target.component.location || null,
+          status: target.component.status || null,
+          transp: target.component.transp || null,
+          sequence: null,
+          alarms: target.component.alarms || [],
+          extra: [],
+        };
+    // Materialise the current effective end (DURATION / DTEND / defaults).
+    const curEnd = core.effectiveEnd(old);
+    const newEnd = shiftDt(curEnd, days, minutes);
+    // Reject a zero/negative-duration result (all-day shrunk below 1 day,
+    // timed below zero): the caller reverts the chip.
+    const badTimed = old.dtstart.time !== null &&
+      (newEnd.date < old.dtstart.date ||
+        (newEnd.date === old.dtstart.date && (newEnd.time || '00:00:00') <= (old.dtstart.time || '00:00:00')));
+    const badAllDay = old.dtstart.time === null && newEnd.date <= old.dtstart.date;
+    if (badTimed || badAllDay) throw new Error('invalid_duration: the event would end before it starts');
+    const upd = {
+      ...old,
+      dtstamp: { date: new Date().toISOString().slice(0, 10), time: new Date().toISOString().slice(11, 19), tz: 'UTC' },
+      dtend: newEnd,
+      duration: null, // explicit DTEND now
+      sequence: (old.sequence === null || old.sequence === undefined ? 0 : old.sequence) + 1,
+    };
+    if (isException && target.recId) {
+      upd.recurrenceId = { date: target.recId.date, time: target.recId.time, tz: old.dtstart.tz };
+    }
+    if (idx >= 0) events[idx] = upd;
+    else events.push(upd);
+    return serializeVCalendar(p.calendar);
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
+  applyRowLocally(target.rowId, res.ver, res.text);
+  renderAll();
+}
+
+/**
+ * Cross-slot drop conversion (timed ↔ all-day). The span is preserved:
+ * a timed event keeps its whole-day length as all-day days (rounded up,
+ * minimum 1) and vice versa. scope semantics identical to applyDayShift.
+ */
+async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
+  const target = ev;
+  const localRow = state.evt.get(target.rowId) || null;
+  const res = await putRowRMW(target.rowId, (payload) => {
+    let p;
+    try { p = core.parseEvtPayload(payload); } catch { p = null; }
+    if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
+    const events = p.calendar.events;
+    const isException = scope === 'exception';
+    const idx = isException
+      ? events.findIndex((e) => e.recurrenceId && e.recurrenceId.date === target.recId.date &&
+          (e.recurrenceId.time || '') === (target.recId.time || ''))
+      : events.findIndex((e) => e.recurrenceId === null);
+    const old = idx >= 0
+      ? events[idx]
+      : {
+          uid: p.uid,
+          dtstamp: null,
+          dtstart: target.component.dtstart,
+          dtend: target.component.dtend,
+          duration: null,
+          recurrenceId: target.recId
+            ? { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz }
+            : null,
+          rrule: null,
+          exdates: [],
+          rdates: [],
+          summary: target.component.summary || '',
+          description: target.component.description || null,
+          location: target.component.location || null,
+          status: target.component.status || null,
+          transp: target.component.transp || null,
+          sequence: null,
+          alarms: target.component.alarms || [],
+          extra: [],
+        };
+    const curEnd = core.effectiveEnd(old);
+    let newStart;
+    let newEnd;
+    if (toAllDay) {
+      // timed → all-day: drop day at 00:00, span = whole days of the old
+      // duration (rounded UP, minimum 1; DTEND stays exclusive).
+      const spanDays = Math.max(1, Math.ceil(wallHours(old.dtstart, curEnd) / 24));
+      newStart = { date: day, time: null, tz: null };
+      newEnd = { date: shiftDay(day, spanDays), time: null, tz: null };
+    } else {
+      // all-day → timed: drop slot wall time; end = start + old span days.
+      const spanDays = Math.max(1, diffDays(curEnd.date, old.dtstart.date));
+      newStart = { date: day, time: (time || '09:00:00').slice(0, 8), tz: old.dtstart.tz };
+      newEnd = { date: shiftDay(day, spanDays), time: (time || '09:00:00').slice(0, 8), tz: old.dtstart.tz };
+    }
+    const upd = {
+      ...old,
+      dtstamp: { date: new Date().toISOString().slice(0, 10), time: new Date().toISOString().slice(11, 19), tz: 'UTC' },
+      dtstart: newStart,
+      dtend: newEnd,
+      duration: null,
+      transp: toAllDay ? 'TRANSPARENT' : null,
+      sequence: (old.sequence === null || old.sequence === undefined ? 0 : old.sequence) + 1,
+    };
+    if (isException && target.recId) {
+      upd.recurrenceId = { date: target.recId.date, time: target.recId.time, tz: old.dtstart.tz };
+    }
+    if (idx >= 0) events[idx] = upd;
+    else events.push(upd);
+    return serializeVCalendar(p.calendar);
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
+  applyRowLocally(target.rowId, res.ver, res.text);
+  renderAll();
+}
+
 /* ---------------- recurring choice modal ---------------- */
 
 function openRecurringChoice(title, choose) {
@@ -2938,7 +2493,7 @@ function openRecurringChoice(title, choose) {
   const bOne = el('button', 'button button-outline', { type: 'button', text: 'This event' });
   bOne.addEventListener('click', () => { close(); choose('exception'); });
   const bCancel = el('button', 'button button-ghost', { type: 'button', text: 'Cancel' });
-  bCancel.addEventListener('click', close);
+  bCancel.addEventListener('click', () => { close(); choose('cancel'); });
   btns.append(bAll, bOne, bCancel);
   box.appendChild(btns);
   modal.replaceChildren(box);
@@ -3234,8 +2789,7 @@ function confirmDeleteCalendar(uuid) {
   del.focus();
 }
 
-/* ---------------- frequency display string (compact port of
- * getFrequencyString.ts — English only, same semantic cases) ---------------- */
+/* ---------------- frequency display string ---------------- */
 
 function frequencyString(ev) {
   const master = ev.parsed ? ev.parsed.master : null;
@@ -3269,335 +2823,183 @@ function frequencyString(ev) {
   return base;
 }
 
-/* ---------------- DnD: dayGridMouseHandler port (VERBATIM logic) ----------------
- * interactions/dayGridMouseHandler.ts + mouseHelpers (GPL-3.0). */
+/* ---------------- settings modal (theme & customisation live here) ---------------- */
 
-const dragState = { moved: false };
+function openSettingsModal() {
+  const modal = $('#settings-modal');
+  const backdrop = $('#settings-backdrop');
+  const close = () => closeModalSurface(modal, backdrop);
+  const box = el('div', 'eventform settings-form');
 
-/** mouseHelpers/mathHelpers.ts getTargetIndex (verbatim). */
-function getRelativePosition(pagePosition, elementPosition, elementSize) {
-  return Math.min(Math.max(0, pagePosition - elementPosition), elementSize) / elementSize;
-}
-function getTargetIndex(pagePosition, elementPosition, elementSize, total) {
-  return Math.min(Math.floor(getRelativePosition(pagePosition, elementPosition, elementSize) * total), total - 1);
-}
+  const head = el('div', 'modal-head');
+  head.appendChild(el('h1', { text: 'Settings' }));
+  const closeX = el('button', 'button button-ghost icon-only', { type: 'button', 'aria-label': 'Close', title: 'Close' });
+  closeX.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8" stroke-linecap="round"/></svg>';
+  closeX.addEventListener('click', close);
+  head.appendChild(closeX);
+  box.appendChild(head);
 
-/** mouseHelpers/domHelpers.ts findUpwards (verbatim). */
-function findUpwards(target, outOfBoundsElement, cb) {
-  let current = target;
-  do {
-    if (!current) return null;
-    if (cb(current)) return current;
-    if (current === outOfBoundsElement) return null;
-    current = current.parentElement;
-  } while (true);
-}
+  const change = (fn) => {
+    fn();
+    saveSettings();
+    applySettings();
+    renderMiniCalendar();
+  };
 
-/** mouseHelpers/domHelpers.ts findContainingParent (verbatim). */
-function findContainingParent(container, target) {
-  for (let i = 0; i < container.childNodes.length; ++i) {
-    if (container.childNodes[i].contains(target)) return i;
+  /* ---- theme ---- */
+  const themeRow = el('div', 'form-row');
+  themeRow.appendChild(el('span', 'ic'));
+  themeRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z" stroke-linejoin="round"/></svg>';
+  const tb = el('div', 'form-row-body');
+  tb.appendChild(el('label', { text: 'Theme' }));
+  const themeSeg = el('div', 'settings-segment', { role: 'group', 'aria-label': 'Theme' });
+  for (const t of ['light', 'dark', 'system']) {
+    const b = el('button', 'settings-segment-button' + (settings.theme === t ? ' is-selected' : ''), {
+      type: 'button', text: t.charAt(0).toUpperCase() + t.slice(1), 'aria-pressed': settings.theme === t ? 'true' : 'false',
+    });
+    b.addEventListener('click', () => {
+      change(() => { settings.theme = t; });
+      themeSeg.querySelectorAll('.settings-segment-button').forEach((x) => {
+        const on = x.textContent.toLowerCase() === t;
+        x.classList.toggle('is-selected', on);
+        x.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+    });
+    themeSeg.appendChild(b);
   }
-  return -1;
-}
+  tb.appendChild(themeSeg);
+  themeRow.appendChild(tb);
+  box.appendChild(themeRow);
 
-/** mouseHelpers/domHelpers.ts blockClick (verbatim). */
-function blockClick() {
-  let cancel;
-  const block = (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    cancel();
-  };
-  let done = false;
-  const handleMouseUp = () => {
-    if (done) return;
-    done = true;
-    setTimeout(() => cancel(), 1);
-  };
-  document.addEventListener('mouseup', handleMouseUp, true);
-  document.addEventListener('click', block, true);
-  cancel = () => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    document.removeEventListener('click', block, true);
-  };
-  return cancel;
-}
-
-/** Proton layout data for the mouse handler (recomputed per mousedown).
- * v4.3: serves BOTH the month grid (multi-row) and the TimeGrid all-day
- * row (single-row) — Proton wires the same handler into both surfaces. */
-function currentGridModel(dayGridEl) {
-  let rows;
-  let numberOfRows;
-  if (dayGridEl.classList.contains('calendar-time-fullday')) {
-    rows = [timeGridModel.days];
-    numberOfRows = 3; // Proton TimeGrid all-day numberOfRows
-  } else {
-    rows = monthRows(state.viewYM).rows;
-    numberOfRows = Math.max(state.gridRows, 0);
+  /* ---- accent colour ---- */
+  const accentRow = el('div', 'form-row');
+  accentRow.appendChild(el('span', 'ic'));
+  accentRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" stroke-linecap="round"/></svg>';
+  const ab = el('div', 'form-row-body');
+  ab.appendChild(el('label', { text: 'Accent colour' }));
+  const agrid = el('div', 'palette-grid');
+  for (const c of ['#6d4aff', '#ec3e7c', '#f78400', '#1da583', '#179fd9', '#db60d6']) {
+    const sw = el('button', 'palette-swatch' + (settings.accent === c ? ' selected' : ''), {
+      type: 'button', 'aria-label': c, title: c,
+    });
+    sw.style.background = c;
+    sw.addEventListener('click', () => {
+      change(() => { settings.accent = c; });
+      agrid.querySelectorAll('.palette-swatch').forEach((x) => x.classList.toggle('selected', x.getAttribute('aria-label') === c));
+    });
+    agrid.appendChild(sw);
   }
-  const events = viewEventsForRange(rows[0][0], rows[rows.length - 1][rows[rows.length - 1].length - 1]);
-  const perRow = rows.map((days) => {
-    const last = days[days.length - 1];
-    const rowEvents = events.filter((ev) => !(ev.dispFirst > last || ev.dispLast < days[0]));
-    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], last);
-    const laid = dayGridRowLayout(eventsInRow, numberOfRows);
-    return { days, rowEvents, eventsInRow, eventsInRowStyles: laid.styles, eventsInRowSummary: laid.summary };
+  ab.appendChild(agrid);
+  accentRow.appendChild(ab);
+  box.appendChild(accentRow);
+
+  /* ---- first day of week ---- */
+  const fdRow = el('div', 'form-row');
+  fdRow.appendChild(el('span', 'ic'));
+  fdRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/><path d="M5 2v2M11 2v2M2.5 7h11" stroke-linecap="round"/></svg>';
+  const fdb = el('div', 'form-row-body');
+  fdb.appendChild(el('label', { text: 'First day of week', for: 'set-firstday' }));
+  const fdSel = el('select', null, { id: 'set-firstday', 'aria-label': 'First day of week' });
+  for (const [v, label] of [[0, 'Sunday'], [1, 'Monday'], [6, 'Saturday']]) {
+    fdSel.appendChild(el('option', null, { value: String(v), text: label }));
+  }
+  fdSel.value = String(settings.firstDay);
+  fdSel.addEventListener('change', () => change(() => { settings.firstDay = Number(fdSel.value); }));
+  fdb.appendChild(fdSel);
+  fdRow.appendChild(fdb);
+  box.appendChild(fdRow);
+
+  /* ---- time format ---- */
+  const tfRow = el('div', 'form-row');
+  tfRow.appendChild(el('span', 'ic'));
+  tfRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 2" stroke-linecap="round"/></svg>';
+  const tfb = el('div', 'form-row-body');
+  tfb.appendChild(el('label', { text: 'Time format', for: 'set-hour12' }));
+  const tfSel = el('select', null, { id: 'set-hour12', 'aria-label': 'Time format' });
+  tfSel.append(
+    el('option', null, { value: '', text: 'Locale default' }),
+    el('option', null, { value: '24', text: '24-hour' }),
+    el('option', null, { value: '12', text: '12-hour (AM/PM)' }),
+  );
+  tfSel.value = settings.hour12 === null ? '' : (settings.hour12 ? '12' : '24');
+  tfSel.addEventListener('change', () => {
+    const v = tfSel.value;
+    change(() => { settings.hour12 = v === '' ? null : v === '12'; });
   });
-  return { rows, events, perRow };
-}
+  tfb.appendChild(tfSel);
+  tfRow.appendChild(tfb);
+  box.appendChild(tfRow);
 
-/** dayGridMouseHandler.ts handleDayGridMouseDown (ported). */
-function handleDayGridMouseDown(e) {
-  if (e.button !== 0) return;
-  if (!(e.target instanceof HTMLElement)) return;
-  const dayGridEl = e.target.closest('[data-dnd="daygrid"]');
-  if (!dayGridEl) return;
-  if (!dayGridEl.contains(e.target)) return;
-
-  const model = currentGridModel(dayGridEl);
-  const rowElement = findUpwards(e.target, dayGridEl, (el) => typeof el.dataset.row !== 'undefined');
-  if (!rowElement) return;
-
-  const targetRow = parseInt(rowElement.dataset.row || '', 10);
-  if (Number.isNaN(targetRow)) return;
-  const days = model.rows[targetRow];
-  if (!days) return;
-
-  const rect = dayGridEl.getBoundingClientRect();
-  const targetDay = getTargetIndex(e.pageX, rect.left, rect.width, days.length);
-  const targetDate = days[targetDay];
-
-  dragState.moved = false;
-
-  // Clicking the week container (or a marked element) starts event creation.
-  if ((targetRow >= 0 && e.target === rowElement) || e.target.dataset.ignoreCreate) {
-    return createDragCreateEvent({ e, targetRow, targetDate, rows: model.rows, model, dayGridEl });
+  /* ---- slot duration ---- */
+  const sdRow = el('div', 'form-row');
+  sdRow.appendChild(el('span', 'ic'));
+  sdRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4.5h10M3 8h10M3 11.5h5" stroke-linecap="round"/></svg>';
+  const sdb = el('div', 'form-row-body');
+  sdb.appendChild(el('label', { text: 'Time-grid slot', for: 'set-slot' }));
+  const sdSel = el('select', null, { id: 'set-slot', 'aria-label': 'Time-grid slot' });
+  for (const [v, label] of [['00:15:00', '15 minutes'], ['00:30:00', '30 minutes'], ['01:00:00', '1 hour']]) {
+    sdSel.appendChild(el('option', null, { value: v, text: label }));
   }
+  sdSel.value = settings.slotDuration;
+  sdSel.addEventListener('change', () => change(() => { settings.slotDuration = sdSel.value; }));
+  sdb.appendChild(sdSel);
+  sdRow.appendChild(sdb);
+  box.appendChild(sdRow);
 
-  const targetIndex = findContainingParent(rowElement, e.target);
-  const { eventsInRowStyles, eventsInRow, eventsInRowSummary, rowEvents } = model.perRow[targetRow] || {};
-  if (!Array.isArray(eventsInRowStyles) || targetIndex >= eventsInRowStyles.length) return;
-  const eventStyle = eventsInRowStyles[targetIndex];
-  if (!eventStyle) return;
+  /* ---- custom view days ---- */
+  const cdRow = el('div', 'form-row');
+  cdRow.appendChild(el('span', 'ic'));
+  cdRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="3.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="3.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>';
+  const cdb = el('div', 'form-row-body');
+  cdb.appendChild(el('label', { text: 'Custom view — days', for: 'set-customdays' }));
+  const cdSel = el('select', null, { id: 'set-customdays', 'aria-label': 'Custom view days' });
+  for (let n = 2; n <= 14; n++) cdSel.appendChild(el('option', null, { value: String(n), text: n + ' days' }));
+  cdSel.value = String(settings.customDays);
+  cdSel.addEventListener('change', () => change(() => { settings.customDays = Math.max(2, Math.min(14, Number(cdSel.value) || 5)); }));
+  cdb.appendChild(cdSel);
+  cdRow.appendChild(cdb);
+  box.appendChild(cdRow);
 
-  if (eventStyle.type === 'more') {
-    return createUpMoreEvent(() => openMorePopover(days[eventStyle.idx], rowElement.getBoundingClientRect()));
-  }
+  /* ---- week numbers + density (inline toggles) ---- */
+  const togRow = el('div', 'form-row');
+  togRow.appendChild(el('span', 'ic'));
+  togRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 8l3 3 7-7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const tgb = el('div', 'form-row-body');
+  const wnChk = el('input', null, { type: 'checkbox', id: 'set-weeknumbers' });
+  wnChk.checked = !!settings.weekNumbers;
+  const wnLbl = el('label', { style: 'display:flex;align-items:center;gap:6px;margin-bottom:8px;' });
+  wnLbl.append(wnChk, document.createTextNode('Show week numbers'));
+  wnChk.addEventListener('change', () => change(() => { settings.weekNumbers = wnChk.checked; }));
+  tgb.appendChild(wnLbl);
 
-  // eventsInRow[...].idx indexes the row's FILTERED event list (rowEvents).
-  const eventIdx = eventsInRow[eventStyle.idx].idx;
-  const ev = rowEvents[eventIdx];
-  return createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow: days.length, model, dayGridEl });
-}
+  tgb.appendChild(el('label', { text: 'Density', for: 'set-density' }));
+  const dnSel = el('select', null, { id: 'set-density', 'aria-label': 'Density' });
+  dnSel.append(
+    el('option', null, { value: 'comfortable', text: 'Comfortable' }),
+    el('option', null, { value: 'compact', text: 'Compact' }),
+  );
+  dnSel.value = settings.density;
+  dnSel.addEventListener('change', () => change(() => { settings.density = dnSel.value; }));
+  tgb.appendChild(dnSel);
+  togRow.appendChild(tgb);
+  box.appendChild(togRow);
 
-/** dayGridMouseHandler.ts createDragCreateEvent (ported). */
-function createDragCreateEvent({ e, targetRow, targetDate: startTargetDate, rows, model, dayGridEl }) {
-  let endTargetDate = null;
-  let oldMouseX = -1;
-  const CREATE_STATE_ACTIVE = -2;
-  let result = null;
-  let currentTargetRow = targetRow;
-  let ghost = null;
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  const handleMouseMove = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    if (oldMouseX === -1) oldMouseX = ev.pageX;
-    if (oldMouseX !== CREATE_STATE_ACTIVE && Math.abs(oldMouseX - ev.pageX) < CREATE_SENSITIVITY) return;
-    oldMouseX = CREATE_STATE_ACTIVE;
-    dragState.moved = true;
-
-    const rect = dayGridEl.getBoundingClientRect();
-    currentTargetRow = getTargetIndex(ev.pageY, rect.top, rect.height, model.perRow.length);
-    const days = rows[currentTargetRow];
-    if (!days) return;
-    const targetDay = getTargetIndex(ev.pageX, rect.left, rect.width, days.length);
-    const newEndTargetDate = days[targetDay];
-    if (newEndTargetDate === endTargetDate) return;
-    endTargetDate = newEndTargetDate;
-    const isAfter = endTargetDate >= startTargetDate;
-    result = isAfter
-      ? { start: startTargetDate, end: endTargetDate }
-      : { start: endTargetDate, end: startTargetDate };
-    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow, result.start, result.end);
-  };
-
-  const handleMouseUp = () => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    document.removeEventListener('mousemove', handleMouseMove, true);
-    removeGhost(ghost);
-    // NOTE: NO setHighlight here — the create-drag never sets a row
-    // highlight (that belongs to createDragMoveEvent). The stray call in
-    // v4.2 threw `setHighlight is not defined` on EVERY month-grid
-    // click/drag-create, silently killing event creation (wave-6 fix).
-    if (result) {
-      beginCreateRange(result.start, result.end);
-    } else {
-      beginCreate(startTargetDate);
-    }
-  };
-
-  document.addEventListener('mouseup', handleMouseUp, true);
-  document.addEventListener('mousemove', handleMouseMove, true);
-  blockClick();
-}
-
-/** Multi-day all-day create (Proton CREATE_MOVE_UP). */
-function beginCreateRange(startDay, endDay) {
-  closeAllOverlays();
-  const uuid = defaultCalendarUuid();
-  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
-  editor.mode = 'create';
-  editor.scope = null;
-  editor.target = null;
-  editor.custom = null;
-  openEditor({
-    title: '',
-    allDay: true,
-    start: { date: startDay, time: '00:00' },
-    end: { date: endDay, time: '00:00' }, // display-inclusive; save converts to DTEND
-    freq: '',
-    calUuid: uuid,
-    location: '',
-    notifs: [],
-    description: '',
+  const footer = el('div', 'modal-footer');
+  const done = el('button', 'button button-primary', { type: 'button', text: 'Done' });
+  done.addEventListener('click', close);
+  const reset = el('button', 'button button-ghost left', { type: 'button', text: 'Reset to defaults' });
+  reset.addEventListener('click', () => {
+    settings = { ...SETTINGS_DEFAULTS };
+    saveSettings();
+    applySettings();
+    close();
+    toast('Settings reset to defaults.', 'ok', 2000);
   });
-}
+  footer.append(reset, done);
+  box.appendChild(footer);
 
-/** dayGridMouseHandler.ts createDragMoveEvent (ported). */
-function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, dayGridEl }) {
-  let oldIdx = targetRow * daysPerRow + targetDay;
-  const initialIdx = oldIdx;
-  let result = null;
-  let currentTargetRow = targetRow;
-  let ghost = null;
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  // NOTE: the mouse event parameter is `me` — the outer `ev` is the VIEW
-  // EVENT being dragged (Proton keeps them distinct too; shadowing here
-  // previously threw inside this handler and silently killed every drag).
-  let hl = null; // drop-target row highlight
-  const dndRowEls = () =>
-    dayGridEl.classList.contains('daygrid-rowevents')
-      ? [dayGridEl] // TimeGrid all-day row: the container IS the row element
-      : [...dayGridEl.querySelectorAll('.daygrid-rowevents')];
-  const setHighlight = (rowIdx) => {
-    if (hl) hl.classList.remove('is-drop-target');
-    const rows = dndRowEls();
-    hl = rowIdx >= 0 && rows[rowIdx] ? rows[rowIdx] : null;
-    if (hl) hl.classList.add('is-drop-target');
-  };
-
-  const handleMouseMove = (me) => {
-    me.preventDefault();
-    me.stopPropagation();
-    const rect = dayGridEl.getBoundingClientRect();
-    currentTargetRow = getTargetIndex(me.pageY, rect.top, rect.height, model.perRow.length);
-    const currentTargetDay = getTargetIndex(me.pageX, rect.left, rect.width, daysPerRow);
-    setHighlight(currentTargetRow);
-    const currentIdx = currentTargetRow * daysPerRow + currentTargetDay;
-    if (currentIdx === oldIdx) return;
-    oldIdx = currentIdx;
-    dragState.moved = true;
-
-    const differenceInDays = currentIdx - initialIdx;
-    result = {
-      days: differenceInDays,
-      start: shiftDay(ev.start.date, differenceInDays),
-      end: shiftDay(ev.spanLast, differenceInDays),
-      row: currentTargetRow,
-    };
-    ghost = drawGhost(ghost, dayGridEl, model, currentTargetRow, result.start, result.end, ev);
-  };
-
-  const handleMouseUp = () => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    document.removeEventListener('mousemove', handleMouseMove, true);
-    removeGhost(ghost);
-    setHighlight(-1);
-    // Restore the source chip opacity.
-    dayGridEl.querySelectorAll('.isDragging').forEach((n) => n.classList.remove('isDragging'));
-
-    if (result) {
-      finishDragMove(ev, result.days);
-    } else {
-      // Plain mouseup handled by the chip's own listener (popover).
-    }
-  };
-
-  document.addEventListener('mouseup', handleMouseUp, true);
-  document.addEventListener('mousemove', handleMouseMove, true);
-  blockClick();
-  // Mark the dragged chip (Proton isDragging).
-  const chip = e.target.closest('.calendar-dayeventcell');
-  if (chip) chip.querySelector('.calendar-dayeventcell-inner')?.classList.add('isDragging');
-}
-
-async function finishDragMove(ev, days) {
-  if (!days) return;
-  const apply = async (scope) => {
-    try {
-      setBusy(true, 'Moving event…');
-      await applyDayShift(ev, days, scope);
-      toast('Event moved.', 'ok', 2000);
-    } catch (e) {
-      toast('Move failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
-    } finally {
-      setBusy(false);
-    }
-  };
-  if (ev.isRecurring || ev.isException) {
-    openRecurringChoice('Move recurring event', apply);
-  } else {
-    await apply('master');
-  }
-}
-
-/** Ghost chip while dragging (Proton renders the moved event live). */
-function drawGhost(ghost, dayGridEl, model, targetRow, startDay, endDay, ev) {
-  removeGhost(ghost);
-  const rowsEls = dayGridEl.classList.contains('daygrid-rowevents')
-    ? [dayGridEl] // TimeGrid all-day row: the container IS the row element
-    : dayGridEl.querySelectorAll('.daygrid-rowevents');
-  const target = rowsEls[targetRow];
-  if (!target) return null;
-  const days = model.rows[targetRow];
-  // `diffDays` here is the MODULE function (the drag delta is not needed:
-  // the ghost always spans the shifted start..end days). Row width uses the
-  // row's OWN day count (7 in month/week, 1..14 in custom views).
-  const n = days.length;
-  const first = Math.max(0, diffDays(startDay, days[0]));
-  const last = Math.min(n - 1, diffDays(endDay, days[0]));
-  if (first > last) return null;
-  const g = el('div', 'chip-ghost', { text: ev ? (ev.title || '') : '' });
-  g.style.top = '0px';
-  g.style.left = (first / n) * 100 + '%';
-  g.style.width = ((last - first + 1) / n) * 100 + '%';
-  g.style.height = DAY_EVENT_HEIGHT + 'px';
-  target.appendChild(g);
-  return g;
-}
-function removeGhost(ghost) {
-  if (ghost && ghost.parentNode) ghost.remove();
-}
-
-/** dayGridMouseHandler.ts createUpMoreEvent (ported). */
-function createUpMoreEvent(cb) {
-  const handleMouseUp = (e) => {
-    document.removeEventListener('mouseup', handleMouseUp, true);
-    e.preventDefault();
-    e.stopPropagation();
-    cb();
-  };
-  document.addEventListener('mouseup', handleMouseUp, true);
-  blockClick();
+  modal.replaceChildren(box);
+  openModalSurface(modal, backdrop, close);
 }
 
 /* ---------------- UI wiring ---------------- */
@@ -3619,19 +3021,22 @@ function bind() {
   });
   $('#btn-lock').addEventListener('click', lock);
   $('#btn-forget').addEventListener('click', forgetBrowser);
+  $('#btn-settings').addEventListener('click', openSettingsModal);
   $('#btn-sync').addEventListener('click', () => {
     if (state.busy || !state.api) return;
     syncAll().catch((e) => toast('Sync failed: ' + (e && e.message ? e.message : String(e)), 'err'));
   });
-  $('#btn-prev').addEventListener('click', () => navView(-1));
-  $('#btn-next').addEventListener('click', () => navView(1));
-  $('#minical-prev').addEventListener('click', () => navView(-1));
-  $('#minical-next').addEventListener('click', () => navView(1));
-  $('#btn-today').addEventListener('click', () => {
-    state.today = core.localToday();
-    state.viewYM = state.today.slice(0, 7);
-    setSelectedDate(state.today);
-    renderAll();
+  $('#minical-prev').addEventListener('click', () => {
+    if (!fcCal) return;
+    const d = fcCal.getDate();
+    fcCal.gotoDate(new Date(d.getFullYear(), d.getMonth() - 1, d.getDate()));
+    renderMiniCalendar();
+  });
+  $('#minical-next').addEventListener('click', () => {
+    if (!fcCal) return;
+    const d = fcCal.getDate();
+    fcCal.gotoDate(new Date(d.getFullYear(), d.getMonth() + 1, d.getDate()));
+    renderMiniCalendar();
   });
   $('#btn-new-event').addEventListener('click', () => {
     if (!state.api || state.busy) return;
@@ -3639,7 +3044,6 @@ function bind() {
     beginCreate(null);
   });
   $('#btn-add-calendar').addEventListener('click', () => openCalendarModal(null));
-  $('#btn-theme').addEventListener('click', toggleTheme);
 
   $('#popover-backdrop').addEventListener('click', closePopover);
   $('#editor-backdrop').addEventListener('click', () => {
@@ -3658,18 +3062,10 @@ function bind() {
     const modal = $('#freq-modal');
     if (!modal.hidden) closeModalSurface(modal, $('#freq-backdrop'));
   });
-
-  // Proton: capture-phase document mousedown drives grid DnD. v4.3 routes
-  // time-grid events (day/week/custom) to the TimeGrid handler FIRST; the
-  // month grid and the all-day row use the day-grid handler.
-  document.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    if (e.target instanceof HTMLElement && e.target.closest('.timegrid-columns')) {
-      handleTimeGridMouseDown(e);
-      return;
-    }
-    handleDayGridMouseDown(e);
-  }, true);
+  $('#settings-backdrop').addEventListener('click', () => {
+    const modal = $('#settings-modal');
+    if (!modal.hidden) closeModalSurface(modal, $('#settings-backdrop'));
+  });
 
   // Keyboard: Escape closes the topmost overlay; n/t/arrows navigate;
   // d/w/m/y/v switch views (Proton keyboard shortcuts). B13: no shortcuts
@@ -3683,28 +3079,19 @@ function bind() {
     if (inField || state.busy || !state.api || $('#app').hidden) return;
     if (overlayStack.length > 0) return; // B13
     if (e.key === 'n') { e.preventDefault(); $('#btn-new-event').click(); }
-    else if (e.key === 't') { e.preventDefault(); $('#btn-today').click(); }
-    else if (e.key === 'd') { e.preventDefault(); setView('day'); }
-    else if (e.key === 'w') { e.preventDefault(); setView('week'); }
-    else if (e.key === 'm') { e.preventDefault(); setView('month'); }
-    else if (e.key === 'y') { e.preventDefault(); setView('year'); }
+    else if (e.key === 't') { e.preventDefault(); if (fcCal) { fcCal.today(); renderMiniCalendar(); } }
+    else if (e.key === 'd') { e.preventDefault(); setView('timeGridDay'); }
+    else if (e.key === 'w') { e.preventDefault(); setView('timeGridWeek'); }
+    else if (e.key === 'm') { e.preventDefault(); setView('dayGridMonth'); }
+    else if (e.key === 'y') { e.preventDefault(); setView('multiMonthYear'); }
     else if (e.key === 'v') { e.preventDefault(); setView('custom'); }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); navView(-1); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); navView(1); }
+    else if (e.key === 'a') { e.preventDefault(); setView('listYear'); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); if (fcCal) { fcCal.prev(); renderMiniCalendar(); } }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); if (fcCal) { fcCal.next(); renderMiniCalendar(); } }
   });
 
-  // E5-2/E3-4: coalesce resize storms to ONE renderAll per frame (window
-  // drags fired up to 120 full re-renders/sec before). B4 preserves the
-  // time-grid scroll position INSIDE renderAll, so no manual restore here
-  // (the old restore wrote to the detached pre-render node — a no-op).
-  let resizeRaf = 0;
-  window.addEventListener('resize', () => {
-    if ($('#app').hidden || resizeRaf) return;
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = 0;
-      renderAll();
-    });
-  });
+  // FullCalendar handles its own container-resize re-rendering (v6
+  // ResizeObserver) — no manual window-resize handler is needed.
 
   $('#btn-paste-setup').addEventListener('click', () => {
     const v = $('#setup-input').value.trim();
@@ -3742,54 +3129,37 @@ function bind() {
     if (!document.hidden) maybeAutosync();
   });
 
-  // Keep the now-line and the "today" marker current (day rollover, minute
-  // hand) without a full re-render.
+  // Day rollover: refresh the today markers + events (the now-indicator
+  // updates itself between renders).
   setInterval(() => {
     const today = core.localToday();
     if (state.api && today !== state.today) {
       state.today = today;
       renderAll();
-      return;
     }
-    const line = document.querySelector('.calendar-grid-nowHourLine');
-    if (line) line.style.top = ((nowMinutes() / TOTAL_MINUTES) * 100).toFixed(4) + '%';
   }, 60000);
+
+  // 'system' theme: follow the OS preference live.
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const onScheme = () => { if (settings.theme === 'system') applyTheme(); };
+  if (mq.addEventListener) mq.addEventListener('change', onScheme);
+  else if (mq.addListener) mq.addListener(onScheme); // old Safari
 }
 
-/* ---------------- theme (Proton light/dark tokens) ---------------- */
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  const btn = $('#btn-theme');
-  if (btn) {
-    btn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
-    btn.setAttribute('aria-label', btn.title);
-  }
-}
-
-function toggleTheme() {
-  const cur = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
-  const next = cur === 'dark' ? 'light' : 'dark';
-  try { localStorage.setItem(LS_THEME, next); } catch { /* ignore */ }
-  applyTheme(next);
-}
+/* ---------------- boot ---------------- */
 
 function boot() {
+  loadSettings();
   ingestParams();
   refreshLoginUi();
   state.today = core.localToday();
-  state.viewYM = state.today.slice(0, 7);
-  setSelectedDate(state.today);
+  state.view = VIEWS.includes(settings.view) ? settings.view : 'dayGridMonth';
   try {
     const v = localStorage.getItem(LS_VIEW);
-    if (VIEWS.includes(v)) state.view = v;
+    if (v && VIEWS.includes(v)) state.view = v;
   } catch { /* ignore */ }
   bind();
-  // applyTheme is also set by the inline head script (FOUC guard); re-apply
-  // in case the DOM finished parsing after it.
-  applyTheme((() => {
-    try { return localStorage.getItem(LS_THEME) || null; } catch { return null; }
-  })() || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  applySettings({ fc: false }); // theme/accent/density before first paint
 }
 
 boot();
