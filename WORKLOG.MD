@@ -1937,3 +1937,92 @@ compilation killed):
 Test evidence: :rowstore:test — 15/15 passed (crypto KATs incl. AAD tamper
 detection, adapter create/update/rebase/listing/multiget/chunking/delete,
 error shapes, wrong-token silent drop).
+
+### EFF-E4 (efficiency audit: ical parse + rrule expansion) — 2026-10-31, RESEARCH ONLY, no code changed
+Full findings: /home/z/my-project/audit-d/eff-E4-findings.md (benchmarks in /tmp/eff-e4/, reproducible synthetic inputs documented). core-unit 176/176 green during audit. No functional bugs found.
+Top findings (all efficiency, PoC-scale data unaffected; matters at 100+ rows / multi-year recurring data):
+- F1 MAJOR: renderAll re-expands ALL rows twice (view + clock preview) with zero memoization — 577 ms/renderAll measured for 100 daily events with 2-year-old DTSTARTs (23 ms for 100 non-recurring); re-runs every 60 s autosync / nav / resize.
+- F2 MAJOR: buildRRule constructs a new RRule per expandEvtRow → vendored rrule's between() cache never engages + iteration restarts at DTSTART each call (2.023 ms vs 0.003 ms warm = 670×). Fix: WeakMap<master,RRule>.
+- F3 MAJOR: occKey computes Intl wall→instant per occurrence even when EXDATE/exception/RDATE sets are EMPTY — ≈66 % of recurring-expansion CPU (UTC 38.9 ms vs Berlin 115.5 ms per 100-row view pass).
+- F4 MAJOR: viewEventsForRange's ±7-day padding is redundant with expandEvtRow's span-aware bound (app.js:755 vs calendar-core.js:386-393) — 23 % wasted occurrences.
+- F5 MAJOR: undebounced resize→renderAll (app.js:3632-3640) multiplies the above per resize event.
+- F6-F13 MINOR/NIT: 2-4 expansion passes per month-view click/mousedown; per-occurrence parseEvtId regex; repeated spanDays/projIdHash in deriveWindowBuckets; parse/serialize nits.
+Positives verified: parse caching by ver is complete (0 parses per render / unchanged autosync); EXDATE/RDATE/exception matching is Set-based; Intl.DateTimeFormat cached per tz.
+Suggested order: F2 → F3 → F4 → F1 → F5 (each minimal-change, 176-test suite as gate). Projected 577 ms → <10 ms per renderAll.
+
+## Task 2.2 (davx5 fork) — :core WIRING COMPLETE (2026-10-31, this session)
+
+User directives this session: (a) USE GitHub Actions CI (PAT works — verified:
+workflow_dispatch HTTP 204; Actions enabled on the fork), (b) run 6+ parallel
+agents for efficiency gains in protocol+app (DONE — E1..E6 reports in
+/home/z/my-project/audit-d/eff-E*.md), (c) commence the davx5 fork.
+
+### CI (sh-clock/davx/.github/workflows/rowstore-ci.yml @ da20f6e75)
+Jobs: rowstore:test (JVM), core:testDebugUnitTest, app-ose:assembleDebug +
+39.5 MB APK artifact upload. Run 41176391015: ALL THREE GREEN on the row-store
+branch. The sandbox cannot build Android (4 GB OOM + Maven Central 429 rate
+limits + no full JDK — /usr/lib/jvm/java-21 is a JRE; Temurin 21 downloaded to
+/home/z/jdks for JVM-only builds). CI is the authoritative build/test gate.
+
+### Integration design (evidence-based decisions)
+- D17 [AUTH] davx5's HttpClientBuilder installs a PREEMPTIVE Basic/Digest Auth
+  plugin (dav4jvm PreemptiveBasicDigestAuthProvider.sendWithoutRequest = true)
+  whose addRequestHeaders REMOVES any existing Authorization header. The
+  row-store worker §4 treats Basic as a wrong token → silent drop. Therefore
+  ALL row-store requests go through an AUTH-FREE client built from
+  HttpClientBuilder WITHOUT .authenticate(); the Bearer header is added
+  per-request by RowStoreApi. Verified against dav4jvm main sources
+  (DomainAuthProvider.kt, PreemptiveBasicDigestAuthProvider.kt).
+- D18 [CREDENTIALS] username = AUTH_UI provisioning code (hex64 — the
+  browser ?setup= link analogue), password = the calendar password
+  (PBKDF2→KEK→unwrap→HKDF). Username shape (hex64) gates the /version probe:
+  normal CalDAV logins skip detection with ZERO extra requests.
+- D19 [MARKER] AccountSettings.KEY_ROWSTORE_SERVER ("rowstore_server") marks
+  row-store accounts; set at account creation from
+  DavResourceFinder.Configuration.rowStoreServer (new additive field, default
+  null). Read by CalendarSyncer (sync path) and RefreshCollectionsWorker
+  (refresh path). Robust against URL-pattern false positives.
+- D20 [REFRESH INTERCEPTION] RefreshCollectionsWorker MUST run
+  RowStoreCollectionRefresher BEFORE the WebDAV chain:
+  CollectionsWithoutHomeSetRefresher deletes homeless collections on 40x —
+  the row-store JSON API answers PROPFIND with silent-drop 404 → the
+  synthesized collections would be DELETED seconds after account creation.
+  Evidence: CollectionsWithoutHomeSetRefresher.kt:68-74.
+- D21 [CMETA WIRE FORMAT] cmeta rows are DOUBLE-encoded: encryptRow does
+  JSON.stringify(payload) and the web client passes JSON.stringify(meta) —
+  plaintext = quoteJsonString(objectText). Verified: js/crypto.js:154,
+  js/app.js:597 + sync ingest (app.js:440-441 double-parses),
+  scripts/seed-prod.mjs:25-30,87. decryptCmeta unquotes then parses.
+  (This was caught as a REAL bug in my first implementation — fixed before
+  any test ran.)
+- D22 [SYNC ALGORITHM] row-store capabilities: canCollectionSync=false →
+  SyncManager always uses PROPFIND_REPORT (manifest listing + §9b multiget);
+  querySyncState() returns null (only called when modificationsPresent —
+  verified SyncManager.kt:617-644). listChanges() throws UOE (never called).
+- D23 [TIME RANGE] timeRangePastDays is IGNORED for row-store (the row store
+  has no server-side time filter; the whole store syncs — documented here).
+
+### New/changed files (row-store branch)
+:rowstore — RowStoreUrls.kt (URL grammar), RowStoreApi.kt (bearer + §4/§5/§9c
+error mapping, extracted from RowStoreCalDavCollection VERBATIM),
+RowStoreAccount.kt (open: /config+derive; listCalendars: manifest+batch+cmeta),
+RowStoreAccountTest.kt (7 tests + 3 URL-grammar tests). RowStoreCalDavCollection
+refactored to delegate to RowStoreApi (behavior-identical; 15-test suite pins it).
+:core — resource/remote/RowStoreWebDavCollection.kt (WebDavCollection impl),
+sync/RowStoreSyncSession.kt (one client + one PBKDF2 per sync run),
+servicedetection/RowStoreDetector.kt (login detection),
+servicedetection/RowStoreCollectionRefresher.kt (collection-list refresh),
+CalendarSyncer.kt (row-store branch + close()),
+CalendarSyncManager.kt (remoteCollection widened CalDavCollection →
+WebDavCollection; Factory likewise — androidTest call sites unaffected,
+CalDavCollection is a subtype), DavResourceFinder.kt (row-store probe hook +
+Configuration.rowStoreServer), RefreshCollectionsWorker.kt (row-store branch),
+AccountSettings.kt (rowStoreServer property + key),
+AccountRepository.kt (marker set in BOTH createDbAccount and
+createLegacyBlocking), core/build.gradle.kts (+project(":rowstore")).
+
+Local JVM test status: BLOCKED by sandbox network (Maven Central per-path 429
+rate limits; Aliyun mirrors flaky 502) — CI is the test gate (was GREEN on
+da20f6e75; this push re-runs it). davx5 credential mapping for the user:
+login with URL = server, username = 64-hex provisioning code, password =
+calendar password.
