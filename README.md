@@ -1,14 +1,23 @@
 # Calendar-Web — encrypted calendar PoC
 
-End-to-end-encrypted **calendar** (the calendar feature of "PROTOCOL v4.1 —
-Encrypted Clock Ecosystem"), built as a Proof of Concept:
+End-to-end-encrypted **calendar** (the calendar feature of PROTOCOL v4.1 —
+Encrypted Clock Ecosystem — plus the **v4.2 calendar delta**), built as a
+Proof of Concept:
 
 - **Server**: Cloudflare Worker + Durable Object (SQLite, primary storage) +
   D1 (daily backup). The server stores **opaque encrypted envelopes** only —
-  it never sees plaintext (L1: untrusted relay).
-- **Client**: dependency-free static web app (GitHub Pages). All cryptography
-  is native WebCrypto: PBKDF2-HMAC-SHA256 (100 000 iterations) → AES-256-GCM
-  → HKDF-SHA256 subkeys. Rows are encrypted with AAD binding row id + version.
+  it never sees plaintext (L1: untrusted relay). The v4.2 change server-side
+  is exactly the §22 version string: `evt:`/`cmeta:` rows are ordinary
+  opaque rows on the same store.
+- **Client**: static web app (GitHub Pages; UI modeled on Proton Calendar,
+  see `docs/PROVENANCE.md`). Cryptography is native WebCrypto:
+  PBKDF2-HMAC-SHA256 (100 000 iterations) → AES-256-GCM → HKDF-SHA256
+  subkeys. Rows are encrypted with AAD binding row id + version.
+- **Data model (v4.2)**: per-event rows carry full RFC 5545 iCalendar
+  (recurring events, exceptions, reminders, all-day, multi-day);
+  per-calendar metadata rows; the v4.1 §13 day buckets are a derived
+  projection for the clock. RRULE expansion uses the vendored
+  `rrule.js` 2.8.1 (`js/vendor/`, BSD-3-Clause).
 
 ```
 PASSWORD --PBKDF2--> KEK --unwrap--> AES1 --HKDF--> K_data, AUTH_UI, AUTH_CLOCK
@@ -23,17 +32,23 @@ rows: AES-256-GCM(K_data, nonce, payload, AAD = id || u32be(ver))
 | `worker/` | Cloudflare Worker + Durable Object (`wrangler deploy`) |
 | `cli/bootstrap.mjs` | bootstrap CLI (generates material, PUTs /bootstrap) |
 | `test/` | unit tests + full HTTP conformance suite + local orchestrator |
+| `docs/PROTOCOL-v4.1.md` | the v4.1 base wire specification (verbatim) |
+| `docs/PROTOCOL-v4.2.md` | the v4.2 calendar delta (evt/cmeta rows, §13b projection) |
 | `docs/DEVIATIONS.md` | every spec deviation/interpretation, with reasoning |
+| `docs/PROVENANCE.md` | GPL-3.0 port provenance (Proton WebClients, rrule.js) |
 | `WORKLOG.MD` | shared coordination log (commandments, decisions, audits) |
 
 ## Running locally
 
 ```bash
 npm install
-cd worker && printf 'ADMIN_SECRET=%s\nINTERNAL_TOKEN=%s\nALLOWED_ORIGIN=http://localhost:8787\n' \
+cd worker && printf 'ADMIN_SECRET=%s\nINTERNAL_TOKEN=%s\nALLOWED_ORIGIN=https://sh-clock.github.io,http://localhost:8787\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .dev.vars && cd ..
 npm run test:local   # starts real workerd, runs ALL suites, triggers the cron, verifies D1
 ```
+
+(`ALLOWED_ORIGIN` is an exact-match list — include the production origin or
+the CORS phases fail.)
 
 ## Deploying
 

@@ -960,11 +960,15 @@ console.log('PHASE V42 — v4.2 row types (evt/cmeta on the opaque store)');
   r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authClockHex, body: { ver: 2, nonce: b64(encEvt.nonce), ct: b64(encEvt.ct) } });
   check('v42.10 CLOCK token evt PUT -> 403 empty', r.status === 403 && r.text === '', r.text);
 
-  // RMW rebase on evt rows: stale ver -> stored envelope echo (D14 contract).
-  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(encEvt.nonce), ct: b64(encEvt.ct) } });
+  // RMW rebase on evt rows: a FRESH envelope at the stale ver 1 must be
+  // rejected-as-rebase with the STORED envelope echoed (D14 contract — a
+  // distinct nonce/ct makes accept vs rebase distinguishable).
+  const staleEnc = encryptRow(K, evtIdUuid, 1, ical + '\r\n');
+  r = await raw('PUT', '/rows/' + encodeURIComponent(evtIdUuid), { token: MAT.authUiHex, body: { ver: 1, nonce: b64(staleEnc.nonce), ct: b64(staleEnc.ct) } });
   const rr = jparse(r.text);
-  check('v42.11 stale evt ver -> rebase echo of stored envelope',
-    r.status === 200 && rr.ver === 1 && rr.nonce === g2.nonce && rr.ct === g2.ct, r.text);
+  check('v42.11 stale evt ver (fresh envelope) -> rebase echo of stored envelope',
+    r.status === 200 && rr.ver === 1 && rr.nonce === g2.nonce && rr.ct === g2.ct &&
+    !(rr.nonce === b64(staleEnc.nonce) && rr.ct === b64(staleEnc.ct)), r.text);
 
   // Clean up the phase's rows (keeps the suite universe deterministic).
   for (const id of [cmetaId, evtIdUuid, evtIdForeign, evtIdMax]) {

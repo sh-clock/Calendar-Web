@@ -12,7 +12,7 @@
     "deploy": "cd worker && npx wrangler deploy",
     "bootstrap": "node cli/bootstrap.mjs"
   },
-  "license": "MIT",
+  "license": "GPL-3.0",
   "devDependencies": {
     "esbuild": "^0.28.2",
     "wrangler": "^4.156.0"

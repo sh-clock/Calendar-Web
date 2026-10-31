@@ -265,8 +265,10 @@ export function tzOffsetMinutes(tz, instant) {
 
 /**
  * Wall time in `tz` → UTC instant. Handles DST (iterates to a fixed point;
- * ambiguous wall times resolve to the SECOND (later) offset, non-existent
- * times to the transition instant).
+ * ambiguous wall times resolve to the SECOND (later) offset; non-existent
+ * times resolve via the pre-transition offset — i.e. one hour EARLY in
+ * wall terms for a spring-forward gap, which is the standard normalized
+ * interpretation, not the transition instant itself).
  */
 export function wallToInstantUTC(dt, tz) {
   if (dt.time === null) throw new Error('all_day_has_no_instant');
@@ -336,25 +338,32 @@ function veventFromProps(props) {
         ev.alarms.push(alarmFromProps(p.props));
         break;
       case 'UID': ev.uid = unescapeText(p.value); break;
-      case 'DTSTAMP': ev.dtstamp = parseDTValue(p.value, p.params); break;
-      case 'DTSTART': ev.dtstart = parseDTValue(p.value, p.params); break;
-      case 'DTEND': ev.dtend = parseDTValue(p.value, p.params); break;
+      case 'DTSTAMP': ev.dtstamp = parseDTValue(p.value, p.params); ev.dtstampParams = p.params; break;
+      case 'DTSTART': ev.dtstart = parseDTValue(p.value, p.params); ev.dtstartParams = p.params; break;
+      case 'DTEND': ev.dtend = parseDTValue(p.value, p.params); ev.dtendParams = p.params; break;
       case 'DURATION': ev.duration = parseDuration(p.value); break;
-      case 'RECURRENCE-ID': ev.recurrenceId = parseDTValue(p.value, p.params); break;
+      case 'RECURRENCE-ID': ev.recurrenceId = parseDTValue(p.value, p.params); ev.recurrenceIdParams = p.params; break;
       case 'RRULE': ev.rrule = p.value.toUpperCase(); break;
       case 'EXDATE':
-      case 'RDATE':
-        try {
-          for (const v of p.value.split(',')) {
-            (p.name === 'EXDATE' ? ev.exdates : ev.rdates).push(parseDTValue(v, p.params));
+      case 'RDATE': {
+        // All-or-nothing per property: if ANY value in the list is
+        // un-parseable (e.g. a PERIOD), the WHOLE property is preserved
+        // verbatim (tolerated) — parsing only the valid prefix would make
+        // the value list grow on every round-trip.
+        const parsed = [];
+        let ok = true;
+        for (const v of p.value.split(',')) {
+          try {
+            parsed.push(parseDTValue(v, p.params));
+          } catch {
+            ok = false;
+            break;
           }
-        } catch {
-          // Un-parseable value forms (e.g. PERIOD) are preserved verbatim
-          // instead of destroying the whole row (flagged so serialization
-          // does not drop it as a "known" property).
-          ev.extra.push({ ...p, tolerated: true });
         }
+        if (ok) (p.name === 'EXDATE' ? ev.exdates : ev.rdates).push(...parsed);
+        else ev.extra.push({ ...p, tolerated: true });
         break;
+      }
       case 'SUMMARY': ev.summary = unescapeText(p.value); ev.summaryParams = p.params; break;
       case 'DESCRIPTION': ev.description = unescapeText(p.value); ev.descriptionParams = p.params; break;
       case 'LOCATION': ev.location = unescapeText(p.value); ev.locationParams = p.params; break;
@@ -387,7 +396,9 @@ function veventFromProps(props) {
     // serializers always write one.
     ev.dtstamp = { date: '1970-01-01', time: '00:00:00', tz: 'UTC' };
   }
-  if (ev.dtend && ev.duration) throw new Error('dtend_and_duration');
+  if (ev.dtend !== null && ev.duration !== null && ev.duration !== undefined) {
+    throw new Error('dtend_and_duration');
+  }
   if (ev.dtend && ev.dtstart && (ev.dtstart.time === null) !== (ev.dtend.time === null)) {
     throw new Error('dt_type_mismatch');
   }
@@ -396,7 +407,12 @@ function veventFromProps(props) {
 
 function alarmFromProps(props) {
   const a = { action: null, triggerRaw: null, triggerParams: [], extra: [] };
+  const seen = new Set();
   for (const p of props) {
+    if (p.name === 'ACTION' || p.name === 'TRIGGER') {
+      if (seen.has(p.name)) throw new Error('duplicate_prop'); // single-occurring in VALARM
+      seen.add(p.name);
+    }
     if (p.name === 'ACTION') a.action = p.value.toUpperCase();
     else if (p.name === 'TRIGGER') {
       a.triggerRaw = p.value;
@@ -480,19 +496,21 @@ export function parseVCalendar(text) {
 
 const PRODID = '-//sh-clock//Calendar PoC//EN';
 
-function dtProp(name, dt) {
+function dtProp(name, dt, keptParams) {
   const { value, params } = formatDTValue(dt);
-  return { name, params, value };
+  // Foreign params (e.g. RANGE=THISANDFUTURE) survive ONLY when the value
+  // itself was not rewritten: the editor's fresh objects carry no params.
+  return { name, params: keptParams && keptParams.length ? keptParams : params, value };
 }
 
 /** Serialize one VEvent's property list (order: RFC-recommended). */
 function veventToProps(ev) {
   const props = [];
   props.push({ name: 'UID', params: [], value: escapeText(ev.uid) });
-  props.push(dtProp('DTSTAMP', ev.dtstamp));
-  if (ev.recurrenceId) props.push(dtProp('RECURRENCE-ID', ev.recurrenceId));
-  props.push(dtProp('DTSTART', ev.dtstart));
-  if (ev.dtend) props.push(dtProp('DTEND', ev.dtend));
+  props.push(dtProp('DTSTAMP', ev.dtstamp, ev.dtstampParams));
+  if (ev.recurrenceId) props.push(dtProp('RECURRENCE-ID', ev.recurrenceId, ev.recurrenceIdParams));
+  props.push(dtProp('DTSTART', ev.dtstart, ev.dtstartParams));
+  if (ev.dtend) props.push(dtProp('DTEND', ev.dtend, ev.dtendParams));
   else if (ev.duration !== null && ev.duration !== undefined) {
     props.push({ name: 'DURATION', params: [], value: formatDuration(ev.duration) });
   }

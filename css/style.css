@@ -294,7 +294,7 @@ main { height: calc(100% - var(--header-height)); }
   background: var(--primary); color: var(--primary-contrast);
 }
 .daygrid-rowevents { position: relative; flex: 1; min-height: 0; }
-.daygrid-rowevents.is-drop-target .calendar-daygrid-column-glow { background: var(--interaction-norm-minor-2); }
+.daygrid-rowevents.is-drop-target { background: var(--interaction-norm-minor-2); border-radius: var(--border-radius-sm); }
 
 /* event chips (_eventcell.scss, ported) */
 .calendar-dayeventcell {
@@ -496,3 +496,6 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
 
 /* modal-head h1 (editor): tighter inside the head row */
 .modal-head h1 { margin: 0; }
+
+/* corrupt-row notice (sidebar) */
+.corrupt-note { color: var(--signal-danger); font-size: 12px; }

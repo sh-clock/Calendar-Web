@@ -1707,6 +1707,43 @@ async function saveEvent(form) {
   const rowId = target.rowId;
   const parsed = target.parsed;
   const isExceptionEdit = editor.scope === 'exception';
+  // Calendar MOVE (PROTOCOL-v4.2.md): the calendar uuid is embedded in the
+  // row id, so moving = DELETE the old row + PUT evt:{newcal}:{uid} with the
+  // same UID and ver 1 (the documented move procedure).
+  if (form.calUuid && form.calUuid !== target.calUuid && state.cals.has(form.calUuid)) {
+    let current;
+    try {
+      current = parseEvtPayload((await fetchRow(rowId)).payload);
+    } catch { current = null; }
+    if (!current) throw new Error('row_corrupt: refusing to move a corrupt row');
+    const events = current.calendar.events;
+    const idx = isExceptionEdit
+      ? events.findIndex((e) => e.recurrenceId && target.recId &&
+          e.recurrenceId.date === target.recId.date && (e.recurrenceId.time || '') === (target.recId.time || ''))
+      : events.findIndex((e) => e.recurrenceId === null);
+    const base = idx >= 0 ? events[idx] : current.master;
+    const upd = {
+      ...base,
+      dtstamp,
+      dtstart: mkStart(),
+      dtend: mkEnd(),
+      rrule: isExceptionEdit ? base.rrule : rruleFor(form.freq, form),
+      summary: form.title,
+      description: form.description || null,
+      location: form.location || null,
+      transp: form.allDay ? 'TRANSPARENT' : null,
+      sequence: (base.sequence === null || base.sequence === undefined ? 0 : base.sequence) + 1,
+      alarms,
+    };
+    if (idx >= 0) events[idx] = upd;
+    else events.push(upd);
+    const newId = core.evtId(form.calUuid, current.uid);
+    await state.api.deleteRow(rowId);
+    await putRowRMW(newId, () => serializeVCalendar(current.calendar), { allowCreate: true });
+    await syncAll();
+    toast('Event moved and saved.', 'ok', 2000);
+    return;
+  }
   const recId = isExceptionEdit
     ? (target.recId ? { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz } : null)
     : null;
@@ -2324,6 +2361,7 @@ function createDragCreateEvent({ e, targetRow, targetDate: startTargetDate, rows
     document.removeEventListener('mouseup', handleMouseUp, true);
     document.removeEventListener('mousemove', handleMouseMove, true);
     removeGhost(ghost);
+    setHighlight(-1);
     if (result) {
       beginCreateRange(result.start, result.end);
     } else {
@@ -2372,12 +2410,21 @@ function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, d
   // NOTE: the mouse event parameter is `me` — the outer `ev` is the VIEW
   // EVENT being dragged (Proton keeps them distinct too; shadowing here
   // previously threw inside this handler and silently killed every drag).
+  let hl = null; // drop-target row highlight
+  const setHighlight = (rowIdx) => {
+    if (hl) hl.classList.remove('is-drop-target');
+    const rows = dayGridEl.querySelectorAll('.daygrid-rowevents');
+    hl = rowIdx >= 0 && rows[rowIdx] ? rows[rowIdx] : null;
+    if (hl) hl.classList.add('is-drop-target');
+  };
+
   const handleMouseMove = (me) => {
     me.preventDefault();
     me.stopPropagation();
     const rect = dayGridEl.getBoundingClientRect();
     currentTargetRow = getTargetIndex(me.pageY, rect.top, rect.height, model.perRow.length);
     const currentTargetDay = getTargetIndex(me.pageX, rect.left, rect.width, daysPerRow);
+    setHighlight(currentTargetRow);
     const currentIdx = currentTargetRow * daysPerRow + currentTargetDay;
     if (currentIdx === oldIdx) return;
     oldIdx = currentIdx;
@@ -2397,6 +2444,7 @@ function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, d
     document.removeEventListener('mouseup', handleMouseUp, true);
     document.removeEventListener('mousemove', handleMouseMove, true);
     removeGhost(ghost);
+    setHighlight(-1);
     // Restore the source chip opacity.
     dayGridEl.querySelectorAll('.isDragging').forEach((n) => n.classList.remove('isDragging'));
 

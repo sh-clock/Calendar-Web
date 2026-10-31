@@ -9,8 +9,9 @@
  *  - `evt:{cal}:{uid}` rows — payload = RFC 5545 VCALENDAR text (one UID:
  *    master VEVENT + RECURRENCE-ID exceptions). Source of truth.
  *  - `cal:{yyyymmdd}` day buckets — DERIVED projection for the clock,
- *    v4.1 §13 format preserved; entry ids use the `x:{uid}` derived
- *    namespace. 23-day window rotation unchanged.
+ *    v4.1 §13 format preserved; entry ids use the `x:{pid}` derived
+ *    namespace (pid = deterministic UUID-shaped hash of calendar+UID,
+ *    §13b). 23-day window rotation unchanged.
  *
  * v4.1 helpers retained verbatim: bucketId/parseBucketId, windowDays,
  * addDays, validDate, localToday, clockPreviewDays, normalizeBucket.
@@ -158,10 +159,23 @@ export function parseEvtPayload(text) {
   if (exceptions.length > 0 && !master.rrule) {
     return null; // RECURRENCE-ID exceptions require a recurring master
   }
+  // RFC 5545 §3.8.4.4: the RECURRENCE-ID value type MUST match DTSTART.
+  // A mismatch would make the override key never match the occurrence key
+  // (instant vs day), rendering BOTH on one day with a duplicate
+  // projection id (corrupt bucket) — rejected here instead.
+  if (exceptions.some((e) => (e.recurrenceId.time === null) !== (master.dtstart.time === null))) {
+    return null;
+  }
   if (uid.length > UID_MAX) {
     return null; // docs/PROTOCOL-v4.2.md id budget
   }
-  if (new Set(exceptions.map((e) => e.recurrenceId.date + 'T' + (e.recurrenceId.time || ''))).size !== exceptions.length) {
+  // Duplicate RECURRENCE-IDs compared as INSTANTS (two spellings of the
+  // same instant in different forms are still the same instance).
+  const recIdKey = (dt) =>
+    dt.time === null
+      ? 'D' + dt.date
+      : 'T' + wallToInstantUTC(dt, dt.tz || 'UTC').getTime();
+  if (new Set(exceptions.map((e) => recIdKey(e.recurrenceId))).size !== exceptions.length) {
     return null; // duplicate RECURRENCE-ID = corrupt
   }
   if (master.rrule && !/^FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)([;].*)?$/.test(master.rrule)) {
@@ -488,19 +502,38 @@ export function deriveBucketEntries(occurrences, day) {
       date: day,
       hh: +t.slice(0, 2),
       mm: +t.slice(3, 5),
-      title: title.length > 500 ? title.slice(0, 500) : title, // §13 title cap
+      // §13 title cap measured in UTF-16 units (the validator's measure),
+      // cut on a code-point boundary so no surrogate pair is split.
+      title: capTitleUnits(title, 500),
       priority: occ.allDay ? 1 : 2,
     });
   }
   return capDerived(entries);
 }
 
+/** Truncate to ≤ maxUnits UTF-16 units without splitting a surrogate pair. */
+function capTitleUnits(title, maxUnits) {
+  if (title.length <= maxUnits) return title;
+  let out = '';
+  let units = 0;
+  for (const ch of title) {
+    const u = ch.length; // 1 for BMP, 2 for astral
+    if (units + u > maxUnits) break;
+    out += ch;
+    units += u;
+  }
+  return out;
+}
+
 /**
  * Deterministic 128-bit hash of (calendar uuid, event UID), formatted in
  * UUID layout (version-5-analogue) for §13b projection ids: same inputs →
  * same id on every client; different calendars/UIDs → different ids with
- * negligible collision odds (126 effective bits). Pure function, no crypto
- * dependency (buckets are a derived cache, not a security boundary).
+ * negligible collision odds (120 effective bits: the version and variant
+ * nibbles are fixed). Four independent 32-bit lanes over UTF-16 code units
+ * of "calendar|uid" — see PROTOCOL-v4.2.md §13b for the normative spec.
+ * Pure function, no crypto dependency (buckets are a derived cache, not a
+ * security boundary).
  */
 export function projIdHash(cal, uid) {
   const str = String(cal) + '|' + String(uid);

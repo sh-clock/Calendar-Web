@@ -102,27 +102,37 @@ evt-row mutations and at sync time:
   the full entry set for a day from ALL evt rows (the union is derived, so
   concurrent writers converge by §9's ver rebase without ownership loss);
 - entry ids use the prefix **`x:{pid}`** where `{pid}` is a
-  deterministic UUID-shaped hash of `(calendar uuid, event UID)`
-  (128-bit FNV-derived, formatted in UUID layout, version-5-analogue;
-  see `projIdHash` in `js/calendar-core.js`). `x` = derived projection
-  namespace, distinguishing v4.2-derived entries from v4.1-authored
-  `d:`/`t:`/`w:` entries, and `{pid}` keeps the v4.1 event-id grammar
-  `[a-z]:{uuid}` valid even when the source UID is a foreign
-  non-UUID form (e.g. `…@google.com` — DAVx5 preserves such UIDs
-  verbatim) or the same UID exists in two calendars (the move
-  procedure). The same `x:{pid}` appears in every day the event
-  touches;
+  deterministic UUID-shaped hash of `(calendar uuid, event UID)`.
+  `x` = derived projection namespace, distinguishing v4.2-derived entries
+  from v4.1-authored `d:`/`t:`/`w:` entries; `{pid}` keeps the v4.1
+  event-id grammar `[a-z]:{uuid}` valid even when the source UID is a
+  foreign non-UUID form (e.g. `…@google.com` — DAVx5 preserves such UIDs
+  verbatim) or the same UID exists in two calendars (the move procedure).
+  The same `x:{pid}` appears in every day the event touches.
+  **Normative algorithm** (implementations MUST port it verbatim —
+  `projIdHash` in `js/calendar-core.js` is the reference):
+  let `s` = the UTF-16 string `"<calendar uuid>|<event UID>"`; keep four
+  32-bit lanes seeded `0x811c9dc5`, `0x01000193`, `0xdeadbeef`,
+  `0x41c6ce57`; for each UTF-16 code unit `c` of `s` at index `i`, for
+  each lane `j` in 0..3: `lane[j] = imul(lane[j] XOR ((c + j*0x9e37) AND
+  0xffff), 0x01000193) >>> 0`. Hex-encode the four lanes big-endian,
+  concatenate to a 32-hex-char string `h`; the id is
+  `h[0..8] + "-" + h[8..12] + "-5" + h[13..16] + "-a" + h[17..20] + "-"
+  + h[20..32]` (version nibble 5, variant nibble a fixed; 120 effective
+  hash bits);
 - per-day entry: `{id, date, hh, mm, title, priority}` where hh:mm is the
   event's LOCAL time in its own TZID (single-user ecosystem: clock and
   owner devices share a timezone in practice; bucket days are local days);
-  all-day events project at `hh=0, mm=0` with `priority` +1 promotion;
+  all-day events project at `hh=0, mm=0` with `priority=1` (timed events
+  project with `priority=2`; under §13's 0=highest scale all-day
+  therefore outranks timed);
   multi-day events project one entry per covered day;
 - the ≤16/day cap remains: derived entries drop by (priority, then id) —
   deterministic so every writer derives the identical dropped set;
 - ABSENT buckets are rebuildable from evt rows; a corrupt bucket is
   still never blindly overwritten by a writer that cannot decrypt it
   (v4.1 rule retained) — a corrupt day heals only after rotation
-  brings it back into the window (or via a fresh client bootstrap).
+  brings it back into the window, or via an admin force re-bootstrap.
 
 ## Sync algorithm (client law; server unchanged)
 
@@ -147,7 +157,7 @@ the web client, the DAVx5 fork, and future clients:
 - SEQUENCE bumped on meaningful updates;
 - the web client writes: UID, DTSTAMP, DTSTART, DTEND (or DURATION),
   SUMMARY, DESCRIPTION?, LOCATION?, TRANSP?, STATUS?, RRULE?, EXDATE?,
-  RECURRENCE-ID exceptions, VALARM (one, `TRIGGER:-PTnnM`, `ACTION:DISPLAY`)
+  RECURRENCE-ID exceptions, VALARM (one per reminder, `TRIGGER:-PTnnM`, `ACTION:DISPLAY`)
   when the user sets a reminder;
 - the DAVx5 fork writes whatever Android CalendarProvider holds (its
   existing generator — `AndroidEventHandler` — unchanged, verbatim reuse);

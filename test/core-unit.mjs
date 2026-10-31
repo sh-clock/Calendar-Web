@@ -544,6 +544,79 @@ eq('localToday shape', localToday().match(/^\d{4}-\d{2}-\d{2}$/) !== null, true)
   ok('UID > 200 rejected', !parseEvtPayload(V(evLines({ uid: 'u'.repeat(201), dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z' }))));
 }
 
+/* ================ wave-5 regressions ================ */
+{
+  // D1: RECURRENCE-ID value-type mismatch vs DTSTART rejected.
+  ok('all-day master + datetime RECURRENCE-ID rejected', !parseEvtPayload(V([
+    ...evLines({ uid: 'tm1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART;VALUE=DATE:20261001', dtend: 'DTEND;VALUE=DATE:20261002', rrule: 'FREQ=DAILY' }),
+    ...evLines({ uid: 'tm1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART;VALUE=DATE:20261003', dtend: 'DTEND;VALUE=DATE:20261004', recId: 'RECURRENCE-ID:20261003T000000Z' }),
+  ])));
+  ok('timed master + DATE RECURRENCE-ID rejected', !parseEvtPayload(V([
+    ...evLines({ uid: 'tm2', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261001T090000Z', rrule: 'FREQ=DAILY' }),
+    ...evLines({ uid: 'tm2', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261003T140000Z', recId: 'RECURRENCE-ID;VALUE=DATE:20261003' }),
+  ])));
+}
+{
+  // D2: mixed valid+unparseable EXDATE/RDATE — all-or-nothing (no growth).
+  const text = V(evLines({
+    uid: 'mx1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261005T090000Z',
+    rrule: 'FREQ=WEEKLY;BYDAY=MO;COUNT=1', rdate: 'RDATE:20260101T120000Z,20260102T120000/PT1H',
+  }));
+  const p1 = parseEvtPayload(text);
+  ok('mixed RDATE row parses', !!p1);
+  const t2 = serializeVCalendar(p1.calendar);
+  const p2 = parseEvtPayload(t2);
+  const t3 = serializeVCalendar(p2.calendar);
+  eq('mixed RDATE round-trip is byte-stable (no growth)', t2, t3);
+  eq('no partial rdate entries from mixed property', p1.master.rdates.length, 0);
+}
+{
+  // D3: PT0S + DTEND rejected (mutual exclusion covers zero).
+  throws('DTEND + DURATION PT0S rejected', () => parseVCalendar(V([
+    ...evLines({ uid: 'pz2', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z', dtend: 'DTEND:20261028T110000Z', extra: 'DURATION:PT0S' }),
+  ])));
+}
+{
+  // D4: duplicate RECURRENCE-ID in different forms (Z + TZID) rejected.
+  ok('instant-equal duplicate RECURRENCE-ID rejected', !parseEvtPayload(V([
+    ...evLines({ uid: 'dk1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART;TZID=UTC:20261005T090000', rrule: 'FREQ=DAILY' }),
+    ...evLines({ uid: 'dk1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261006T140000Z', recId: 'RECURRENCE-ID:20261005T090000Z' }),
+    ...evLines({ uid: 'dk1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261007T140000Z', recId: 'RECURRENCE-ID;TZID=UTC:20261005T090000' }),
+  ])));
+}
+{
+  // D5: duplicate TRIGGER in one VALARM rejected.
+  throws('duplicate TRIGGER rejected', () => parseVCalendar(V([
+    ...evLines({ uid: 'da1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261028T100000Z',
+      alarmLines: ['BEGIN:VALARM', 'ACTION:DISPLAY', 'TRIGGER:-PT30M', 'TRIGGER:-PT10M', 'END:VALARM'] }),
+  ])));
+}
+{
+  // D6: RECURRENCE-ID RANGE=THISANDFUTURE param survives the round-trip.
+  const text = V([
+    ...evLines({ uid: 'rp1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261005T090000Z', rrule: 'FREQ=DAILY;COUNT=3' }),
+    ...evLines({ uid: 'rp1', dtstamp: 'DTSTAMP:20260101T000000Z', dtstart: 'DTSTART:20261006T140000Z', recId: 'RECURRENCE-ID;RANGE=THISANDFUTURE:20261006T090000Z' }),
+  ]);
+  const p = parseEvtPayload(text);
+  const rt = parseVCalendar(serializeVCalendar(p.calendar));
+  const params = rt.events.find((e) => e.recurrenceId).recurrenceIdParams;
+  eq('RANGE=THISANDFUTURE param round-trips', JSON.stringify(params), JSON.stringify([['RANGE', 'THISANDFUTURE']]));
+}
+{
+  // D7: surrogate-safe title cap.
+  const astral = '𝕏'.repeat(300); // 600 UTF-16 units, 300 code points
+  const occ = {
+    rowId: evtId(CALID, 'sg'), calId: CALID, uid: 'sg', recId: null,
+    start: { date: '2026-10-31', time: '10:00:00' }, end: { date: '2026-10-31', time: '11:00:00' },
+    allDay: false, isException: false, isCancelled: false,
+    master: { dtstart: { date: '2026-10-31', time: '10:00:00', tz: null }, exdates: [], rdates: [], alarms: [], extra: [], summary: astral },
+  };
+  const entry = deriveBucketEntries([occ], '2026-10-31')[0];
+  eq('astral title capped at 500 UTF-16 units', entry.title.length, 500);
+  eq('cap lands on a code-point boundary', entry.title.endsWith(String.fromCodePoint(0x1D54F)), true);
+  eq('capped entry validates', validateBucketEvent(entry) !== null, true);
+}
+
 /* ================ report ================ */
 console.log(`core-unit: ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
