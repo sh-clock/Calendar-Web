@@ -1852,3 +1852,50 @@ REFUTED (stress-tested, no bug found):
 
 Store state at hand-off: wiped (0 rows). Scripts remain in /tmp/s1/ for
 re-runs (node /tmp/s1/scN.mjs; ./run-retry.sh wraps interference retries).
+
+### WAVE-7 FINAL DISPOSITIONS (2026-10-31, ~04:30)
+
+All findings from agents A/B/C + stress agents S1/S2 are fixed and verified:
+- A1 recurrenceId on exception-move; A2 move=create-then-delete; A3
+  GENERATION-based dirty/deleted tracking (two bugs: the race AND the
+  session-long deletion-masking); A4 corrupt rows in calendar-delete; A5
+  corrupt-toast dedup; A6 manifest-gated bootstrap; A7 lock-abort; A8
+  per-row GET isolation; A9 calendar-gone guards (post-sync guarantee; the
+  ≤60 s pre-sync orphan window is a documented residual MINOR race); A10
+  create-never-overwrites; A11 safe storage; A12 busy depth; A13 render
+  guard; A15 refocus debounce.
+- B1 24:00 day-carry + THE ROOT CAUSE: #app lacked height → #layout
+  height:100% resolved to auto → the whole time grid rendered 1152px with
+  half below the viewport (invisible, unscrollable); B2 dragState reset;
+  B3 60px aside spacer (header/column alignment); B4 scrollTop preservation
+  across re-renders; B5 adaptive all-day row (actualRows); B6 ghost
+  part-minutes; B7 50-min time-text rule; B8 outside-day navigation; B9
+  time-grid auto-scroll; B10 CSS cleanup; B12/B13/B14 a11y nits.
+- C1/C2/C3 protocol.md honesty (v4.2-client hard-gate documented; §refs;
+  browser degrade nuance).
+- S1 MAJOR: el() props-in-cls-slot at 14 sites → BLANK modal headings and
+  editor labels (fixed by accepting an object 2nd arg — real rendering bug
+  the earlier audits missed); S2 nits: malformed-token UX, moreChip role.
+- NOT fixed (accepted): A9 pre-sync orphan window (MINOR, inherent to
+  1-request offline-tolerant saves); A14 not_found-vs-corrupt message on
+  move of a missing row (folded into the A2 rewrite — now reports
+  not_found); A16 u32-max ver (unreachable); C4 batch response size cap
+  (~22 MB worst case, noted in spec); C5 UTF-16 id units (pre-existing).
+  B11 pageX/pageY (document never scrolls — safe); B14 Monday-first
+  hardcode (consistent with the rest of the port).
+
+FINAL TEST EVIDENCE (all green at commit b26beb8):
+- core-unit 176/176; crypto-parity 38/38; api-suite 153/153
+- E2E v43 40/40 (save=1 PUT, idle sync=1 GET, reload ≤4; whole 28-request
+  session incl. 5 creations, 4 drags, calendar ops, 5 views, dark mode,
+  keyboard, delete)
+- wave-7 regression 16/16 (every fixed finding re-verified in-browser)
+- stress: S1 5/5 common scenarios (bulk/rapid-edit/two-tab/recurring
+  lifecycle/view hammering — 0 errors, request budgets held); S2 5/5 niche
+  (time/date boundaries, corruption resilience, poisoned storage, 300-row
+  batch chunking)
+- PRODUCTION: worker v4.3 (cd628d74) + Pages site byte-identical to HEAD;
+  live E2E 18/18 with 6 total requests; seeded demo data intact (2
+  calendars, 6 events).
+
+## Task 2.1 (web UI) — COMPLETE. Next: Task 2.2 (davx5 fork), commenced.
