@@ -1050,3 +1050,565 @@ cost, adding one would indeed freeze the UI.
 Wave-7 focus: the ~1100 new/changed lines in js/app.js (sync engine,
 mutations, TimeGrid port, DnD), worker/src (batch), protocol.md, CSS, and
 stress coverage of common + niche use cases. Agents: see findings below.
+
+## WAVE-7 AGENT A FINDINGS
+
+Audit scope: sync engine + mutation paths only (app.js 349-627, saveEvent/
+deleteEvent/applyDayShift, calendar mutations, unlock, bind() wiring),
+api.js, crypto.js §6 encoding, worker/src. READ-ONLY audit; reproduction
+scripts archived at /tmp/move-exception.mjs, /tmp/proto-checks.mjs,
+/tmp/rebase-fresh.mjs (run against the local dev worker; baseline
+core-unit 176/176 green). Line numbers are current file state.
+
+1. [BLOCKER] saveEvent calendar-MOVE + "This event" (exception scope) writes a
+   two-master VCALENDAR — silent event destruction with a SUCCESS toast —
+   js/app.js:2423-2458 — Evidence: for `isExceptionEdit` with no existing
+   exception component (first-time "This event" edit of a recurring event),
+   line 2434 `base = idx >= 0 ? events[idx] : current.master` falls back to
+   the MASTER, and lines 2448-2449 `else events.push(upd)` push `upd`
+   WITHOUT `recurrenceId` (the non-move edit path sets it correctly at
+   2482; applyDayShift at 2627-2629 too — only the move path forgot).
+   Reproduced by running the verbatim logic: output = 2 VEVENTs, same UID,
+   0 RECURRENCE-ID lines → `core.parseEvtPayload` → null (calendar-core.js:156-158
+   "two masters = corrupt"). Live-worker check (/tmp/proto-checks.mjs C1):
+   the blind server ACCEPTS the payload; `applyRowLocally` (app.js:552-558)
+   silently no-ops on the parse failure (no state update, no corrupt flag),
+   line 2457 then toasts "Event moved and saved." — while the old row was
+   already DELETEd (2451) and the new row is permanently unreadable.
+   Next sync flags it corrupt; corrupt rows are never rewritten
+   (putRowRMW:593 + build guards) and cannot be cleaned via the UI (see #4)
+   → the event is destroyed for every client. User steps: recurring event →
+   Edit → "This event" → change Calendar → Save. Why real: verified twice
+   (core-level repro + server write); no test covers the move path
+   (test/core-unit.mjs has no saveEvent coverage). Confidence: HIGH.
+
+2. [MAJOR] DELETE-then-PUT move: a PUT failure after a successful DELETE
+   permanently loses the event — js/app.js:2451-2454 — Evidence: 2451
+   `await state.api.deleteRow(rowId)` succeeds, 2452-2453 delete the row
+   locally, then 2454 `putRowRMW(newId, …)` throws (network timeout,
+   rebase_exhausted, or `row_corrupt` from the pre-GET at putRowRMW:592-593
+   when the target id holds a corrupt row). The error IS surfaced (save
+   handler toast, app.js:2313-2314) and local state matches the server, but
+   there is no retry of the PUT and no re-PUT of the old row — the event
+   content exists nowhere afterwards (server is blind; only §19 daily
+   backups remain). Why real: putRowRMW retries REBASES but not transport
+   failures; the protocol documents the visibility gap but the client could
+   roll back or retry. Confidence: HIGH (code path; not live-reproduced).
+
+3. [MAJOR] Mutations are not serialized against in-flight syncs → torn /
+   rolled-back local state (transient "events disappear after save") —
+   js/app.js:462-531 vs all mutation paths — Evidence: `state.syncing` is
+   referenced only at 463/464/527/544 (grep) — autosync ENTRY is guarded
+   (544 checks busy/syncing) but a sync already in flight is NOT excluded
+   from mutations, and mutations never check `state.syncing`. Concrete
+   interleavings (manifest GET at 467 precedes everything): (a) a row
+   created by a mutation completing between 467 and the "absent from
+   manifest" cleanup 496-499 is DELETED locally right after "Event saved."
+   (its id is not in `seen`) — it reappears only at the next sync (≤60 s);
+   (b) a batch response older than a completed RMW overwrites the fresher
+   entry via ingestRow 399/411 (ver regression, the edit visually reverts
+   ≤60 s); (c) a pre-DELETE manifest + post-DELETE ingest re-adds the OLD
+   row after a MOVE (event shown in both calendars until next sync).
+   Server-side consistency is protected by the rebase loop; the torn state
+   is UI-only but re-triggers the wave-6 user complaint #5 symptom class.
+   Why real: single-tab usage makes the window small (the batch round-trip)
+   but real; nothing prevents Save while an autosync is awaiting. Confidence:
+   MEDIUM-HIGH (windows code-verified; not live-reproduced).
+
+4. [MAJOR] confirmDeleteCalendar leaves the deleted calendar's CORRUPT evt
+   rows on the server (and undercounts) — js/app.js:2905, 2919-2924 —
+   Evidence: the count `n` (2905) and the delete loop (2919-2924) iterate
+   `state.evt.keys()` only; corrupt rows live ONLY in `state.corrupt`
+   (ingestRow removes them from state.evt at 397) → they are neither
+   counted in "and its N event(s)", nor DELETEd server-side, nor cleaned.
+   Result: orphaned undecryptable rows survive a user-visible "Delete
+   calendar", and (via #5) produce a warning toast every 60 s forever.
+   Compounds with #1: a row corrupted by the move-path bug can NEVER be
+   removed through the UI. Why real: straight code path; WORKLOG documents
+   real corrupt rows existing in production (seed-payload incident).
+   Confidence: HIGH.
+
+5. [MINOR] Corrupt-row warning toast fires on EVERY sync (60 s spam) —
+   js/app.js:532-534 + 3428-3431 — Evidence: the toast is emitted at the
+   end of every syncAll while `state.corrupt.size > 0`; autosync reruns
+   every 60 s and corrupt rows are retried but stay corrupt (by design,
+   §5.1b) → a permanently-corrupt row means an 8-second warning toast every
+   minute, forever. Why real: code; UX-level. Confidence: HIGH.
+
+6. [MINOR] syncAll's default-calendar bootstrap writes when the store is NOT
+   completely empty — js/app.js:513 — Evidence: the condition is
+   `state.cals.size === 0 && state.evt.size === 0` (LOCAL state), not the
+   manifest. An all-corrupt store (e.g. wrong-key rows — every ingest fails,
+   cals/evt stay empty) or a v4.2 leftover holding ONLY deprecated `cal:`
+   bucket rows (matched by neither parseEvtId nor parseCmetaId at 476-485,
+   so `seen` stays empty) passes the condition → sync WRITES a cmeta row.
+   Claim 1's exception is "store completely empty"; violated in these
+   cases. Why real: code; edge-case impact (an extra default calendar).
+   Confidence: HIGH.
+
+7. [MINOR] lock() during an in-flight background sync → spurious error /
+   corrupt toasts on the login screen — js/app.js:337-352 vs 462-531 —
+   Evidence: lock only checks `state.busy` (338); autosync never sets busy
+   (543-546). The suspended syncAll resumes with `state.api`/`state.rowKey`
+   nulled: 467/426/440 throw TypeError → "Sync problem: Cannot read
+   properties of null … will retry automatically." toast on the LOGIN
+   screen, or ingestRow's decryptRow throws with rowKey null → per-row
+   corrupt flags + "N row(s) could not be decrypted" toast. Cosmetic but
+   user-visible after locking. Why real: lock is synchronous, the sync is
+   awaiting — resumption reads the nulled globals live. Confidence:
+   MEDIUM-HIGH.
+
+8. [MINOR] Per-row fallback: ONE failed GET aborts the entire sync —
+   js/app.js:438-443 — Evidence: `Promise.all(ids.map(… getRow …))` — a
+   single non-not_found error (transient 500, silent auth drop, network)
+   rejects the whole set → fetchRowsIntoState throws → syncAll catch →
+   NOTHING is ingested that round (render still runs). Decrypt/parse
+   failures ARE isolated (claim 2 holds row-wise), but HTTP-failure
+   isolation exists only in the batch path. Affects v4.2-server fallback
+   mode (§5.1c) and the degraded mode after any silent 404. Why real:
+   Promise.all semantics; contradicts the failure-tolerant spirit.
+   Confidence: HIGH.
+
+9. [MINOR] saveEvent edit path: calendar change silently ignored / deleted
+   calendar resurrection — js/app.js:2423 — Evidence: the move branch
+   requires `state.cals.has(form.calUuid)`; if the picked target calendar
+   was deleted while the editor was open (stale dropdown, built at
+   2213-2216), the save silently falls through to the plain edit path and
+   writes the OLD row — the user's calendar choice is dropped with a
+   "Event saved." toast. Inverse case: any edit of an event whose calendar
+   was deleted elsewhere resurrects the row (verified live: server accepts
+   any ver ≥ 1 on a missing row — /tmp/proto-checks.mjs B1) into a calendar
+   absent from state.cals → invisible event + "Event saved." (viewEventsForRange
+   filters at 654). Why real: no validation of form.calUuid/target calendar
+   freshness at save time; multi-tab/multi-device reachable. Confidence:
+   MEDIUM-HIGH.
+
+10. [MINOR] Create fast-path can clobber an existing row BEFORE the
+    `res.ver !== 1` guard fires — js/app.js:2404-2408 + putRowRMW 583-627 —
+    Evidence: with `local {ver:0}` and the row existing (rebase), the loop
+    re-applies the create build (which IGNORES the fetched payload, 2404)
+    and PUTs ver+1 — overwriting the row — and only then does 2408 throw
+    `unexpected_ver` ("Save failed" shown after server-side damage).
+    Reachable only via a crypto.randomUUID() UID collision (or the same uid
+    in the target calendar for the move path at 2454) — theoretical, but
+    the guard is ordered after the destructive write. Confidence: HIGH
+    (logic), likelihood negligible.
+
+11. [MINOR] Unwrapped localStorage writes can brick login / fake sync
+    errors — js/app.js:276, 237 (via 521), 259/265 — Evidence: unlock's
+    `localStorage.setItem(LS_SERVER, url)` (276) is outside any try/catch;
+    in a quota-exceeded / storage-blocked browser it throws INSIDE the
+    submit listener (3322-3325 calls unlock() unguarded) → login silently
+    does nothing, no message. saveCalVis (237) called from syncAll (521)
+    turns a quota error into a phantom "Sync problem: …" toast on every
+    sync. ingestParams (259/265) likewise unwrapped at boot. Contrast:
+    theme/view reads ARE wrapped (3465, 3475). Confidence: MEDIUM
+    (environment-dependent).
+
+12. [MINOR] No busy-guard on DnD handlers and modal Save buttons; nested
+    setBusy(false) clobbers the shared flag — js/app.js:3061, 1426, 3371,
+    2308, 2851 vs 2316/2889/3262 — Evidence: mousedown DnD entry points and
+    the editor/calendar-modal Save handlers never check `state.busy` (grep:
+    busy checks only at 272/338/355/2033/2290/3329/3343/3388); two
+    overlapping mutations each end with `finally { setBusy(false) }`, so
+    the FIRST finisher hides the busy bar while the second is still in
+    flight → further overlaps unlocked early. Server consistency is saved
+    by the rebase loop; local application can interleave. Confidence:
+    MEDIUM.
+
+13. [NIT] renderAll is outside syncAll's try/catch — a render exception
+    makes syncAll REJECT and unlock report "Login failed: <render error>" —
+    js/app.js:531 + 311/314-323 — Evidence: syncAll catches all sync errors
+    (524-526) but renderAll (531) and the toasts run bare; any renderAll
+    throw propagates → unlock's catch shows a LOGIN failure for a render
+    bug (the E2 failure-coupling shape, now narrowed to render errors);
+    btn-sync likewise toasts "Sync failed" for render errors. Confidence:
+    MEDIUM.
+
+14. [NIT] Move path misreports a missing row as corrupt — js/app.js:2426-2428 —
+    Evidence: `(await fetchRow(rowId)).payload` is undefined for
+    missing/undecryptable rows → parseEvtPayload → null → "row_corrupt:
+    refusing to move a corrupt row" even when the row is simply gone
+    (should be not_found). Error is loud, message misleading. Confidence:
+    HIGH.
+
+15. [NIT] Refocus triggers two back-to-back syncs — js/app.js:3432-3435 —
+    Evidence: both `focus` and `visibilitychange` call autosync on tab
+    return; syncAll's `state.syncing` only collapses them if the first is
+    still in flight (usually it is not) → 2–4 requests per refocus instead
+    of §5.3's "once on focus/visibility". Harmless cost duplication.
+    Confidence: HIGH.
+
+16. [NIT] ver = 4294967295 (u32 max) RMW surfaces a raw crypto error —
+    js/app.js:605-606 → crypto.js:137-138 — Evidence: newVer overflows the
+    u32 gate in rowAad → `bad_ver` thrown with no friendly handling;
+    unreachable in practice (4 billion writes). Confidence: HIGH.
+
+REFUTED (investigated, found clean — valuable for cross-checking):
+- Claim 1 (sync read-only): CONFIRMED clean apart from #6's condition
+  nuance — syncAll's only write is the bootstrap PUT (516); no deleteRow/
+  putRow anywhere else in the sync path.
+- Claim 2 (row-level failure isolation): decrypt/parse failures are
+  per-row isolated (ingestRow 382-415; fetchRowsIntoState 444-454 continues
+  past bad envelopes); renderAll runs after every sync attempt (531).
+  Exceptions: #8 (HTTP-level, fallback mode) and #13 (renderAll throwing).
+- Claim 3 (post-RMW local update): CONFIRMED — every mutation path calls
+  applyRowLocally(id, res.ver, res.text) + renderAll with NO syncAll
+  (grep: syncAll called only at 311/545/3330); res.ver is the ver just
+  written (605-610). The silent-no-op hole is #1's parse failure.
+- Claim 4 (rebase loop uses FRESH payload): CONFIRMED by live test
+  (/tmp/rebase-fresh.mjs): stale local ver 1, concurrent writer at ver 2
+  with different content → rebase echo → re-fetch → build re-applied to the
+  FRESH payload (final summary "merged:[fresh-other-edit]", ver 3). ≤8
+  attempts, rebase_exhausted at 626. The `local.ver===0` fast-path rebase
+  also re-fetches correctly (604-624).
+- Claim 6 (no cal: access): CONFIRMED — no parseBucketId/bucketId/windowDays
+  usage in app.js; the manifest loop matches only evt:/cmeta: (476-485);
+  the clock preview is purely local (renderClockPreview 1756-1782 →
+  core.deriveWindowBuckets). Zero cal: reads/writes.
+- Claim 7 (autosync guards): CONFIRMED — autosync checks api/busy/syncing
+  (544), never calls setBusy, interval skips hidden documents (3429). The
+  residual race is #3 (mutations vs in-flight syncs), not autosync itself.
+- Claim 8 (§6 encoding): CONFIRMED — the single encryptRow call site (606)
+  always receives a STRING from build (all 8 build closures return
+  serializeVCalendar(...) or JSON.stringify(meta)); local payloads are
+  strings (2511, 2575, 2656, 2863); decryptRow's single JSON.parse
+  round-trips the double-encoded §6 payload consistently (verified
+  end-to-end against the worker).
+- Claim 10 (corrupt lifecycle): CONFIRMED — corrupt → toFetch (479/484),
+  retried every sync, cleared on success (400/412) or manifest absence
+  (500). Gaps are #4/#5 only.
+- XSS: REFUTED — every innerHTML assignment is a hardcoded SVG constant
+  (grep: 1842, 1847, 1875-1876, 2093, 2119, 2145, 2152, 2160, 2207, 2228,
+  2241, 2274, 2710, 2751); all user data (titles, locations, calendar
+  names, descriptions) flows through el()'s textContent (85-95) or
+  createTextNode (2740).
+- Worker §9b implementation: batch route is a pure read, request-order,
+  id/ver/nonce/ct relayed verbatim, ≤256 + uniqueness enforced
+  (store.js:471-500); CORS POST added (index.js:24). No issues found in
+  the audited server surface (hPutRow ver arbitration matches §9 exactly).
+
+— AUDIT AGENT A (Task 7-A), 2026-10-31
+
+## WAVE-7 AGENT C FINDINGS (2026-10-31, server/protocol/security audit — v4.3 §9b surface)
+
+Method: static line-audit (store.js/index.js/protocol.md vs spec) + 100+
+independent runtime probes against the local dev worker (127.0.0.1:8787,
+proto 4.3) — 82 scripted conformance checks (all passed), raw-socket body/
+drain/stream probes, exotic-id and route-confusion batteries, concurrency
+(18 parallel PUT/batch/GET), one local hBackup verification — plus READ-ONLY
+production probes (version/manifest/preflight/batch-error-shapes; nothing
+written or deleted). The shipped api-suite PHASE V43 was NOT trusted; every
+claim was re-derived independently. Git history used for v4.2-vs-v4.3
+compat evidence.
+
+### Findings
+
+1. **[MAJOR] protocol.md §8 compat claim "v4.3 worker ↔ v4.2 client: works
+   (batch route simply unused)" is FALSE** — protocol.md:187 vs
+   git 5e9096b:js/app.js:267-272 — evidence: the v4.2 web client (the one
+   deployed on Pages during the v4.2 era) hard-gates at unlock:
+   `if (ver.proto !== '4.2') throw new Error('This client needs protocol
+   4.2 (server reports ' + ver.proto + '). Deploy the updated worker
+   first.')`. Production is now proto 4.3 (verified live: /version →
+   {"proto":"4.3"}), so any browser still running a cached v4.2 page
+   (long-lived tab / bfcache) cannot unlock AT ALL against production.
+   Why real: normative spec statement refuted by the repo's own client
+   history + live production state; user-visible lockout window exists
+   (mitigated only by the absence of a service worker — a reload fetches
+   the v4.3 client, which has the soft gate). The server-side route
+   addition itself is genuinely additive; the spec's compat MATRIX is what
+   is wrong. Fix: amend §8 to "v4.3 worker ↔ v4.2 client: routes additive,
+   but the v4.2 client's own hard version gate refuses newer servers —
+   reload required". Confidence: high (code-proven; not live-reproduced
+   because that would require serving a v4.2 client, which no deployment
+   does anymore).
+
+2. **[MINOR] protocol.md §9b/§5 dangling intra-document cross-references**
+   — protocol.md:85 "(the §5 authenticated-malformed cap)" and :98 "(§11)"
+   — evidence: protocol.md's OWN §5 is "Client sync strategy" and defines
+   no id-size cap; no §11 exists in this document (§11 is v4.2-doc
+   numbering, acknowledged only in a parenthetical at :116). The 256-char
+   cap actually lives in v4.1 §5 (docs/PROTOCOL-v4.1.md) / WORKLOG D9.
+   Also §9b's error taxonomy names only bad_ids/bad_id, while the
+   implementation also returns 400 {error:"bad_json"|"bad_body"} for
+   malformed bodies (verified: non-JSON body → bad_json; []/null/"str"/5 →
+   bad_body) — consistent with the v4.1 §5 law but not derivable from
+   protocol.md alone, which claims to be the normative v4.3 spec.
+   Why real: a third-party client author (the davx5 fork, §9 compliance
+   notes) implementing from protocol.md alone cannot resolve these refs.
+   Doc-only fix. Confidence: high.
+
+3. **[MINOR] §5.1c/§9b "empty-404 detection" degrade mechanism is
+   unreachable in-browser against genuine v4.2 workers** — protocol.md:127,
+   :97-98 vs git 5e9096b:worker/src/index.js:23 — evidence: the v4.2 front
+   door's access-control-allow-methods was 'GET, PUT, DELETE, OPTIONS'
+   (no POST), so a browser's CORS preflight for POST /rows:batch FAILS
+   before the request reaches the route table → fetch rejects with
+   TypeError → api.js classifies 'network' (js/api.js:46-47), never the
+   empty 404 the spec describes. The actual protection is the §5.4 version
+   probe (js/app.js:299-306 sets batchOk=false when proto != 4.3, before
+   any batch POST); the 'silent' catch (app.js:429-430) only fires for
+   servers that report ≥4.3 yet lack the route (e.g. a stripping proxy).
+   Behavior is correct; the spec's stated mechanism is wrong for the exact
+   case it names. Non-browser clients (davx fork) have no preflight, so
+   the empty-404 path is real for them. Doc fix + optional app.js: also
+   degrade on batch 'network' errors. Confidence: high.
+
+4. **[NIT] No aggregate response-size cap on /rows:batch** —
+   store.js:483-499 — 256 ids × 64 KiB ciphertext is spec-legal ⇒ a single
+   batch response can be ~22 MB of JSON built as one string in DO memory.
+   Spec imposes no cap; the workerd 128 MB per-isolate limit is not
+   threatened (only rows that EXIST can be returned, and 256×64 KiB is the
+   absolute ceiling). Observation for the record; matches the spec as
+   written. Confidence: high (arithmetic; not a conformance bug).
+
+5. **[NIT] Id length cap counts UTF-16 code units** — store.js:479
+   (`id.length > ID_MAX`) — "≤ 256 chars" (§9b:85) is unit-ambiguous: a
+   128-emoji id measures 256 units. Identical to the pre-existing v4.2
+   single-row path (ID_MAX since WORKLOG D9), so no NEW drift, and such
+   ids are out of the §7 grammar anyway. Confidence: high.
+
+### Verified clean (independently re-derived; concerns REFUTED with evidence)
+
+- **Validation order == spec** (count → shape → unique): non-array/missing/
+  null/empty ids and >256 ids → 400 {error:"bad_ids"}; non-string/null/
+  object/""-string/257-char id → 400 {error:"bad_id"}; duplicates →
+  bad_ids; 256 ids exactly → 200 (cap inclusive); 256-char id exactly →
+  200. 400 bodies are application/json; charset=utf-8. Shape errors win
+  over duplicates regardless of position (matches spec sentence order).
+- **Response law**: request order preserved (unicode/URL-special ids
+  included); envelope elements JSON.stringify-identical to the whole GET
+  /rows/{id} body (same key order id,ver,nonce,ct — byte-identical);
+  missing elements exactly {id,missing:true}; envelopes decrypt under
+  AAD(id,ver) with the client K_data; config row can NEVER appear
+  (separate `config` table — ids 'config'/'1'/'k' all missing; manifest
+  lists only `rows`-table entries). Production read-probe: element[0]
+  identical to its GET, order kept.
+- **Auth-before-body law**: unauth/admin/internal/garbage/uppercase-hex
+  token on POST /rows:batch (with JSON body) → EMPTY 404, no content-type,
+  no WWW-Authenticate; CLOCK class reads (200); no write path exists via
+  batch (PUT/DELETE/PATCH/HEAD/GET on /rows:batch → empty 404; manifest
+  byte-identical before/after a PUT /rows:batch attempt with a valid
+  envelope).
+- **Drain/reset concern REFUTED empirically** (raw sockets): unauth 2 MB
+  immediate → clean 404; unauth 300 KB slow-sender (600 ms mid-upload
+  pause) → 404 delivered BEFORE body completion + Connection: close, no
+  RST; expect-100-continue unauth → 404; auth 2 MB → clean 400
+  {error:"too_large"}; BODY_MAX boundary exact (1048576 → bad_json after
+  full read; 1048577 → too_large); 33 MB (beyond the 32 MiB drain cap) →
+  still a clean 400. The silent path doesn't explicitly drain
+  (store.js:328) but workerd answers-then-closes, so clients always see
+  the 404.
+- **No route confusion**: /rows/%3Abatch decodes INTO the row-id path (GET
+  → 404 {error:"not_found"}; PUT writes row ":batch"; batch [":batch"]
+  resolves it; DELETE cleans) — never the batch route; /rows:batch/foo,
+  /rows%3Abatch, /ROWS:batch, /rows:%62atch, /rows:batch/, //rows:batch →
+  silent 404; /rows:batch?x=1 → 200 (query ignored, forwarded by the
+  relay); POST /rows/{id} and POST /rows → silent 404; /rows/ (empty id)
+  and /rows/%zz (bad pct-enc) → silent 404; 257-char id on the single-row
+  route → authenticated 400 bad_id (cap enforced after the gate, §5 law).
+- **CORS front door**: preflight 204 + POST in allow-methods + origin echo
+  + Authorization/Content-Type headers + max-age 86400 + vary: Origin for
+  the allowlisted origin; evil origin and missing origin → 404 with NO
+  access-control-* headers; decorate() preserves status/content-type and
+  adds CORS on real responses; silent-drop 404s DO carry CORS headers for
+  allowlisted origins (browser can classify 'silent' cross-origin —
+  verified live); non-allowlisted actual requests get no CORS headers.
+  Body is streamed to the DO unread (only authorization+content-type
+  forwarded; never inspected — §1 holds). Production preflight verified.
+- **Threat model**: exactly two console statements in worker/src —
+  index.js:82 (backup day + rows COUNT only) and store.js:207 (exception
+  message only); JSON.parse failures are caught inside readJson and never
+  reach the error logger; nonce/ct are only b64Decode'd (PUT validation)
+  and b64Encode'd (echo) — zero interpretation, zero logging of envelope
+  material; hBackup binds them opaquely to D1.
+- **Concurrency/DO serialization**: 18 parallel PUT(ver 2..7)+batch+GET on
+  one row → all 200, every batch element an untorn (ver,nonce) pair from a
+  single submitted version, final ver = 7 (input gate holds across the
+  sync SELECT loop — no awaits inside).
+- **Exotic ids**: NUL/tab/newline/lone-surrogate ids in batch → opaque
+  missing:true, echoed verbatim, no 500; lone-surrogate ids are
+  unwritable via the URL path (encodeURIComponent throws client-side;
+  %ED%A0%80 → decodeURIComponent throws server-side → silent drop), so
+  batch's missing report is consistent; batch ids are RAW strings — the
+  percent-encoded variant of an existing id is a distinct (missing) id.
+- **Regression bound**: git diff 5e9096b..HEAD on worker/src is exactly
+  PROTO_VERSION 4.3, BATCH_MAX_IDS, the /rows:batch route entry, hBatchGet,
+  and allow-methods += POST — bootstrap/rewrap/put/delete/backup untouched;
+  hBackup verified live locally (200 {ok,day,rows} with rows ≥ manifest
+  count incl. evt/cmeta; retention prune + 14-day staging sweep present);
+  /version shape unchanged ({"proto":"4.3"} exact, local AND production);
+  /status {photo_pending:0}; manifest {rows:[{id,ver}]} sorted; §9 RMW
+  re-verified (accept echo / stale-ver rebase echo of stored envelope).
+
+**Bottom line: ZERO implementation bugs found in the v4.3 server surface
+(hBatchGet, routing, auth law, CORS relay, threat model, backup) — all five
+findings are spec-truthfulness / documentation drift, of which #1 (the §8
+compat claim refuted by the v4.2 client's own hard gate) is the only one
+with a real user-visible failure mode (stale cached v4.2 pages cannot unlock
+against the 4.3 production worker; a reload heals it).**
+
+Repro material: /tmp/agentc/probe1.mjs (82 checks), probe2.mjs/probe3.mjs
+(raw-socket drain/boundary tests), probe4.mjs (route/exotic-id battery),
+prod.mjs (read-only production probes).
+
+## WAVE-7 AGENT B FINDINGS (2026-10-31, Task 7-B — UI/port audit: view system, TimeGrid port, DnD, CSS)
+
+Method: field-by-field diff against upstream TimeGrid.tsx / TimeGrid subcomponents /
+splitTimeGridEventsPerDay.ts / timeGridMouseHandler.ts / dayGridMouseHandler.ts /
+mouseHelpers / layout.ts / useDayGridEventLayout.ts / splitDayEventsInInterval.ts
+/ PartDayRegularEvent.tsx; geometry verified headless-Chromium (Playwright) against
+the real css/style.css; the 24:00 chain proven with node against js/ical.js itself.
+
+- [BLOCKER] B1. TimeGrid drag-create (or click) at/below the grid bottom writes
+  DTEND T240000 — the client's own parser then rejects the row: the event is
+  saved to the server, vanishes locally with a FALSE "Event saved." toast, and
+  the row is permanently corrupt on the next sync — js/app.js:1487-1490 (newEnd
+  = Math.min(TOTAL_MINUTES, endTargetMinutes + TIMEGRID_INTERVAL) → 1440;
+  getTargetMinutes returns exactly 1440 for relative position 1.0 — pointer at
+  or below the grid bottom, verified numerically), js/app.js:1503-1504 (click
+  path, same), js/app.js:1514-1527 (p2(1440/60) = '24' → time '24:00'),
+  js/app.js:2132 (input type=time sanitizes '24:00' → '' in Chromium — verified
+  — so the stale '24:00' survives in the form model via `timeI.value ||
+  f[which].time`), js/app.js:2368/2373 ('24:00' + ':00'), js/ical.js:190
+  (formatDTValue emits 20261031T240000 with no hour validation) vs js/ical.js:170
+  (parse rejects hh>23 → bad_dt). Proven chain: parseVCalendar of the exact
+  serialized payload throws bad_dt (node repro) → parseEvtPayload → null
+  (calendar-core.js:145-149) → applyRowLocally (app.js:552-558) silently drops
+  the row → "Event saved." (app.js:2411) → autosync flags it corrupt ("never
+  rewritten") → data permanently lost. Upstream dateHelpers.ts getNewTime rolls
+  1440 min to the next day 00:00 (a valid DTEND). Confidence: high (full chain
+  mechanically reproduced).
+- [MAJOR] B2. dragState.moved is never reset on the TimeGrid mousedown path —
+  after ANY drag, plain clicks on timed chips no longer open the popover —
+  js/app.js:2984 (definition), 3081 (the ONLY reset, inside
+  handleDayGridMouseDown AFTER the closest('[data-dnd]') early return — never
+  reached for timegrid targets), 1477/1554/3122/3217 (set true, never cleared
+  on mouseup/renderAll), guard consumed at app.js:1246. Repro: week view →
+  drag-move a timed event → plain-click another timed chip → mouseup result is
+  null but the chip's guard sees stale moved=true → no popover (until the user
+  happens to mousedown on the month grid or the all-day row). Upstream opens
+  the popover via the EVENT_UP callback the handler always fires
+  (timeGridMouseHandler.ts:372-384). Confidence: high.
+- [MAJOR] B3. TimeGrid day-buttons header row is missing the leading
+  .calendar-aside spacer → the header is misaligned from the day columns by
+  exactly the aside width (60 px measured) — js/app.js:1305-1308 (firstRow gets
+  ONLY day buttons) vs upstream TimeGrid.tsx:388-391 ({!isDrawerApp &&
+  <div className="calendar-aside" />}) before dayButtons; the port's own
+  fullday row (app.js:1311-1313) and hour-texts column (css 562-566) DO have
+  the 60px aside. Chromium measurement with the port's CSS and exact DOM:
+  first day button left=0 vs first .timegrid-day column left=60. Today/selected
+  pills highlight the hour-texts gutter instead of the day column.
+  Confidence: high (measured).
+- [MAJOR] B4. scrollToNow runs on EVERY renderAll — the week/day scroll
+  position snaps back to "now" every 60 s autosync, on every window
+  focus/visibilitychange, after every save/delete/calendar-toggle —
+  js/app.js:1377-1383 (rAF scrollToNow inside renderTimeGrid), 531 (syncAll
+  ALWAYS renderAll), 3428-3435 (autosync triggers). Upstream scrolls only on
+  mount (TimeGrid.tsx:353-365, useLayoutEffect with empty deps). Sub-bug: the
+  resize handler's "keep the user's scroll position" (app.js:3400-3408) is a
+  no-op for time-grid views — it restores scrollTop on the OLD detached element
+  captured before renderAll, and the rAF then re-scrolls the new element to
+  now. Confidence: high.
+- [MINOR] B5. All-day row height fixed at 3*28px instead of upstream adaptive
+  actualRows → the "+N more" chip renders entirely BELOW the heading, floating
+  over the first band of the time grid — app.js:1319 + css/style.css:543-547
+  (comment "Proton actualRows max = 3" is wrong) vs TimeGrid.tsx:194
+  (actualRows = max(min(maxRows, numberOfRows + 1), 1) — up to 4) and 443
+  (--h-custom actualRows*dayEventHeight). Measured: chip top 128 == heading
+  bottom == time-grid top. Also reserves 84px with 0 all-day events (upstream
+  28px). Confidence: high (measured).
+- [MINOR] B6. TimeGrid move-ghost for multi-day timed events is drawn from the
+  event's ORIGINAL start minutes, not the per-day part — app.js:1561-1564
+  (startMin = minutesOf(ev.start) + diffMinutes): an event 22:00→01:00(+1d)
+  dragged on its second day ghosts at 22:00 while the visible part starts at
+  00:00. Upstream moves real instants and re-splits per day
+  (timeGridMouseHandler.ts:293-305). Committed move (applyDayShift) is correct
+  — visual only. Confidence: high.
+- [MINOR] B7. partDayChip time-text rule deviates from Proton —
+  app.js:1237-1241 shows "start – end" only when the WHOLE event is ≥ 45 min
+  (wallHours ≥ 0.75); upstream PartDayRegularEvent.tsx:67-73 + dayEventsHelpers
+  always renders the time and hides it VISUALLY (sr-only kept) only when the
+  per-day PART duration < 50 min. Threshold 45 vs 50, whole-event vs per-part,
+  no sr-only fallback. Confidence: high.
+- [MINOR] B8. Month-grid outside-day click does not navigate to that month —
+  js/app.js:1033-1038 (setSelectedDate + renderMonth() with the same viewYM):
+  the selected day is outside the rendered month so nothing visibly changes
+  except the popover; the mini-calendar click (app.js:1683-1687) DOES move
+  viewYM — inconsistent. Upstream derives the month range from the selected
+  date (month of `date`). Confidence: medium-high.
+- [MINOR] B9. createAutoScroll not ported — TimeGrid drags cannot extend past
+  the visible scroll area (upstream domHelpers.ts:58-111 wired at
+  timeGridMouseHandler.ts:99-100/260-261/284; the port's handlers
+  app.js:1471-1509/1547-1576 have none). Confidence: high.
+- [NIT] B10. CSS leftovers/dead rules: dead #daygrid rule (css:256 — element
+  removed in v4.3; the v4.3 comment at 507 even says "was #daygrid");
+  duplicate .view-selector blocks (css:249 v4.2 vs 513 v4.3 — the old one
+  still injects color/font-size into the new segmented control); .shrink-0
+  used at app.js:1305 but never defined; --calendar-aside-width /
+  --calendar-hour-height never defined (fallback-only — used consistently, so
+  hour texts DO align with hour lines: both measured 48px). Confidence: high.
+- [NIT] B11. handleTimeGridMouseDown pairs e.pageX/e.pageY with
+  getBoundingClientRect (client coords) — app.js:1436-1437; safe only because
+  the document never scrolls (html/body height:100%, #layout overflow:hidden).
+  Upstream's own entry uses e.x/e.y while its drag sub-handlers use pageX/pageY
+  — the port inherited the fragile half (as did the v4.2 month port).
+  Confidence: high (fragility, not an active bug).
+- [NIT] B12. Mini-calendar ‹/› buttons labeled "Previous month"/"Next month"
+  (index.html:85-86) but navView navigates by day/week/custom range in those
+  views (app.js:3334-3335 → 861-883). Confidence: high.
+- [NIT] B13. Keyboard shortcuts have no open-overlay guard: with a modal/
+  popover open and focus on a non-field control (e.g. the Save button),
+  d/w/m/y/v/t/n/arrows still switch views underneath (app.js:3382-3398 checks
+  only inField/busy/app-hidden). Confidence: medium.
+- [NIT] B14. Hour-lines container lacks aria-hidden="true" (app.js:1347-1348;
+  upstream HourLines.tsx:6); week start hardcoded Monday (app.js:847) vs
+  upstream locale-based start — consistent port-wide choice, deviation noted.
+  Confidence: high.
+
+Verified OK (no bug found):
+- splitTimeGridEventsPerDay matches upstream field-by-field: clamping
+  (startOfDay(max(start,min))/endOfDay(min(end,max)) ≡ day-string clamp),
+  startTime = minutes-of-start on the start day else 0, endTime =
+  minutes-of-end on the end-instant day else TOTAL_MINUTES, midnight-end skip
+  (`endTime===0 && d!==ev.start.date` ≡ upstream `!isSameDay(start,end)` —
+  proven equivalent on all reachable cases incl. 00:00→00:00 and
+  end-at-midnight-of-min-day), MIN_DURATION=15 floors on both ends.
+- timeGridEventStyles uses the SAME layout() engine; top/height/left/width
+  match DayEvents.tsx getEventsLaidOut exactly (left = column/columns ≡
+  column*(1/columns)); size thresholds exactly match getSize (25-30 sm,
+  20-25 xs, <20 2xs).
+- The DnD child-index invariant HOLDS: columns children = [hourLines,
+  day0..dayN]; each day column's children are exactly the laid-out chips in
+  eventsInDay order (layout() preserves input order; perDay built in
+  timeEvents order) + now-line last with pointer-events:none (index ==
+  eventsInDay.length → guarded at app.js:1452); partDayChip adds no wrapper;
+  the ghost exists only mid-drag.
+- handleTimeGridMouseDown is a faithful port: children[targetDate+1]
+  (+1 hour lines), create-on-container-hit, findContainingParent, MOVE-only
+  for normal events; mathHelpers/domHelpers/dateHelpers verbatim.
+- Month DnD generalization correct: closest('[data-dnd="daygrid"]') +
+  currentGridModel's calendar-time-fullday branch ([timeGridModel.days],
+  numberOfRows=3) recomputes the SAME filter/split/layout order as
+  renderTimeGrid (chip order matches); drawGhost + setHighlight handle the
+  row-is-container case; NO hardcoded days-per-row remains (all use
+  days.length; remaining literal 7s are weekday loops and monthRows only).
+- rAF gridRows measurement cannot loop: chips are position:absolute so row
+  height is flex-driven and independent of chip count (n stabilizes after ≤2
+  renders); renderMonth clears view-root (app.js:984) — the wave-6 duplicate
+  .daygrid-wrap is really gone.
+- navView/setSelectedDate sticky-day logic verified by simulation: Oct 31 →
+  Nov 30 → back Oct 31; Jan 31 → Feb 28 → Mar 31 (navDay assigned directly in
+  the month/year branch, never overwritten; week/day/custom nav and explicit
+  selections DO update it via setSelectedDate).
+- Dark mode: every var(--usage) resolves in both themes (cross-checked
+  programmatically; [data-theme=dark] sits on the same element as :root so
+  composite tokens like --shadow-norm/--calendar-grid-border recompose);
+  color-scheme:dark present; FOUC guard script precedes the stylesheet
+  (index.html:8-19 before :20); toggle persists via LS_THEME.
+- partDayChip: focus-visible ring (css 645-648), Enter/Space popover, CSS
+  ellipsis truncation; now-line ::before dot + today-only; hour texts first
+  hidden (matches HourTexts.tsx:13); .calendar-eventcell absolute inside
+  relative .timegrid-day (measured); .calendar-time-fullday = 84px = 3*28
+  (measured).

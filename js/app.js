@@ -69,6 +69,10 @@ const state = {
   batchOk: true,        // false when the server predates v4.3 (§5.1c fallback)
   syncing: false,       // one background sync at a time (§5.3)
   navDay: null,         // sticky day-of-month for month/year navigation
+  dirty: new Map(),       // row id → mutation generation (A3 race protection)
+  deletedLocally: new Map(), // row id → generation (A3: no resurrect)
+  mutGen: 0,            // bumped on every completed mutation
+  lastCorruptCount: 0,  // A5: suppress repeated corrupt toasts
 };
 
 /** Set the selected date everywhere (state + sticky nav day). */
@@ -80,6 +84,12 @@ function setSelectedDate(day) {
 /* ---------------- tiny DOM helpers ---------------- */
 
 const $ = (sel) => document.querySelector(sel);
+
+/** Wave-7 A11: localStorage can throw (quota / privacy mode) — never let a
+ * storage failure brick unlock or fake a sync error. */
+function safeSetItem(k, v) {
+  try { localStorage.setItem(k, v); } catch { /* ignore */ }
+}
 
 /** Create an element with class/props/children (no innerHTML for data). */
 function el(tag, cls, props = {}) {
@@ -100,11 +110,15 @@ function toast(msg, kind = 'info', ms = 4200) {
   setTimeout(() => t.remove(), ms);
 }
 
+/* Wave-7 A12: busy is a DEPTH counter — overlapping mutations each increment;
+ * the overlay hides only when the LAST one finishes. */
+let busyDepth = 0;
 function setBusy(busy, msg) {
-  state.busy = busy;
+  busyDepth = Math.max(0, busyDepth + (busy ? 1 : -1));
+  state.busy = busyDepth > 0;
   const bar = $('#syncbar');
-  bar.hidden = !busy;
-  if (busy) $('#syncmsg').textContent = msg || 'Working…';
+  bar.hidden = busyDepth === 0;
+  if (busyDepth > 0) $('#syncmsg').textContent = msg || 'Working…';
 }
 
 /* ---------------- overlay stack (Escape closes topmost) ---------------- */
@@ -234,7 +248,7 @@ function loadCalVis() {
 function saveCalVis() {
   const o = {};
   for (const [uuid, on] of calVis) o[uuid] = on;
-  localStorage.setItem(LS_CALVIS, JSON.stringify(o));
+  safeSetItem(LS_CALVIS, JSON.stringify(o)); // A11: never throws
 }
 let calVis = loadCalVis() || new Map();
 const calVisible = new Set();
@@ -256,13 +270,13 @@ function ingestParams() {
   );
   const setup = hash.get('setup') || params.get('setup');
   if (setup && /^[0-9a-f]{64}$/.test(setup)) {
-    localStorage.setItem(LS_TOKEN, setup);
+    safeSetItem(LS_TOKEN, setup);
     toast('Provisioning code stored in this browser.', 'ok');
   } else if (setup) {
     toast('Ignored invalid provisioning code (must be 64 lowercase hex chars).', 'err');
   }
   const srv = hash.get('server') || params.get('server');
-  if (srv && /^https?:\/\//.test(srv)) localStorage.setItem(LS_SERVER, srv.replace(/\/+$/, ''));
+  if (srv && /^https?:\/\//.test(srv)) safeSetItem(LS_SERVER, srv.replace(/\/+$/, ''));
   if (setup || srv) history.replaceState(null, '', location.pathname);
 }
 
@@ -273,7 +287,7 @@ async function unlock() {
   const token = localStorage.getItem(LS_TOKEN);
   const password = $('#password').value;
   const url = $('#server').value.trim().replace(/\/+$/, '');
-  localStorage.setItem(LS_SERVER, url);
+  safeSetItem(LS_SERVER, url); // A11: a storage quota error must not brick login
   $('#login-msg').textContent = '';
   if (!token) {
     $('#login-msg').textContent = 'No provisioning code in this browser — paste one below first.';
@@ -378,15 +392,29 @@ async function fetchRow(id) {
   return { ver: env.ver, payload };
 }
 
-/** Ingest one decrypted envelope into state (failure-tolerant, per-row). */
+/** Ingest one decrypted envelope into state (failure-tolerant, per-row).
+ * Wave-7 A3: vers are monotonic server-side — a batch response OLDER than a
+ * just-completed local RMW (stale manifest snapshot racing a mutation) must
+ * NOT roll the local state back. Rows the user mutated are also protected by
+ * the dirty set at the syncAll cleanup below. */
 async function ingestRow(id, ver, nonce, ct) {
+  const localEvt = state.evt.get(id);
+  if (localEvt && Number.isInteger(ver) && localEvt.ver >= ver && !state.corrupt.has(id)) {
+    return; // stale envelope — keep the fresher local state
+  }
+  const cu = core.parseCmetaId(id);
+  if (cu) {
+    const localCal = state.cals.get(cu);
+    if (localCal && Number.isInteger(ver) && localCal.ver >= ver && !state.corrupt.has(id)) {
+      return;
+    }
+  }
   let payload;
   try {
     payload = await decryptRow(state.rowKey, id, ver, nonce, ct);
   } catch {
     state.corrupt.set(id, 'decrypt_failed');
     state.evt.delete(id);
-    const cu = core.parseCmetaId(id);
     if (cu) state.cals.delete(cu);
     return;
   }
@@ -400,15 +428,14 @@ async function ingestRow(id, ver, nonce, ct) {
       state.corrupt.delete(id);
     }
   } else {
-    const uuid = core.parseCmetaId(id);
     let meta = null;
     try { meta = JSON.parse(payload); } catch { /* corrupt */ }
     const v = core.validateCalendarMeta(meta);
-    if (!uuid || !v) {
+    if (!cu || !v) {
       state.corrupt.set(id, 'bad_payload');
-      if (uuid) state.cals.delete(uuid);
+      if (cu) state.cals.delete(cu);
     } else {
-      state.cals.set(uuid, { ver, meta: v });
+      state.cals.set(cu, { ver, meta: v });
       state.corrupt.delete(id);
     }
   }
@@ -418,8 +445,11 @@ async function ingestRow(id, ver, nonce, ct) {
  * Fetch the given row ids into state: one POST /rows:batch (§9b) when the
  * server supports it, else per-row GETs (v4.2 fallback, §5.1c). Individual
  * failures NEVER abort the batch — the row is flagged corrupt instead.
+ * `syncGen` is the mutation generation captured when the sync's manifest
+ * request was ISSUED: rows mutated after that (dirty gen > syncGen) may be
+ * absent from the snapshot legitimately and must be kept locally (A3).
  */
-async function fetchRowsIntoState(ids) {
+async function fetchRowsIntoState(ids, syncGen) {
   let envelopes = null;
   if (state.batchOk && ids.length > 0) {
     try {
@@ -436,20 +466,36 @@ async function fetchRowsIntoState(ids) {
     }
   }
   if (!envelopes) {
+    // Wave-7 A8: per-row fallback — ONE failed GET (network/500) must not
+    // abort the whole set; the failed row is simply retried next sync.
     envelopes = await Promise.all(ids.map(async (id) => {
-      const env = await state.api.getRow(id); // null when missing
-      return env || { id, missing: true };
+      try {
+        const env = await state.api.getRow(id); // null when missing
+        return env || { id, missing: true };
+      } catch {
+        return { id, skip: true };
+      }
     }));
   }
   for (const env of envelopes) {
-    if (!env || !env.id) continue;
+    if (!env || !env.id || env.skip) continue;
     if (env.missing) {
-      state.evt.delete(env.id);
-      state.corrupt.delete(env.id);
-      const cu = core.parseCmetaId(env.id);
-      if (cu) state.cals.delete(cu);
+      // A3: keep a row ONLY if it was mutated after the manifest request was
+      // issued (dirty gen > syncGen) — its absence from the snapshot is then
+      // expected, not a server-side delete.
+      const dirtyGen = state.dirty.get(env.id);
+      if (!(dirtyGen !== undefined && dirtyGen > syncGen)) {
+        state.evt.delete(env.id);
+        state.corrupt.delete(env.id);
+        const cu = core.parseCmetaId(env.id);
+        if (cu) state.cals.delete(cu);
+      }
+      state.deletedLocally.delete(env.id); // confirmed gone server-side
       continue;
     }
+    // A3: a row deleted locally this session must not be resurrected by a
+    // stale batch response (the server confirms the delete next sync).
+    if (state.deletedLocally.has(env.id)) continue;
     await ingestRow(env.id, env.ver, env.nonce, env.ct);
   }
 }
@@ -458,16 +504,24 @@ async function fetchRowsIntoState(ids) {
  * v4.3 §5.1 sync — READ-ONLY, failure-tolerant, always renders.
  * 1 request when nothing changed; 2 when anything did. Never writes rows;
  * never lets one bad row (corrupt/unparseable) abort the others.
+ * Wave-7 A3/A6/A7: races with mutations are defused via the monotonic-ver
+ * skip in ingestRow + the dirty set below; the bootstrap only fires when the
+ * MANIFEST (not local state) has no evt/cmeta rows; a lock() during an
+ * in-flight sync aborts it silently instead of throwing on null state.
  */
 async function syncAll() {
   if (!state.api || state.syncing) return;
   state.syncing = true;
+  const api = state.api; // captured: detect lock() during this sync (A7)
+  const syncGen = state.mutGen; // A3: mutations AFTER this are newer than the snapshot
   const errors = [];
   try {
-    const manifest = await state.api.getManifest();
+    const manifest = await api.getManifest();
+    if (state.api !== api) return; // locked while awaiting — abort silently
     const rows = manifest.rows || [];
     const seen = new Set();
     const toFetch = [];
+    let evtOrCmetaOnServer = 0;
 
     for (const r of rows) {
       const id = r.id;
@@ -475,10 +529,12 @@ async function syncAll() {
       // never read, never written, ignored entirely.
       if (core.parseEvtId(id)) {
         seen.add(id);
+        evtOrCmetaOnServer++;
         const local = state.evt.get(id);
         if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
       } else if (core.parseCmetaId(id)) {
         seen.add(id);
+        evtOrCmetaOnServer++;
         const uuid = core.parseCmetaId(id);
         const local = state.cals.get(uuid);
         if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
@@ -488,16 +544,30 @@ async function syncAll() {
     if (toFetch.length > 0) {
       // ≤256 ids per call (protocol.md §9b); chunk larger sets.
       for (let i = 0; i < toFetch.length; i += 256) {
-        await fetchRowsIntoState(toFetch.slice(i, i + 256));
+        await fetchRowsIntoState(toFetch.slice(i, i + 256), syncGen);
+        if (state.api !== api) return; // locked mid-sync — abort silently
       }
     }
 
     // Locally-known rows absent from the manifest were deleted elsewhere.
-    for (const id of [...state.evt.keys()]) if (!seen.has(id)) state.evt.delete(id);
+    // A3: rows mutated AFTER the manifest request was issued (dirty gen >
+    // syncGen) may legitimately be absent — keep ONLY those. (A session-long
+    // protection was a bug: it masked genuine deletions for the whole
+    // session — wave-7 A9 regression caught it.)
+    for (const id of [...state.evt.keys()]) {
+      const dg = state.dirty.get(id);
+      if (!seen.has(id) && !(dg !== undefined && dg > syncGen)) state.evt.delete(id);
+    }
     for (const [uuid] of state.cals) {
-      if (!seen.has(core.cmetaId(uuid))) state.cals.delete(uuid);
+      const cid = core.cmetaId(uuid);
+      const dg = state.dirty.get(cid);
+      if (!seen.has(cid) && !(dg !== undefined && dg > syncGen)) state.cals.delete(uuid);
     }
     for (const id of [...state.corrupt.keys()]) if (!seen.has(id)) state.corrupt.delete(id);
+    // Dirty rows the manifest now confirms are no longer dirty.
+    for (const [id] of [...state.dirty.entries()]) if (seen.has(id)) state.dirty.delete(id);
+    // Locally-deleted rows the manifest no longer lists are confirmed.
+    for (const id of [...state.deletedLocally.keys()]) if (!seen.has(id)) state.deletedLocally.delete(id);
 
     /* ---- calendar visibility: unchecking persists; new calendars visible ---- */
     const stored = loadCalVis();
@@ -509,29 +579,41 @@ async function syncAll() {
     }
     syncCalVisible();
 
-    /* ---- default calendar bootstrap (Proton DEFAULT_CALENDAR) ---- */
-    if (state.cals.size === 0 && state.evt.size === 0) {
+    /* ---- default calendar bootstrap (Proton DEFAULT_CALENDAR).
+     * A6: gated on the MANIFEST, not local state — an all-corrupt store or a
+     * v4.2 leftover with only `cal:` bucket rows must NOT trigger a write. */
+    if (evtOrCmetaOnServer === 0) {
       const uuid = crypto.randomUUID();
       const meta = core.newCalendarMeta('My calendar', core.PALETTE[0]);
       const res = await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), {
-        allowCreate: true, local: null,
+        allowCreate: true, local: { ver: 0, payload: null },
       });
-      applyRowLocally(core.cmetaId(uuid), res.ver, res.text);
+      if (state.api !== api) return; // locked — abort silently
+      applyRowLocally(core.cmetaId(uuid), res.ver, res.text); // marks dirty
       calVis.set(uuid, true);
       saveCalVis();
       syncCalVisible();
     }
   } catch (e) {
-    errors.push(e);
+    if (state.api === api) errors.push(e); // a locked session swallows it
   } finally {
     state.syncing = false;
   }
 
+  if (state.api !== api) return; // locked — do not render/toast on dead state
+
   // §5.1d: render ALWAYS runs after a sync, with whatever succeeded.
-  renderAll();
-  if (state.corrupt.size > 0) {
+  // A13: a render bug must not reject the sync (unlock shows "Login failed").
+  try {
+    renderAll();
+  } catch (e) {
+    console.error('render error after sync: ' + (e && e.message ? e.message : String(e)));
+  }
+  // A5: only toast when the unreadable-row count CHANGED (no 60 s spam).
+  if (state.corrupt.size > 0 && state.corrupt.size !== state.lastCorruptCount) {
     toast(`${state.corrupt.size} row(s) could not be decrypted — flagged, never rewritten.`, 'warn', 8000);
   }
+  state.lastCorruptCount = state.corrupt.size;
   if (errors.length > 0) {
     const e = errors[0];
     toast('Sync problem: ' + (e && e.message ? e.message : String(e)) + ' — will retry automatically.', 'warn', 7000);
@@ -547,9 +629,12 @@ function autosync() {
 
 /**
  * v4.3 §5.2c — after an accepted RMW, update local state from the payload we
- * just wrote (no re-fetch, no sync) and re-render.
+ * just wrote (no re-fetch, no sync) and re-render. The row is marked dirty
+ * (with the current mutation generation) so a sync whose manifest snapshot
+ * predates the mutation cannot roll it back or delete it (A3).
  */
 function applyRowLocally(id, ver, text) {
+  state.dirty.set(id, ++state.mutGen);
   if (core.parseEvtId(id)) {
     const parsed = core.parseEvtPayload(text);
     if (parsed) {
@@ -583,6 +668,7 @@ function applyRowLocally(id, ver, text) {
 async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
   let ver;
   let payload;
+  const startedAsCreate = !!(local && local.ver === 0);
   if (local && Number.isInteger(local.ver) && local.ver >= 0 && local.ver <= 4294967295) {
     // v4.3 fast path: local.ver === 0 means "row known absent" (create path
     // straight after a sync-verified manifest); no pre-GET is needed.
@@ -610,6 +696,11 @@ async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
       return { ver: newVer, text };
     }
     // Rebased: refresh from the server and re-apply the pure build.
+    // A10: a CREATE that rebased means the row already exists (someone else
+    // created it) — never overwrite a foreign row; fail loudly instead.
+    if (startedAsCreate && attempt === 0) {
+      throw new Error('exists: ' + id);
+    }
     const res = await fetchRow(id);
     if (res.missing) {
       // Deleted concurrently (e.g. calendar deleted elsewhere): an allowed
@@ -821,6 +912,10 @@ function dayGridRowLayout(eventsInRow, numberOfRows) {
 function renderAll() {
   state.today = state.today || core.localToday();
   const root = viewRoot();
+  // B4: a data-refresh rebuild replaces the scroll container — carry the
+  // user's scroll position across the rebuild instead of snapping to 0.
+  const prevScroll = document.querySelector('.calendar-time-grid');
+  const prevTop = prevScroll ? prevScroll.scrollTop : null;
   root.replaceChildren();
   if (state.view === 'month') {
     renderMonth(root);
@@ -828,6 +923,10 @@ function renderAll() {
     renderYear(root);
   } else {
     renderTimeGrid(root, viewRangeDays());
+    if (prevTop !== null) {
+      const next = document.querySelector('.calendar-time-grid');
+      if (next) next.scrollTop = prevTop;
+    }
   }
   renderToolbar();
   renderMiniCalendar();
@@ -1032,6 +1131,9 @@ function renderMonth(root) {
       });
       b.addEventListener('click', () => {
         setSelectedDate(day);
+        // B8: clicking an OUTSIDE-month day navigates to its month (the
+        // mini calendar does the same); in-month clicks keep the view.
+        if (!inMonth) state.viewYM = day.slice(0, 7);
         renderMonth();
         renderMiniCalendar();
         openMorePopover(day, b.getBoundingClientRect());
@@ -1159,7 +1261,7 @@ function nowMinutes() {
 
 /** Rendered-model cache for the time-grid mouse handler (Proton passes the
  * same data into handleTimeGridMouseDown at mousedown time). */
-const timeGridModel = { days: [], timeEvents: [], perDay: new Map(), gridEl: null };
+const timeGridModel = { days: [], timeEvents: [], perDay: new Map(), gridEl: null, renderedSig: null };
 
 /**
  * splitTimeGridEventsPerDay.ts port (verbatim semantics): events → per-day
@@ -1210,6 +1312,7 @@ function timeGridEventStyles(eventsInDay) {
     return {
       idx: eventsInDay[i].idx,
       size,
+      duration,
       style: {
         top: toP(start / TOTAL_MINUTES),
         left: toP(column / columns),
@@ -1223,7 +1326,6 @@ function timeGridEventStyles(eventsInDay) {
 /** One part-day chip (Proton PartDayEvent / PartDayRegularEvent). */
 function partDayChip(ls, ev) {
   const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
-  const duration = ls.style.height; // keep style pure; duration text from ev
   const chip = el('div', 'calendar-eventcell' +
     (ls.size ? ' size-' + ls.size : '') +
     (ev.isCancelled ? ' isCancelled' : ''), {
@@ -1234,9 +1336,11 @@ function partDayChip(ls, ev) {
     role: 'listitem',
   });
   const inner = el('div', 'calendar-eventcell-inner');
+  // B7 (upstream PartDayRegularEvent): the full "start – end" range only
+  // fits when the part is ≥ 50 minutes; shorter chips show the start only.
   const timeText = ev.start.time === null
     ? ''
-    : showTime(ev.start) + (ev.end.time !== null && wallHours(ev.start, ev.end) >= 0.75
+    : showTime(ev.start) + (ev.end.time !== null && (ls.duration || 0) >= 50
         ? ' – ' + showTime(ev.end)
         : '');
   if (timeText) inner.appendChild(el('div', 'calendar-eventcell-time', { text: timeText }));
@@ -1302,8 +1406,11 @@ function renderTimeGrid(root, days) {
   const viewClass = days.length > 2 ? 'is-week-view' : 'is-day-view';
 
   /* ---- heading: day buttons row + all-day row (Proton calendar-row-heading) ---- */
-  const heading = el('div', 'calendar-row-heading shrink-0 ' + viewClass);
+  const heading = el('div', 'calendar-row-heading ' + viewClass);
   const firstRow = el('div', 'calendar-first-row-heading');
+  // Wave-7 B3: the leading aside spacer (60px) keeps the day buttons ALIGNED
+  // with the day columns (upstream TimeGrid renders .calendar-aside first).
+  firstRow.appendChild(el('div', 'calendar-aside calendar-first-row-spacer'));
   for (const day of days) firstRow.appendChild(timeGridDayButton(day, today));
   heading.appendChild(firstRow);
 
@@ -1317,6 +1424,12 @@ function renderTimeGrid(root, days) {
   });
   const eventsInRow = splitDayEventsInInterval(dayEvents, days[0], days[days.length - 1]);
   const laid = dayGridRowLayout(eventsInRow, 3); // Proton: numberOfRows = 3
+  // Wave-7 B5: upstream actualRows = max(min(maxRows, numberOfRows + 1), 1)
+  // — the all-day row grows with content (up to 4 chip rows) instead of the
+  // fixed 84px, and the "+N more" chip stays INSIDE the heading.
+  const actualRows = Math.max(Math.min(laid.maxRows || 1, 3 + 1), 1);
+  fdList.style.height = actualRows * DAY_EVENT_HEIGHT + 'px';
+  fdList.style.minHeight = DAY_EVENT_HEIGHT + 'px';
   for (const s of laid.styles) {
     if (s.type === 'more') {
       fdList.appendChild(moreChip(s.dayIdx, days, laid.summary, dayEvents, eventsInRow, 3));
@@ -1344,7 +1457,7 @@ function renderTimeGrid(root, days) {
     hourTexts.appendChild(block);
   }
   const columns = el('div', 'calendar-grid-gridcells timegrid-columns');
-  const hoursEl = el('div', 'calendar-grid-hours');
+  const hoursEl = el('div', 'calendar-grid-hours', { 'aria-hidden': 'true' }); // B14 (upstream HourLines)
   for (let h = 0; h < 24; h++) hoursEl.appendChild(el('div', 'calendar-grid-hourLine'));
   columns.appendChild(hoursEl);
   const perDay = splitTimeGridEventsPerDay(timeEvents, days);
@@ -1373,14 +1486,20 @@ function renderTimeGrid(root, days) {
   timeGridModel.perDay = perDay;
   timeGridModel.gridEl = columns;
 
-  // Proton useLayoutEffect: scrollToNow on mount (scrollToTime port).
-  requestAnimationFrame(() => {
-    const timeTop = nowMinutes() / TOTAL_MINUTES;
-    const timeRect = columns.getBoundingClientRect();
-    const headingRect = heading.getBoundingClientRect();
-    const scrollRect = scroll.getBoundingClientRect();
-    scroll.scrollTop = timeRect.height * timeTop - scrollRect.height / 2 + headingRect.height / 2;
-  });
+  // Proton useLayoutEffect: scrollToNow on MOUNT. Wave-7 B4: only when the
+  // view/range actually CHANGED (user navigation) — a data refresh (autosync
+  // every 60 s) must never yank the scroll position.
+  const sig = state.view + '|' + days[0] + '|' + days[days.length - 1];
+  if (sig !== timeGridModel.renderedSig) {
+    timeGridModel.renderedSig = sig;
+    requestAnimationFrame(() => {
+      const timeTop = nowMinutes() / TOTAL_MINUTES;
+      const timeRect = columns.getBoundingClientRect();
+      const headingRect = heading.getBoundingClientRect();
+      const scrollRect = scroll.getBoundingClientRect();
+      scroll.scrollTop = timeRect.height * timeTop - scrollRect.height / 2 + headingRect.height / 2;
+    });
+  }
 }
 
 /* ---- TimeGrid interactions: timeGridMouseHandler.ts port (GPL-3.0) ---- */
@@ -1432,6 +1551,11 @@ function handleTimeGridMouseDown(e) {
   const days = timeGridModel.days;
   if (!days.length) return;
 
+  // Wave-7 B2: reset the drag marker on EVERY mousedown (the day-grid
+  // handler does the same) — without this, after one drag every later plain
+  // click on a chip was still treated as a drag and never opened the popover.
+  dragState.moved = false;
+
   const rect = gridEl.getBoundingClientRect();
   const targetDate = getTargetIndex(e.pageX, rect.left, rect.width, days.length);
   const targetMinutes = getTargetMinutes(e.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
@@ -1458,12 +1582,31 @@ function handleTimeGridMouseDown(e) {
   createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days });
 }
 
+/** B9: createAutoScroll port (upstream mouseHelpers/domHelpers.ts) — while
+ * dragging near the time-grid's top/bottom edge, scroll it so drags can
+ * extend beyond the visible area. Returns a stop() handle. */
+function createTimeGridAutoScroll() {
+  const scrollEl = document.querySelector('.calendar-time-grid');
+  if (!scrollEl) return { onMouseMove: () => {}, onMouseUp: () => {} };
+  let stopped = false;
+  const EDGE = 40; // px
+  const onMouseMove = (e) => {
+    if (stopped) return;
+    const r = scrollEl.getBoundingClientRect();
+    if (e.clientY < r.top + EDGE) scrollEl.scrollTop -= 12;
+    else if (e.clientY > r.bottom - EDGE) scrollEl.scrollTop += 12;
+  };
+  const onMouseUp = () => { stopped = true; };
+  return { onMouseMove, onMouseUp };
+}
+
 /** timeGridMouseHandler.ts createDragCreateMouseDown (ported). */
 function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
   const startDate = days[targetDate];
   let endTargetMinutes;
   let oldMouseY = -1; // CREATE_STATE_INIT
   let result = null;
+  const autoScroll = createTimeGridAutoScroll();
 
   e.preventDefault();
   e.stopPropagation();
@@ -1471,6 +1614,7 @@ function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
   const handleMouseMove = (me) => {
     me.preventDefault();
     me.stopPropagation();
+    autoScroll.onMouseMove(me);
     if (oldMouseY === -1) oldMouseY = me.pageY;
     if (oldMouseY !== -2 && Math.abs(oldMouseY - me.pageY) < CREATE_SENSITIVITY) return;
     oldMouseY = -2; // CREATE_STATE_ACTIVE
@@ -1487,7 +1631,9 @@ function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
       const newEnd = Math.min(TOTAL_MINUTES, endTargetMinutes + TIMEGRID_INTERVAL);
       result = { startMinutes: targetMinutes, endMinutes: newEnd };
     } else {
-      result = { startMinutes: endTargetMinutes, endMinutes: targetMinutes };
+      // Dragged upwards: the end is ABOVE the start — swap (Proton isAfter
+      // logic) and clamp so no value exceeds the day (B1).
+      result = { startMinutes: endTargetMinutes, endMinutes: Math.min(targetMinutes, TOTAL_MINUTES) };
     }
     drawTimeGridGhost(startDate, result.startMinutes, result.endMinutes, '', true);
   };
@@ -1495,13 +1641,17 @@ function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
   const handleMouseUp = () => {
     document.removeEventListener('mouseup', handleMouseUp, true);
     document.removeEventListener('mousemove', handleMouseMove, true);
+    autoScroll.onMouseUp();
     removeTimeGridGhost();
     if (result) {
       beginCreateTimeGrid(startDate, result.startMinutes, result.endMinutes);
     } else {
-      // Simple click: default 30-minute event at the snapped time.
-      const end = Math.min(TOTAL_MINUTES, targetMinutes + 30);
-      beginCreateTimeGrid(startDate, targetMinutes, Math.max(end, targetMinutes + MIN_DURATION));
+      // Simple click: default 30-minute event at the snapped time. Clamp the
+      // start so the 30-minute window cannot reach 24:00 (B1) — the last
+      // startable minute is 23:30.
+      const startM = Math.min(targetMinutes, TOTAL_MINUTES - 30);
+      const endM = Math.min(TOTAL_MINUTES, startM + 30);
+      beginCreateTimeGrid(startDate, startM, Math.max(endM, startM + MIN_DURATION));
     }
   };
 
@@ -1510,12 +1660,25 @@ function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
   blockClick();
 }
 
-/** Open the editor for a timed event created on the time grid. */
+/** Open the editor for a timed event created on the time grid.
+ * Wave-7 B1 (BLOCKER): minutes ≥ 1440 must CARRY into the next day (Proton
+ * getNewTime semantics) — writing a '24:00' wall time produced DTEND
+ * T240000, which the strict parser rejects → a corrupt row with a false
+ * success toast. */
 function beginCreateTimeGrid(day, startMinutes, endMinutes) {
   closeAllOverlays();
   const uuid = defaultCalendarUuid();
   if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
   const p2 = (n) => String(Math.floor(n)).padStart(2, '0');
+  const norm = (mins) => {
+    let d = day;
+    let m = Math.round(mins);
+    while (m >= 1440) { d = shiftDay(d, 1); m -= 1440; } // carry (Proton roll)
+    while (m < 0) { d = shiftDay(d, -1); m += 1440; }
+    return { date: d, time: p2(m / 60) + ':' + p2(m % 60) };
+  };
+  const start = norm(startMinutes);
+  const end = norm(endMinutes);
   editor.mode = 'create';
   editor.scope = null;
   editor.target = null;
@@ -1523,8 +1686,8 @@ function beginCreateTimeGrid(day, startMinutes, endMinutes) {
   openEditor({
     title: '',
     allDay: false,
-    start: { date: day, time: p2(startMinutes / 60) + ':' + p2(startMinutes % 60) },
-    end: { date: day, time: p2(endMinutes / 60) + ':' + p2(endMinutes % 60) },
+    start,
+    end,
     freq: '',
     calUuid: uuid,
     location: '',
@@ -1540,11 +1703,13 @@ function createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days }) {
   let currentTargetDate;
   let currentTargetMinutes;
   let result = null;
+  const autoScroll = createTimeGridAutoScroll();
 
   e.preventDefault();
   e.stopPropagation();
 
   const handleMouseMove = (me) => {
+    autoScroll.onMouseMove(me);
     const rect = timeGridModel.gridEl.getBoundingClientRect();
     currentTargetDate = getTargetIndex(me.pageX, rect.left, rect.width, days.length);
     currentTargetMinutes = getTargetMinutes(me.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
@@ -1558,15 +1723,20 @@ function createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days }) {
     result = { diffDate, diffMinutes };
 
     // Ghost at the shifted position (same day column as the pointer).
+    // B6: multi-day timed events render per-day PARTS — the ghost must use
+    // the part's start minutes on the pointer's day (0 for continuation
+    // days), not the event's original start minutes.
     const day = days[Math.max(0, Math.min(days.length - 1, currentTargetDate))];
-    const startMin = Math.max(0, minutesOf(ev.start) + diffMinutes);
-    const endMin = Math.min(TOTAL_MINUTES, minutesOf(ev.end) + diffMinutes);
-    drawTimeGridGhost(day, startMin, Math.max(endMin, startMin + MIN_DURATION), ev.title || '', false);
+    const partStart = day === ev.start.date ? minutesOf(ev.start) : 0;
+    const startMin = Math.max(0, partStart + diffMinutes);
+    const partEnd = day === ev.spanLast ? Math.min(TOTAL_MINUTES, minutesOf(ev.end) + diffMinutes) : TOTAL_MINUTES;
+    drawTimeGridGhost(day, startMin, Math.max(partEnd, startMin + MIN_DURATION), ev.title || '', false);
   };
 
   const handleMouseUp = () => {
     document.removeEventListener('mouseup', handleMouseUp, true);
     document.removeEventListener('mousemove', handleMouseMove, true);
+    autoScroll.onMouseUp();
     removeTimeGridGhost();
     timeGridModel.gridEl.querySelectorAll('.isDragging').forEach((n) => n.classList.remove('isDragging'));
     if (result) {
@@ -2417,13 +2587,29 @@ async function saveEvent(form) {
   const rowId = target.rowId;
   const parsed = target.parsed;
   const isExceptionEdit = editor.scope === 'exception';
-  // Calendar MOVE (PROTOCOL-v4.2.md): the calendar uuid is embedded in the
-  // row id, so moving = DELETE the old row + PUT evt:{newcal}:{uid} with the
-  // same UID and ver 1 (the documented move procedure).
+  // A9: guard BOTH calendars up front — a deleted target calendar must not
+  // be resurrected by a plain edit, and a deleted picked calendar must not
+  // silently drop the user's move.
+  if (editor.mode === 'edit') {
+    if (!state.cals.has(target.calUuid)) {
+      throw new Error('calendar_gone: this event\u2019s calendar no longer exists — press Sync and retry');
+    }
+    if (form.calUuid && form.calUuid !== target.calUuid && !state.cals.has(form.calUuid)) {
+      throw new Error('no_calendar: the selected calendar no longer exists — press Sync and retry');
+    }
+  }
+  // Calendar MOVE (protocol.md: the calendar uuid is embedded in the row id,
+  // so moving = PUT evt:{newcal}:{uid} FIRST, then DELETE the old row — the
+  // create-before-delete order guarantees a PUT failure can never LOSE the
+  // event (wave-7 A2); a failed DELETE leaves a visible duplicate instead,
+  // which the next sync reconciles and the user can remove manually).
   if (form.calUuid && form.calUuid !== target.calUuid && state.cals.has(form.calUuid)) {
     let current;
+    const res0 = await fetchRow(rowId);
+    if (res0.missing) throw new Error('not_found: ' + rowId);
+    if (res0.corrupt) throw new Error('row_corrupt: refusing to move a corrupt row');
     try {
-      current = parseEvtPayload((await fetchRow(rowId)).payload);
+      current = core.parseEvtPayload(res0.payload);
     } catch { current = null; }
     if (!current) throw new Error('row_corrupt: refusing to move a corrupt row');
     const events = current.calendar.events;
@@ -2445,14 +2631,32 @@ async function saveEvent(form) {
       sequence: (base.sequence === null || base.sequence === undefined ? 0 : base.sequence) + 1,
       alarms,
     };
+    // Wave-7 A1 (BLOCKER): an exception-scope edit MUST keep (or gain) its
+    // RECURRENCE-ID — without it the row has two masters, fails the v4.2
+    // one-master rule, and the event is destroyed with a success toast.
+    if (isExceptionEdit && target.recId) {
+      upd.recurrenceId = { date: target.recId.date, time: target.recId.time, tz: base.dtstart.tz };
+    }
     if (idx >= 0) events[idx] = upd;
     else events.push(upd);
     const newId = core.evtId(form.calUuid, current.uid);
-    await state.api.deleteRow(rowId);
-    state.evt.delete(rowId);
-    state.corrupt.delete(rowId);
-    const res = await putRowRMW(newId, () => serializeVCalendar(current.calendar), { allowCreate: true });
+    // PUT the new row FIRST (failure here leaves the old row untouched).
+    const res = await putRowRMW(newId, () => serializeVCalendar(current.calendar), {
+      allowCreate: true,
+      local: { ver: 0, payload: null },
+    });
     applyRowLocally(newId, res.ver, res.text);
+    // Then delete the old row (failure here leaves a visible duplicate —
+    // recoverable, never a loss).
+    try {
+      await state.api.deleteRow(rowId);
+      state.evt.delete(rowId);
+      state.corrupt.delete(rowId);
+      state.dirty.delete(rowId);
+      state.deletedLocally.set(rowId, ++state.mutGen); // A3
+    } catch (e) {
+      toast('Moved, but the old copy could not be removed — it will re-appear; delete it manually.', 'warn', 8000);
+    }
     renderAll();
     toast('Event moved and saved.', 'ok', 2000);
     return;
@@ -2552,6 +2756,8 @@ async function deleteEvent(ev, scope) {
     await state.api.deleteRow(rowId);
     state.evt.delete(rowId);
     state.corrupt.delete(rowId);
+    state.dirty.delete(rowId);
+    state.deletedLocally.set(rowId, ++state.mutGen); // A3: stale syncs must not resurrect it
     renderAll();
     toast('Event deleted.', 'ok', 2000);
     return;
@@ -2916,16 +3122,27 @@ function confirmDeleteCalendar(uuid) {
     close();
     try {
       setBusy(true, 'Deleting calendar…');
-      for (const id of [...state.evt.keys()]) {
-        if ((core.parseEvtId(id) || {}).cal === uuid) {
-          await state.api.deleteRow(id);
-          state.evt.delete(id);
-        }
+      // A4: iterate BOTH the parsed rows AND the corrupt-flagged rows of this
+      // calendar — corrupt evt rows live only in state.corrupt and were
+      // silently leaked server-side before.
+      const calRowIds = [...state.evt.keys()]
+        .filter((id) => (core.parseEvtId(id) || {}).cal === uuid);
+      const corruptRowIds = [...state.corrupt.keys()]
+        .filter((id) => (core.parseEvtId(id) || {}).cal === uuid);
+      for (const id of [...new Set([...calRowIds, ...corruptRowIds])]) {
+        await state.api.deleteRow(id);
+        state.evt.delete(id);
+        state.corrupt.delete(id);
+        state.dirty.delete(id);
+        state.deletedLocally.set(id, ++state.mutGen); // A3
       }
       await state.api.deleteRow(core.cmetaId(uuid));
       state.cals.delete(uuid);
       state.corrupt.delete(core.cmetaId(uuid));
+      state.dirty.delete(core.cmetaId(uuid));
+      state.deletedLocally.set(core.cmetaId(uuid), ++state.mutGen);
       calVisible.delete(uuid);
+      calVis.delete(uuid);
       saveCalVis();
       syncCalVisible();
       renderAll();
@@ -3378,7 +3595,8 @@ function bind() {
   }, true);
 
   // Keyboard: Escape closes the topmost overlay; n/t/arrows navigate;
-  // d/w/m/y/c switch views (Proton keyboard shortcuts).
+  // d/w/m/y/v switch views (Proton keyboard shortcuts). B13: no shortcuts
+  // while an overlay (modal/popover) is open — except Escape.
   document.addEventListener('keydown', (e) => {
     const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
     if (e.key === 'Escape') {
@@ -3386,6 +3604,7 @@ function bind() {
       return;
     }
     if (inField || state.busy || !state.api || $('#app').hidden) return;
+    if (overlayStack.length > 0) return; // B13
     if (e.key === 'n') { e.preventDefault(); $('#btn-new-event').click(); }
     else if (e.key === 't') { e.preventDefault(); $('#btn-today').click(); }
     else if (e.key === 'd') { e.preventDefault(); setView('day'); }
@@ -3410,7 +3629,7 @@ function bind() {
   $('#btn-paste-setup').addEventListener('click', () => {
     const v = $('#setup-input').value.trim();
     if (/^[0-9a-f]{64}$/.test(v)) {
-      localStorage.setItem(LS_TOKEN, v);
+      safeSetItem(LS_TOKEN, v);
       refreshLoginUi();
       toast('Provisioning code stored.', 'ok');
     } else {
@@ -3425,13 +3644,22 @@ function bind() {
   });
 
   // v4.3 §5.3 autosync: 60 s poll while visible + one sync on refocus.
+  // A15: focus and visibilitychange fire together on tab switches — debounce
+  // so a refocus never triggers two back-to-back syncs.
+  let lastAutosyncAt = 0;
+  const maybeAutosync = () => {
+    const now = Date.now();
+    if (now - lastAutosyncAt < 5000) return; // A15 debounce
+    lastAutosyncAt = now;
+    autosync();
+  };
   setInterval(() => {
     if (document.hidden) return;
     autosync();
   }, AUTOSYNC_MS);
-  window.addEventListener('focus', autosync);
+  window.addEventListener('focus', maybeAutosync);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) autosync();
+    if (!document.hidden) maybeAutosync();
   });
 
   // Keep the now-line and the "today" marker current (day rollover, minute

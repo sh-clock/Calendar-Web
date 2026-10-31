@@ -82,6 +82,8 @@
   --font-weight-bold: 700;
 
   /* calendar (_config.scss of the calendar app) */
+  --calendar-aside-width: 60px;   /* $calendar-aside-width: rem(60) */
+  --calendar-hour-height: max(3rem, calc((100vh - 136px) / 24)); /* $calendar-hour-height */
   --calendar-grid-border: 1px solid var(--border-weak);
   --calendar-gridcell-margin: 10px;
   --calendar-gridcell-gutter: 3px;
@@ -150,6 +152,11 @@ input, select, textarea { font: inherit; color: var(--text-norm); }
 }
 
 main { height: calc(100% - var(--header-height)); }
+/* v4.3 wave-7 B1 root cause: #app must give #layout a DEFINITE height —
+   without it `#layout { height: 100% }` resolved to auto (content height),
+   letting the time grid render 1152px tall with the bottom half below the
+   viewport (clipped by #layout's overflow:hidden, unreachable). */
+#app { height: 100%; }
 #layout { display: flex; height: 100%; overflow: hidden; }
 
 /* ---------- sidebar (width + bg per _navigation.scss / _optionals.scss) ---------- */
@@ -246,14 +253,8 @@ main { height: calc(100% - var(--header-height)); }
   border-bottom: 1px solid var(--border-weak);
 }
 .current-range { margin: 0 0 0 10px; font-size: 20px; font-weight: var(--font-weight-bold); }
-.view-selector {
-  color: var(--text-weak); border: 1px solid var(--border-weak);
-  padding: 4px 12px; border-radius: var(--border-radius-md); font-size: 13px;
-}
-
 /* ---------- month daygrid (applications/calendar/src/app/styles/_daygrid.scss,
    _monthgrid.scss, _eventcell.scss — ported) ---------- */
-#daygrid { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
 .calendar-daygrid-days { display: flex; }
 .calendar-daygrid-days > div {
   flex: 1; text-align: center; padding: 12px 6px; font-size: 17px;
@@ -537,6 +538,8 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
   z-index: 3;
 }
 .calendar-first-row-heading { display: flex; }
+/* B3 (upstream _aside.scss): the aside column is 60px everywhere. */
+.calendar-aside { width: var(--calendar-aside-width, 60px); flex: 0 0 var(--calendar-aside-width, 60px); }
 .calendar-first-row-heading .calendar-grid-heading { flex: 1; }
 .calendar-fullday-row { display: flex; }
 .calendar-fullday-row .flex-1 { flex: 1; min-width: 0; position: relative; }

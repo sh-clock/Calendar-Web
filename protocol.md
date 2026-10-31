@@ -72,8 +72,7 @@ Row id grammar (unchanged):
 | `GET /status`            | ui/clock | — | `{"photo_pending":0}` (calendar scope) |
 | `GET /rows`              | ui/clock | — | manifest `{rows:[{id,ver}]}`           |
 | `GET /rows/{id}`         | ui/clock | — | envelope or 404 `{error:"not_found"}`  |
-| `POST /rows:batch`       | ui/clock | NEW | §9b                                    |
-| `PUT /rows/{id}`         | ui     | —   | RMW arbitration, §9                    |
+| `POST /rows:batch`       | ui/clock | NEW | §9b                                    || `PUT /rows/{id}`         | ui     | —   | RMW arbitration, §9                    |
 | `DELETE /rows/{id}`      | ui     | —   | idempotent                             |
 | `PUT /bootstrap`         | admin  | —   | §8 (unchanged)                         |
 | `PUT /bootstrap/rewrap`  | admin  | —   | §20 Type A rotation (unchanged)        |
@@ -82,9 +81,10 @@ Row id grammar (unchanged):
 ### §9b `POST /rows:batch` (NEW in v4.3)
 
 Request body (JSON): `{"ids": [string, …]}` — at most **256** ids, each a
-non-empty string ≤ 256 chars (the §5 authenticated-malformed cap), all
-unique. Violations → `400 {error:"bad_ids"}` (count) / `bad_id` (shape).
-Response 200: `{"rows": [ … ]}` where each element is, **in request
+non-empty string ≤ 256 UTF-16 code units (the v4.1 §5 authenticated-
+malformed id cap, carried over verbatim), all unique. Violations → `400 {error:"bad_ids"}`
+(count/uniqueness) / `bad_id` (shape) / `bad_json` / `bad_body` (malformed
+body). Response 200: `{"rows": [ … ]}` where each element is, **in request
 order**:
 - `{"id", "ver", "nonce", "ct"}` — the full envelope, byte-identical to
   what `GET /rows/{id}` would return, or
@@ -95,7 +95,8 @@ relays envelopes; it never touches `nonce`/`ct`. It exists so that a sync
 that discovers N changed rows costs ONE request instead of N (v4.2's
 per-row GETs were the amplification root cause together with buckets).
 A v4.2 worker returns the silent-drop empty 404 for this route; v4.3
-clients MUST fall back to per-row `GET /rows/{id}` in that case (§11).
+clients fall back to per-row `GET /rows/{id}` (see §5.1c and §8 for the
+browser-vs-non-browser nuance).
 
 ### §9 PUT /rows/{id} (UNCHANGED semantics, restated)
 
@@ -124,7 +125,8 @@ Reads and writes are **decoupled**:
       id is unknown, or the row is flagged corrupt → retry), collect it.
    c. If any: `POST /rows:batch` with the collected ids (≤256 per call;
       chunk larger sets). Degrade to per-row GETs when the server does
-      not implement §9b (empty-404 detection).
+      not implement §9b — in the browser this is driven by the §5.4 version
+      probe; the empty-404 detection only applies to non-CORS clients (§8).
    d. Decrypt+parse each returned row **individually**; a failing row is
       flagged corrupt and NEVER blocks the others. `missing` rows are
       dropped from local state. Render ALWAYS runs after a sync, with
@@ -184,9 +186,20 @@ documented v4.1 trade-off; v4.3 does not change it.
 
 ## 8. Compatibility
 
-- v4.3 worker ↔ v4.2 client: works (batch route simply unused).
-- v4.2 worker ↔ v4.3 client: works with per-row GET fallback (§5.1c);
-  bucket rows in old manifests are ignored.
+- v4.3 worker ↔ v4.3 client: full behaviour (batch sync).
+- **v4.3 worker ↔ v4.2 client: the v4.2 CLIENT hard-gates at unlock on
+  `proto === "4.2"` and REFUSES to unlock against a 4.3 server.** There is
+  no service worker, so a page reload fetches the v4.3 client and fixes it;
+  but a long-lived cached tab will show "Login failed" until reloaded.
+  (Wave-7 C1 — this matrix previously claimed compatibility; that was
+  wrong for the shipped v4.2 client.)
+- v4.2 worker ↔ v4.3 client: rows read/write work over per-row GETs. The
+  §5.1c empty-404 batch degrade does NOT trigger in the browser against a
+  genuine v4.2 worker, because the v4.2 front door's CORS allow-methods
+  lacked POST — the batch preflight fails first (a `network` ApiError, not
+  the silent 404). The effective protection is the §5.4 version probe,
+  which disables batch for any server reporting < 4.3. Non-browser clients
+  (no CORS) would hit the empty-404 path as described. (Wave-7 C3.)
 - Envelope format, key hierarchy, bootstrap, rewrap, backup: unchanged.
 - `GET /version` reports `"4.3"`.
 
