@@ -880,3 +880,47 @@ is cloned at /home/z/my-project/davx, upstream bitfireAT/davx5-ose
 4. Gradle in this sandbox: `gradle wrapper` exists in the repo; JDK
    availability to verify (java -version). Tests via
    `./gradlew :core:test --tests ...` on a branch.
+
+## DAVX SURVEY — pinned facts (2026-10-31, end of session)
+
+- JDK 21 available in-sandbox; davx clone at /home/z/my-project/davx
+  (upstream bitfireAT/davx5-ose @ b583f734f; core.fileMode=false set).
+- **The seam is exactly D18's mapping**: `core/src/main/kotlin/at/bitfire/
+  davdroid/resource/remote/WebDavCollection.kt` — an INTERFACE (186 lines):
+  createMember(fileName, content, headers) [If-None-Match →
+  PreconditionFailedException on existing], queryCapabilities(),
+  querySyncState(), listFilteredMembers(): Flow<InternalMemberState>,
+  listChanges(since), multiget(urls, capabilities): Flow<MultiGetItem
+  {url, eTag, content}>, updateMember(fileName, content, ifETag, ...)
+  [If-Match → PreconditionFailedException on mismatch], deleteMember(
+  fileName, ifETag).
+- **The JVM harness pattern is PROVEN IN-REPO**:
+  `core/src/test/kotlin/at/bitfire/davdroid/resource/remote/
+  CalDavCollectionTest.kt` (pure JVM, no Android) drives the REAL
+  CalDavCollection via **ktor MockEngine** (scripted multistatus responses,
+  requestHistory assertions). The fork's adapter tests can copy this
+  pattern verbatim: script MockEngine to speak the v4.2 row API (or wrap
+  it with an Interceptor translating WebDAV verbs → row-store calls).
+- Concrete adapter shape (RowStoreCalDavCollection : WebDavCollection):
+  - href/fileName ↔ `evt:{cal}:{uid}` (URL-encode the id; server treats
+    ids opaquely; ≤256 chars);
+  - eTag ↔ decimal `ver` string;
+  - listFilteredMembers ↔ GET /rows manifest filtered to the calendar's
+    `evt:{cal}:` prefix;
+  - multiget ↔ per-row GET /rows/{id} (decrypt → iCalendar text);
+  - createMember ↔ PUT ver 1 (server 200 echo = D14 identity check; a
+    lost race returns the STORED envelope → PreconditionFailedException);
+  - updateMember(ifETag=v) ↔ PUT ver v+1, rebase echo →
+    PreconditionFailedException (SyncManager's existing handling applies);
+  - deleteMember ↔ DELETE /rows/{id} (idempotent; no If-Match on the
+    wire — the doc records the semantic loss);
+  - queryCapabilities ↔ GET /version (proto 4.2), maxCalResourceSize =
+    64 KiB ciphertext law; querySyncState ↔ manifest (no sync-token:
+    listChanges degenerates to full-list diff — set canCollectionSync
+    false so SyncManager uses listFilteredMembers).
+- Crypto module needed in Kotlin: PBKDF2(100k) → AES-256-GCM envelope
+  (12B nonce, AAD = id || u32be(ver)) + HKDF subkeys + hex64 bearer;
+  verify against the KAT vectors in calendar-web test/crypto-parity.mjs.
+- App-side wiring (Android): AccountsActivity/CalendarsListActivity →
+  the fork adds a "clock row store" account type whose collections map
+  to cmeta rows; see app-ose module + ical4android AndroidCalendar.
