@@ -1899,3 +1899,41 @@ FINAL TEST EVIDENCE (all green at commit b26beb8):
   calendars, 6 events).
 
 ## Task 2.1 (web UI) — COMPLETE. Next: Task 2.2 (davx5 fork), commenced.
+
+## Task 2.2 (davx5 fork) — COMMENCED + protocol layer COMPLETE (2026-10-31 ~05:45)
+
+Repository: https://github.com/sh-clock/davx (fork of bitfireAT/davx5-ose
+@ b583f734f). Branch: **row-store** (pushed). Module: **:rowstore** (pure JVM).
+
+Delivered:
+- RowStoreCrypto.kt — PBKDF2→KEK→AES-GCM unwrap→HKDF subkeys; AES-256-GCM row
+  envelopes with AAD=id||u32be(ver); JSON §6 codec. Two REAL porting bugs
+  found+fixed by the harness: (1) PBKDF2WithHmacSHA256 keys must be re-wrapped
+  as SecretKeySpec("AES") (Java reports the PBE algorithm); (2) Java rejects
+  empty HMAC keys — the spec's empty HKDF salt is emulated with HashLen(32)
+  zero bytes per RFC 5868 "not provided" (byte-identical to WebCrypto).
+  KAT-verified against the JS reference using the production PoC credentials.
+- RowStoreCollection.kt — SyncManager-compatible collection contract.
+- RowStoreCalDavCollection.kt — the CalDAV↔row-store adapter (ETag=ver,
+  manifest listing, §9b batch multiget with 256-id chunking, §9c conditional
+  PUTs surfacing as dav4jvm typed exceptions, idempotent DELETE).
+- RowStoreCalDavCollectionTest.kt — 15 JVM tests, ALL GREEN, MockEngine fake
+  of the full v4.3+§9c wire protocol driving the REAL adapter + REAL crypto.
+- Worker protocol addition §9c (v4.3.1): If-Match/If-None-Match on PUT → real
+  412/404 (CalDAV-native conflict semantics for DAV clients; web client
+  unaffected — it sends no conditional headers). Deployed to production.
+
+REMAINING for a full APK (needs Android CI — the 4 GB sandbox cannot run the
+Android Gradle toolchain without OOM-kills; JDK 21 + SDK 36 installed, core
+compilation killed):
+1. :core wiring — thin `RowStoreWebDavCollection : WebDavCollection` delegating
+   to RowStoreCalDavCollection (same package, ~60 lines) + core dependency
+   `implementation(project(":rowstore"))`.
+2. Account/collection detection: a row-store account type whose calendar list
+   maps to cmeta rows (multiget of cmeta:{uuid} + evt prefix listing).
+3. The SyncManager reuse is BY DESIGN already compatible (PreconditionFailed →
+   discard-local + re-download), verified in code at SyncManager.kt:416-429.
+
+Test evidence: :rowstore:test — 15/15 passed (crypto KATs incl. AAD tamper
+detection, adapter create/update/rebase/listing/multiget/chunking/delete,
+error shapes, wrong-token silent drop).
