@@ -147,13 +147,15 @@ export async function decryptAll() {
 }
 
 /** Encrypt+PUT a raw payload as a row (for adversarial writes).
- *  Mirrors crypto.js encryptRow: plaintext = JSON.stringify(payload). */
-export async function putRawRow(id, text, ver) {
+ *  Mirrors crypto.js encryptRow: plaintext = JSON.stringify(payload) —
+ *  unless { wrap: false } (raw bytes: decryptRow's JSON.parse then throws). */
+export async function putRawRow(id, text, ver, { wrap = true } = {}) {
   const key = await rowKey();
   const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const pt = wrap ? JSON.stringify(text) : text;
   const ct = await subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: aadFor(id, ver) }, key,
-    new Uint8Array(Buffer.from(JSON.stringify(text), 'utf8')));
+    new Uint8Array(Buffer.from(pt, 'utf8')));
   const body = {
     ver,
     nonce: Buffer.from(iv).toString('base64'),
