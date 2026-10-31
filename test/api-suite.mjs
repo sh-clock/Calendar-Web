@@ -798,7 +798,7 @@ console.log('PHASE V — version & status (§22, §10)');
 
 {
   const r = await raw('GET', '/version', { token: MAT.authUiHex });
-  check('v1 GET /version -> {"proto":"4.2"}', r.status === 200 && jparse(r.text)?.proto === '4.2', r.text);
+  check('v1 GET /version -> {"proto":"4.3"}', r.status === 200 && jparse(r.text)?.proto === '4.3', r.text);
   const r2 = await raw('GET', '/version', { token: MAT.authClockHex });
   check('v1b /version with CLOCK token', r2.status === 200);
 }
@@ -976,6 +976,107 @@ console.log('PHASE V42 — v4.2 row types (evt/cmeta on the opaque store)');
   }
   const gEnd = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
   check('v42.12 phase rows cleaned', !(gEnd.rows || []).some((x) => x.id.startsWith('evt:') || x.id.startsWith('cmeta:')), JSON.stringify(gEnd.rows));
+}
+
+/* ================================================================ */
+console.log('PHASE V43 — /rows:batch (protocol.md §9b, v4.3)');
+/* ================================================================ */
+/* The v4.3 claim under test: POST /rows:batch is a pure bulk envelope read
+   with the §4/§5 auth law, strict validation, request-order responses, and
+   `missing` semantics — while the worker stays blind (it never inspects
+   nonce/ct). Runs in the post-V42 universe (empty manifest). */
+
+{
+  const K = deriveClientKeys('password', MAT.saltHex, 100000, MAT.wrappedB64).kData;
+  const b64 = (u8) => Buffer.from(u8).toString('base64');
+  const mk = async (id, ver, note) => {
+    const enc = encryptRow(K, id, ver, { note });
+    const r = await raw('PUT', '/rows/' + encodeURIComponent(id), {
+      token: MAT.authUiHex, body: { ver, nonce: b64(enc.nonce), ct: b64(enc.ct) },
+    });
+    return { r, enc };
+  };
+
+  const idA = 'evt:' + randomUUID() + ':' + randomUUID();
+  const idB = 'cmeta:' + randomUUID();
+  const idC = 'evt:' + randomUUID() + ':' + randomUUID();
+  await mk(idA, 1, 'a');
+  await mk(idB, 3, 'b');
+  await mk(idC, 2, 'c');
+
+  // b1: happy path — request order, envelopes byte-identical to GET, missing rows flagged.
+  let r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: [idC, 'evt:' + randomUUID() + ':' + randomUUID(), idA, idB] } });
+  let j = jparse(r.text);
+  const getA = jparse((await raw('GET', '/rows/' + encodeURIComponent(idA), { token: MAT.authUiHex })).text);
+  const okB1 = r.status === 200 && Array.isArray(j.rows) && j.rows.length === 4 &&
+    j.rows[0].id === idC && j.rows[0].ver === 2 &&
+    j.rows[1].missing === true && j.rows[1].id &&
+    j.rows[2].id === idA && j.rows[2].ver === 1 && j.rows[2].nonce === getA.nonce && j.rows[2].ct === getA.ct &&
+    j.rows[3].id === idB && j.rows[3].ver === 3;
+  check('v43.1 batch returns request-order envelopes + missing flags, byte-identical to GET', okB1, r.text);
+
+  // b2: envelope decrypts with AAD(id, ver) — the worker did not mangle it.
+  {
+    const pt = decryptRow(K, idB, 3, j.rows[3].nonce, j.rows[3].ct);
+    check('v43.2 batch envelope decrypts under AAD(id,ver)', pt && pt.note === 'b', JSON.stringify(pt));
+  }
+
+  // b3: CLOCK class may read (read-only route family).
+  r = await raw('POST', '/rows:batch', { token: MAT.authClockHex, body: { ids: [idA] } });
+  check('v43.3 CLOCK token batch read -> 200', r.status === 200 && jparse(r.text)?.rows?.length === 1, r.text);
+
+  // b4: unauthenticated -> silent drop (empty 404, §4).
+  r = await raw('POST', '/rows:batch', { body: { ids: [idA] } });
+  check('v43.4 no token -> silent empty 404', r.status === 404 && r.text === '', r.status + ':' + r.text);
+
+  // b5: wrong token class (admin) -> silent drop.
+  r = await raw('POST', '/rows:batch', { token: ADMIN, body: { ids: [idA] } });
+  check('v43.5 admin token on app route -> silent empty 404', r.status === 404 && r.text === '', r.status + ':' + r.text);
+
+  // b6-b10: validation law.
+  r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: [] } });
+  check('v43.6 empty ids -> 400 bad_ids', r.status === 400 && jparse(r.text)?.error === 'bad_ids', r.text);
+  r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: {} });
+  check('v43.7 missing ids -> 400 bad_ids', r.status === 400 && jparse(r.text)?.error === 'bad_ids', r.text);
+  r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: [idA, idA] } });
+  check('v43.8 duplicate ids -> 400 bad_ids', r.status === 400 && jparse(r.text)?.error === 'bad_ids', r.text);
+  r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: ['x'.repeat(257)] } });
+  check('v43.9 id > 256 chars -> 400 bad_id', r.status === 400 && jparse(r.text)?.error === 'bad_id', r.text);
+  {
+    const many = Array.from({ length: 257 }, () => 'evt:' + randomUUID() + ':' + randomUUID());
+    r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: many } });
+    check('v43.10 > 256 ids -> 400 bad_ids', r.status === 400 && jparse(r.text)?.error === 'bad_ids', r.text);
+  }
+
+  // b11: 256 ids (exactly at the cap) all missing -> still 200 (cap is inclusive).
+  {
+    const many = Array.from({ length: 256 }, () => 'evt:' + randomUUID() + ':' + randomUUID());
+    r = await raw('POST', '/rows:batch', { token: MAT.authUiHex, body: { ids: many } });
+    const jj = jparse(r.text);
+    check('v43.11 exactly 256 ids -> 200 with 256 missing rows',
+      r.status === 200 && jj.rows.length === 256 && jj.rows.every((x) => x.missing === true), r.text?.slice(0, 80));
+  }
+
+  // b12: GET (not POST) on the route -> silent drop (unknown route+method).
+  r = await raw('GET', '/rows:batch', { token: MAT.authUiHex });
+  check('v43.12 GET /rows:batch -> silent empty 404', r.status === 404 && r.text === '', r.status + ':' + r.text);
+
+  // b13: CORS preflight for POST (the browser sends OPTIONS before POSTing JSON).
+  r = await raw('OPTIONS', '/rows:batch', { origin: 'https://sh-clock.github.io' });
+  check('v43.13 CORS preflight allows POST for allowlisted origin',
+    r.status === 204 && /(^|,)\s*POST\s*(,|$)/.test(r.headers.get('access-control-allow-methods') || ''), r.headers.get('access-control-allow-methods'));
+
+  // b14: PUT on the batch route is NOT routed to the row writer (it is an
+  // unknown route+method pair, not /rows/{id}).
+  r = await raw('PUT', '/rows:batch', { token: MAT.authUiHex, body: { ids: [] } });
+  check('v43.14 PUT /rows:batch -> silent empty 404 (no such route+method)', r.status === 404 && r.text === '', r.status + ':' + r.text);
+
+  // Cleanup.
+  for (const id of [idA, idB, idC]) {
+    await raw('DELETE', '/rows/' + encodeURIComponent(id), { token: MAT.authUiHex });
+  }
+  const gEnd = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  check('v43.15 phase rows cleaned', !(gEnd.rows || []).some((x) => x.id === idA || x.id === idB || x.id === idC), JSON.stringify(gEnd.rows));
 }
 
 if (MATERIAL_OUT) {

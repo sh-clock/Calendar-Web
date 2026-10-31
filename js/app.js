@@ -576,7 +576,9 @@ function applyRowLocally(id, ver, text) {
 async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
   let ver;
   let payload;
-  if (local && typeof local.ver === 'number' && ver_ok(local.ver)) {
+  if (local && Number.isInteger(local.ver) && local.ver >= 0 && local.ver <= 4294967295) {
+    // v4.3 fast path: local.ver === 0 means "row known absent" (create path
+    // straight after a sync-verified manifest); no pre-GET is needed.
     ver = local.ver;
     payload = local.payload;
   } else {
@@ -617,9 +619,6 @@ async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
   throw new Error('rebase_exhausted: ' + id);
 }
 
-function ver_ok(v) {
-  return Number.isInteger(v) && v >= 1 && v <= 4294967295;
-}
 
 /* ---------------- occurrence → view event model ---------------- */
 
@@ -970,6 +969,7 @@ function monthRows(ym) {
 
 function renderMonth(root) {
   root = root || viewRoot();
+  root.replaceChildren(); // ALWAYS start clean (the rAF re-render appends)
   const wrap = el('div', 'daygrid-wrap is-month-view');
   const head = el('div', 'calendar-daygrid-days');
   head.id = 'grid-head';
@@ -2859,6 +2859,11 @@ function openCalendarModal(uuid) {
           local: { ver: 0, payload: null },
         });
         applyRowLocally(core.cmetaId(newUuid), res.ver, res.text);
+        // v4.3 fix: update the PERSISTED visibility map (calVis), not just the
+        // derived Set — syncCalVisible() rebuilds the Set from calVis, so a
+        // calendar added only to the Set would be invisible until the next
+        // sync (v4.2 masked this via the post-save syncAll).
+        calVis.set(newUuid, true);
         calVisible.add(newUuid);
         saveCalVis();
       }
@@ -3123,7 +3128,10 @@ function createDragCreateEvent({ e, targetRow, targetDate: startTargetDate, rows
     document.removeEventListener('mouseup', handleMouseUp, true);
     document.removeEventListener('mousemove', handleMouseMove, true);
     removeGhost(ghost);
-    setHighlight(-1);
+    // NOTE: NO setHighlight here — the create-drag never sets a row
+    // highlight (that belongs to createDragMoveEvent). The stray call in
+    // v4.2 threw `setHighlight is not defined` on EVERY month-grid
+    // click/drag-create, silently killing event creation (wave-6 fix).
     if (result) {
       beginCreateRange(result.start, result.end);
     } else {
