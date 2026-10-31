@@ -2390,3 +2390,117 @@ green (unit + deploy) on the audit-fix commits; Pages redeploying.
   (drags must go left); .fc-timegrid-col rects are content-absolute inside
   the scrolled container (compute click points from the visible scroller);
   multiMonth has no .fc-multimonth-day class (dayGrid cells inside months).
+
+## SESSION 2026-11-01 — THEMES / TASKS / LOCAL-FIRST (user directives)
+
+### Directives (verbatim intent)
+1. Port the inbuilt FullCalendar UI themes — Monarch, Forma, Breezy, Pulse,
+   Classic, Shadcn, MUI (Material UI) — selectable WITHIN the settings menu.
+2. Tasks option à la FossifyOrg/Calendar (an 'event' that acts as a task):
+   clone Fossify, explore implementation, copy over. Logic MUST stay
+   CalDAV-compatible (protocol modified if needed).
+3. Local-first: all data stored locally cached first, to reduce reliance on
+   the cloud sync system.
+4. Commandments remain in force (see top of file).
+
+### Evidence gathered (hard sources, no hallucination)
+- FullCalendar repo @ v7.1.3 (`/home/z/my-project/fullcalendar-src`, MIT):
+  `packages/preact/src/themes/{monarch,forma,breezy,pulse,classic}/`
+  (index.tsx + theme.css + palettes) — the 5 stock themes. Themes are a
+  v7 feature (issue #7907). v6.1.22 has NO themes.
+- npm `fullcalendar@7.1.3` dist (official artifacts): `all/global.js`
+  (852 KB, bundles core+daygrid+timegrid+interaction+list+multimonth+
+  preact + internal Temporal shim — `const NativeTemporal =
+  globalThis.Temporal` with native/shim fallback), `skeleton.css`,
+  `themes/{x}/global.js` (theme plugin pushes into
+  `FullCalendar.globalPlugins`; capture + pass explicitly via plugins:[]),
+  `themes/{x}/theme.css` + `palettes/*.css` (`:root`-scoped, ONE palette
+  CSS at a time; dark blocks keyed `[data-color-scheme=dark]`).
+  Semantic DOM classes SURVIVE in v7 (official test wrappers use
+  `.fc-daygrid-day[data-date]`, `.fc-timegrid-day[data-date]`,
+  `.fc-timegrid-slot[data-time]`, `.fc-event`, `.fc-event-title`,
+  `.fc-toolbar`, `.fc-day-today`, `.fc-daygrid-more-link`).
+- fullcalendar-workspace repo (`/home/z/my-project/fc-workspace`, MIT):
+  `theming/ui-mui` (@fullcalendar/mui — React/MUI toolbar per flavor +
+  theme.css w/ Tailwind utilities referencing `--mui-palette-*` vars),
+  `theming/ui-shadcn` (React/shadcn toolbar per flavor; shadcn Button/Tabs
+  cva components; `demo-palettes.css` = official shadcn tokens, oklch,
+  `[data-palette=neutral|blue|...]` + `[data-color-scheme=dark]` blocks),
+  `theming/demo-react` = the themes.fullcalendar.io playground: Theme ∈
+  {monarch,forma,breezy,pulse,classic} × UI ∈ {default,shadcn,mui} ×
+  palette × colorScheme. Playground semantics: shadcn/MUI are CHROME
+  (toolbar) design languages layered on a stock flavor (default monarch);
+  our vanilla port = official stock-flavor FC CSS + shadcn/MUI-styled app
+  chrome (adaptation documented in DEVIATIONS — React toolbars cannot run
+  in a no-build vanilla app; the official demo-palettes.css and the MUI
+  palette sources are vendored verbatim).
+- FossifyOrg/Calendar (`/home/z/my-project/fossify-calendar`, GPL-3.0 —
+  semantics only, our code is original): a Task is an Event child row
+  (`models/Task.kt`: task_id→Event FK, start_ts, flags; FLAG_TASK_COMPLETED
+  = 8; per-occurrence completion keyed (task_id, start_ts)).
+  `Constants.kt`: TYPE_TASK=1, IS_TASK_COMPLETED. ICS export
+  (`IcsExporter.writeTask`): BEGIN:VTODO + SUMMARY/UID/DTSTART/DTSTAMP +
+  `STATUS:COMPLETED` when done + RRULE for repeatable tasks.
+  `Context.updateTaskCompletion`: completed→set flag+insert Task row;
+  incomplete→clear+delete row. UI: TaskActivity (separate editor with
+  mark-complete toggle), month/list views show a task icon and DIM
+  completed (dimCompletedTasks). CalDAV: tasks are NOT synced by Fossify
+  (`addToCalDAV = !event.isTask()`) — OUR port MUST sync (user directive):
+  VTODO rows in the same evt:{cal}:{uid} namespace = RFC 5545/4791-native
+  and maps onto davx5's existing VTODO mapping (synctools/mapping/tasks).
+- Worker impact: NONE (zero-knowledge; payloads are opaque). Protocol
+  doc update only (v4.5 client-side additive: evt payload may be a
+  VTODO master + VTODO exceptions instead of VEVENT; one UID + one
+  component type per row).
+- v6→v7 API deltas affecting app.js (verified against all/global.js
+  refiners): `eventClassNames`→`eventClass` (fn still receives arg,
+  array return OK); `slotLabelInterval` REMOVED (drop; official default
+  label cadence); `viewDidMount` retained via compat alias
+  (`options.didMount || options.viewDidMount`); `moreLinkClick:'popover'`
+  retained; `eventContent` {html} supported (dangerouslySetInnerHTML);
+  `resetOptions/getDate/changeView/gotoDate/today/prev/next/unselect/
+  refetchEvents/removeAllEvents` all present; `updateSize` REMOVED (auto
+  sizing — v6 comment already said no manual resize handler needed).
+  CSS: v6's runtime-injected styles are gone → skeleton.css + theme.css
+  (official) replace our --fc-* theming block.
+
+### Design decisions
+- **Upgrade vendored FullCalendar v6.1.22 → v7.1.3** (official npm dist,
+  verbatim): the ONLY way to use the official themes verbatim
+  (Commandment 10). Hand-porting 5×~1000-line compiled theme CSS to the
+  v6 DOM would be maximal LLM-induced-error risk — rejected.
+- Theme switching: load the active theme's global.js once, capture the
+  plugin it pushed into FullCalendar.globalPlugins, REMOVE it from the
+  global registry (truncate to pre-load length), pass it explicitly via
+  plugins:[...] (official ESM usage pattern), destroy+recreate the
+  Calendar on switch (plugin hooks build per instance; resetOptions
+  memoizes globalPlugins by reference so array surgery + re-init is the
+  correct mechanism).
+- CSS switching: skeleton.css static; per-theme theme.css + one palette
+  css swapped via managed <link> elements. `<html data-color-scheme>`
+  drives the official dark blocks; `<html data-theme>` continues to
+  drive our chrome. Chrome tokens map OFFICIAL palette vars per
+  [data-fctheme] block (colors stay 100% official; we author only the
+  mapping + shadcn/MUI chrome component styles).
+- Tasks: VTODO components; STATUS:COMPLETED (Fossify semantics) on the
+  master (whole task) or on a RECURRENCE-ID exception (one occurrence of
+  a repeating task — the RFC-native analogue of Fossify's per-occurrence
+  rows). Clock buckets exclude COMPLETED tasks (like CANCELLED events) —
+  documented deviation. Editor: New event|New task split (Fossify
+  MainActivity), task editor hides Ends (Fossify TaskActivity has no
+  end), 'Mark complete' toggle in edit mode (toggleMarkComplete).
+  Rendering: checkbox in the event block (eventContent html) +
+  line-through/dim when completed (dimCompletedTasks).
+- Local-first: `clock_poc_cache_v45` localStorage key holding the
+  decrypted model ({cals, evt:{id,ver,text}}); hydrate AFTER key
+  derivation, BEFORE syncAll → instant render; background syncAll
+  reconciles; lock()/forget purge the cache (E5-5 parity). Debounced
+  writes. Mutations remain online RMW (offline write queue out of scope,
+  documented).
+
+### Plan (ordered)
+P1 vendor v7+palettes → P2 ical.js VTODO + tests → P3 calendar-core.js
+tasks + tests → P4 app.js (v7 adapter, themes, tasks, cache) → P5
+index.html/style.css → P6 test migration + new suites, ALL green → P7
+visual audit (all views × 7 themes × light/dark) → P8 3+ parallel
+critical audit agents → P9 docs/CI/push/deploy.

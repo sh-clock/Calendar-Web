@@ -1,19 +1,35 @@
 /**
- * app.js — web client orchestration for PROTOCOL v4.3 (calendar domain).
+ * app.js — web client orchestration for PROTOCOL v4.3 wire / v4.5 client
+ * payload extension (calendar domain).
  *
- * UI LAYER: FullCalendar v6.1.22 (MIT, (c) Adam Shaw) — official prebuilt
- * bundles vendored VERBATIM at js/vendor/fullcalendar/ (see each package's
- * LICENSE.txt). All view rendering, drag & drop, resizing, event layout,
- * "+N more" popovers, the toolbar and the now-indicator are FullCalendar's
- * OWN implementations, driven through its documented options
- * (headerToolbar / events / eventDrop / eventResize / select / dateClick /
- * eventClick / navLinks / nowIndicator / dayMaxEvents). No FullCalendar
+ * UI LAYER: FullCalendar v7.1.3 (MIT, (c) Adam Shaw) — the official
+ * `all/global.js` bundle + `skeleton.css` + the official stock THEMES
+ * (monarch / forma / breezy / pulse / classic plugin + theme.css + palette
+ * css) vendored VERBATIM from npm `fullcalendar@7.1.3` at
+ * js/vendor/fullcalendar/v7/ (see LICENSE.md). The Shadcn and MUI themes
+ * port the official fullcalendar-workspace theming sources (see
+ * docs/PROVENANCE.md): FC views use the monarch flavor (the playground
+ * default) while the app chrome adopts shadcn / Material Design tokens.
+ * All view rendering, drag & drop, resizing, event layout, "+N more"
+ * popovers, the toolbar and the now-indicator are FullCalendar's OWN
+ * implementations, driven through its documented options. No FullCalendar
  * internals are patched or tweaked.
  *
- * BACKBONE (protocol v4.3 — protocol.md, REPOSITORY ROOT, normative — is
- * UNCHANGED by this rework; only the view layer was replaced):
+ * TASKS (v4.5): evt rows may hold VTODO components (Fossify Calendar
+ * semantics): STATUS:COMPLETED marks a task done; one occurrence of a
+ * repeating task completes via a RECURRENCE-ID exception with
+ * STATUS:COMPLETED. CalDAV-native (RFC 5545 §3.6.2 / RFC 4791 §4.1) so the
+ * davx5 fork maps task rows with its existing VTODO code.
+ *
+ * LOCAL-FIRST (v4.5): the decrypted model is cached in localStorage
+ * (clock_poc_cache_v45) — unlock paints from the cache BEFORE syncing; the
+ * cloud sync (manifest diff + §9b batch) reconciles in the background.
+ * lock() purges the cache (E5-5 parity: no plaintext survives Lock).
+ *
+ * BACKBONE (protocol v4.3 — protocol.md, REPOSITORY ROOT, normative):
  *  - `cmeta:{uuid}` rows → calendars (name, color).
- *  - `evt:{cal}:{uid}` rows → source of truth, RFC 5545 payloads.
+ *  - `evt:{cal}:{uid}` rows → source of truth, RFC 5545 payloads
+ *    (VEVENT rows, or VTODO task rows since v4.5).
  *  - Sync = read-only manifest diff + POST /rows:batch (§9b) — 1–2 requests,
  *    failure-tolerant, ALWAYS renders. Mutations RMW the row directly,
  *    update local state and re-render — NO post-mutation sync chain (§5).
@@ -36,15 +52,52 @@ const LS_TOKEN = 'clock_poc_auth_ui';
 const LS_SERVER = 'clock_poc_server';
 const LS_CALVIS = 'clock_poc_calvis_v42';
 const LS_VIEW = 'clock_poc_view_fc6'; // FC view ids (supersedes clock_poc_view_v43)
-const LS_SETTINGS = 'clock_poc_settings_v44';
+const LS_SETTINGS = 'clock_poc_settings_v45'; // v45: fcTheme/fcPalette replace accent
+const LS_SETTINGS_V44 = 'clock_poc_settings_v44'; // legacy (migrated once, then removed)
+const LS_CACHE = 'clock_poc_cache_v45'; // local-first decrypted model cache
+const LS_CFG = 'clock_poc_cfg_v45';   // cached public config row (offline unlock)
 const LS_THEME = 'clock_poc_theme'; // legacy pre-settings key (migrated)
 const REBASE_MAX = 8;
 const AUTOSYNC_MS = 60000;     // v4.3 §5.3: 60 s poll while visible
 const MIN_DURATION = 15;       // Proton splitTimeGridEventsPerDay MIN_DURATION
 const DEFAULT_EVENT_DURATION = 30; // Proton DEFAULT_EVENT_DURATION (minutes)
+const CACHE_WRITE_DELAY = 250; // local-first: debounce plaintext cache writes
 
 /** FullCalendar view ids offered in the toolbar (order = toolbar order). */
 const VIEWS = ['timeGridDay', 'timeGridWeek', 'dayGridMonth', 'multiMonthYear', 'listYear', 'custom'];
+
+/**
+ * The 7 selectable calendar themes (FullCalendar's official set — see
+ * themes.fullcalendar.io). Each stock theme vendors its own plugin + CSS +
+ * palettes from npm fullcalendar@7.1.3. shadcn and mui are the official
+ * UI-language themes from fullcalendar-workspace: the FC views use the
+ * monarch flavor (the playground's default combination) while the app
+ * chrome adopts shadcn / Material Design tokens (adaptation documented in
+ * docs/DEVIATIONS.md — the React toolbars themselves cannot run here).
+ * `flavor` = which stock FC theme plugin/CSS drives the calendar views.
+ */
+const FC_THEMES = {
+  monarch: { label: 'Monarch', flavor: 'monarch', palettes: ['blue', 'green', 'purple', 'red', 'yellow'] },
+  forma: { label: 'Forma', flavor: 'forma', palettes: ['blue', 'green', 'purple', 'red'] },
+  breezy: { label: 'Breezy', flavor: 'breezy', palettes: ['amber', 'emerald', 'indigo', 'rose'] },
+  pulse: { label: 'Pulse', flavor: 'pulse', palettes: ['blue', 'green', 'purple', 'red'] },
+  classic: { label: 'Classic', flavor: 'classic', palettes: [] },
+  shadcn: { label: 'Shadcn', flavor: 'monarch', palettes: ['neutral', 'blue', 'green', 'purple', 'red', 'yellow', 'amber', 'orange', 'rose', 'pink', 'violet', 'indigo', 'cyan', 'teal', 'sky', 'emerald', 'lime', 'fuchsia'] },
+  mui: { label: 'MUI', flavor: 'monarch', palettes: ['blue', 'purple'] },
+};
+const FC_THEME_IDS = Object.keys(FC_THEMES);
+const FC_VENDOR = 'js/vendor/fullcalendar/v7';
+
+/** Default palette per theme (classic has none). */
+function defaultPaletteOf(themeId) {
+  const t = FC_THEMES[themeId];
+  return t && t.palettes.length > 0 ? t.palettes[0] : '';
+}
+
+/** Which stock flavor's plugin + CSS drives the FC views for a theme id. */
+function flavorOf(themeId) {
+  return (FC_THEMES[themeId] || FC_THEMES.monarch).flavor;
+}
 
 /** Map legacy v4.3 view names to FullCalendar view ids (one-time migration). */
 function migrateView(v) {
@@ -277,14 +330,17 @@ function syncCalVisible() {
 /* ---------------- settings (theme & customisation) ----------------
  * The theme settings live UNDER the settings menu (user directive): the
  * topbar gear opens one modal holding every customisation. Every change
- * applies LIVE (DOM tokens immediately; FullCalendar options via
- * resetOptions) and persists to localStorage. */
+ * applies LIVE (DOM tokens + managed CSS links immediately; FullCalendar
+ * options via resetOptions; a THEME FLAVOR switch rebuilds the Calendar —
+ * theme plugins register their render hooks at construction) and persists
+ * to localStorage. */
 
-const SETTINGS_KEYS = ['theme', 'accent', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view'];
+const SETTINGS_KEYS = ['theme', 'fcTheme', 'fcPalette', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view'];
 
 const SETTINGS_DEFAULTS = {
-  theme: 'system',            // 'light' | 'dark' | 'system'
-  accent: '#6d4aff',          // Proton primary (snow theme verbatim)
+  theme: 'system',            // color scheme: 'light' | 'dark' | 'system'
+  fcTheme: 'monarch',         // FullCalendar theme (FC_THEMES keys)
+  fcPalette: 'blue',          // per-theme palette (official palette sets)
   firstDay: 1,                // 0=Sun, 1=Mon (current app default), 6=Sat
   hour12: null,               // null = locale default | true | false
   slotDuration: '00:30:00',   // timeGrid slot (Proton interval analogue)
@@ -309,15 +365,29 @@ function loadSettings() {
       for (const k of SETTINGS_KEYS) if (o[k] !== undefined) settings[k] = o[k];
     }
   } catch { /* ignore */ }
-  // Legacy migration: v4.3 stored the theme under its own key — used ONLY
-  // when no v44 settings exist yet, then removed (F-A5-9).
+  // v44 → v45 migration: fcTheme/fcPalette replace the Proton accent (the
+  // official theme palettes are the accent system now). Read ONCE, then
+  // remove the legacy key so this migration is one-shot.
   if (!ls.get(LS_SETTINGS)) {
+    try {
+      const v44 = JSON.parse(ls.get(LS_SETTINGS_V44) || 'null');
+      if (v44 && typeof v44 === 'object') {
+        for (const k of ['theme', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view']) {
+          if (v44[k] !== undefined) settings[k] = v44[k];
+        }
+      }
+    } catch { /* ignore */ }
+    ls.del(LS_SETTINGS_V44);
+  }
+  // Legacy migration: v4.3 stored the theme under its own key — used ONLY
+  // when no settings exist yet, then removed (F-A5-9).
+  if (!ls.get(LS_SETTINGS) && !ls.get(LS_SETTINGS_V44)) {
     const t = ls.get(LS_THEME);
     if (t === 'light' || t === 'dark') settings.theme = t;
   }
   ls.del(LS_THEME);
   // Legacy migration: v4.3 view name → FullCalendar view id — only when
-  // neither v44 settings nor the FC view key exist, then removed.
+  // no settings exist and the FC view key does not, then removed.
   const oldView = ls.get('clock_poc_view_v43');
   if (oldView && !ls.get(LS_VIEW) && !(JSON.parse(ls.get(LS_SETTINGS) || 'null') || {}).view) {
     const m = migrateView(oldView);
@@ -327,10 +397,12 @@ function loadSettings() {
   settings.customDays = Math.max(2, Math.min(14, Number(settings.customDays) || 5));
   if (!VIEWS.includes(settings.view)) settings.view = 'dayGridMonth';
   if (!['light', 'dark', 'system'].includes(settings.theme)) settings.theme = 'system';
+  if (!FC_THEME_IDS.includes(settings.fcTheme)) settings.fcTheme = SETTINGS_DEFAULTS.fcTheme;
+  const pal = FC_THEMES[settings.fcTheme].palettes;
+  if (!pal.includes(settings.fcPalette)) settings.fcPalette = defaultPaletteOf(settings.fcTheme);
   if (!['00:15:00', '00:30:00', '01:00:00'].includes(settings.slotDuration)) settings.slotDuration = '00:30:00';
   if (!['comfortable', 'compact'].includes(settings.density)) settings.density = 'comfortable';
   if (![0, 1, 6].includes(settings.firstDay)) settings.firstDay = 1;
-  if (typeof settings.accent !== 'string' || !/^#[0-9A-Fa-f]{6}$/.test(settings.accent)) settings.accent = SETTINGS_DEFAULTS.accent; // F-A5-4
 }
 
 function saveSettings() {
@@ -346,63 +418,214 @@ function resolvedTheme() {
 }
 
 function applyTheme() {
-  document.documentElement.dataset.theme = resolvedTheme();
+  // data-theme drives OUR chrome tokens ([data-theme=dark] blocks);
+  // data-color-scheme drives the OFFICIAL FullCalendar theme CSS + the
+  // vendored shadcn / MUI palette dark blocks (both keyed on it).
+  const t = resolvedTheme();
+  document.documentElement.dataset.theme = t;
+  document.documentElement.dataset.colorScheme = t;
 }
 
-/* Accent customisation: a dedicated <style> element carrying BOTH theme
- * blocks (F-A3-3/F-A3-4/F-A5-3 — inline vars on <html> would always beat
- * the [data-theme=dark] token block, killing the dark palette; a style
- * element with equal-specificity :root + [data-theme=dark] rules keeps both
- * themes correct). The default accent needs no injection — the static
- * stylesheet already carries the Proton-verbatim values. */
-const ACCENT_STYLE_ID = 'accent-vars';
-function applyAccentVars() {
-  let tag = document.getElementById(ACCENT_STYLE_ID);
-  if (settings.accent === SETTINGS_DEFAULTS.accent) {
-    if (tag) tag.remove(); // static CSS is authoritative for the default
+/* ---------------- FullCalendar theme assets (official v7 themes) ----------------
+ * skeleton.css is a static <link> in index.html. The active theme's
+ * plugin (global.js) + theme.css + ONE palette css are managed here:
+ * managed <link> elements swapped per settings. The theme plugin global
+ * scripts auto-register into FullCalendar.globalPlugins on load — we
+ * CAPTURE the pushed plugin and remove it from the global registry (it
+ * would otherwise stay active forever and stack with other themes), then
+ * pass it EXPLICITLY via plugins:[...] — the official ESM usage pattern
+ * (README: `import classicThemePlugin from 'fullcalendar/themes/classic'`).
+ * Switching the theme flavor therefore requires destroy()+re-create of
+ * the Calendar (plugin hooks build at construction; resetOptions alone
+ * would keep the old theme's classNames). */
+
+const fcThemePlugins = new Map(); // flavor -> plugin object (loaded once)
+let activeFcTheme = null;         // plugin currently driving fcCal
+let fcThemeLoadBusy = null;       // in-flight plugin load (dedup concurrent)
+
+function injectScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('load_failed: ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+/** Load (once) a stock flavor's theme plugin and return the plugin object. */
+function fcThemePlugin(flavor) {
+  if (fcThemePlugins.has(flavor)) return Promise.resolve(fcThemePlugins.get(flavor));
+  if (fcThemeLoadBusy) return fcThemeLoadBusy.then(() => fcThemePlugin(flavor));
+  fcThemeLoadBusy = (async () => {
+    const before = window.FullCalendar.globalPlugins.length;
+    await injectScriptOnce(FC_VENDOR + '/themes/' + flavor + '/global.js');
+    // The theme global.js pushed exactly one plugin into the registry:
+    // capture it and trim the registry back (the plugin is used EXPLICITLY
+    // via plugins:[...] — leaving it registered would stack every loaded
+    // theme onto every Calendar instance).
+    const added = window.FullCalendar.globalPlugins.splice(before);
+    if (added.length !== 1) {
+      throw new Error('theme_plugin_load: expected 1 plugin, got ' + added.length);
+    }
+    fcThemePlugins.set(flavor, added[0]);
+    return added[0];
+  })();
+  const done = fcThemeLoadBusy;
+  fcThemeLoadBusy.then(() => { if (fcThemeLoadBusy === done) fcThemeLoadBusy = null; }, () => { if (fcThemeLoadBusy === done) fcThemeLoadBusy = null; });
+  return done;
+}
+
+/** Ensure a <link id> exists with the given href (swap href on change).
+ * href === null disables (removes) the link. */
+function ensureCssLink(id, href) {
+  let link = document.getElementById(id);
+  if (href === null) {
+    if (link) link.remove();
     return;
   }
-  const { h, s, l } = hexToHsl(settings.accent);
-  const step = (dl) => hslToHex(h, s, Math.min(1, Math.max(0, l + dl))).toUpperCase();
-  const light = [
-    '--primary:' + settings.accent.toUpperCase(),
-    '--interaction-norm:' + settings.accent.toUpperCase(),
-    '--interaction-norm-major-1:' + step(-0.05),
-    '--interaction-norm-major-2:' + step(-0.10),
-    '--interaction-norm-major-3:' + step(-0.15),
-    '--interaction-norm-minor-1:' + settings.accent.toUpperCase() + '2b',
-    '--interaction-norm-minor-2:' + settings.accent.toUpperCase() + '17',
-    '--focus-outline:' + settings.accent.toUpperCase(),
-  ].join(';');
-  // Dark theme: Proton lightens the interaction ramp (snow #6d4aff →
-  // lumo-dark majors #7c5cff/#8a6eff/#9d84ff); mirror that direction.
-  const dark = [
-    '--primary:' + step(0.06),
-    '--interaction-norm:' + settings.accent.toUpperCase(),
-    '--interaction-norm-major-1:' + step(0.03),
-    '--interaction-norm-major-2:' + step(0.06),
-    '--interaction-norm-major-3:' + step(0.10),
-    '--interaction-norm-minor-1:' + step(0.06) + '2b',
-    '--interaction-norm-minor-2:' + step(0.06) + '17',
-    '--focus-outline:' + settings.accent.toUpperCase(),
-  ].join(';');
-  if (!tag) {
-    tag = document.createElement('style');
-    tag.id = ACCENT_STYLE_ID;
-    document.head.appendChild(tag);
+  if (!link) {
+    link = document.createElement('link');
+    link.id = id;
+    link.rel = 'stylesheet';
+    document.head.appendChild(link);
   }
-  tag.textContent = ':root{' + light + '}[data-theme=dark]{' + dark + '}';
+  if (link.getAttribute('href') !== href) link.setAttribute('href', href);
+}
+
+/** Apply theme ASSETS for the current settings: <html> attributes + CSS
+ * links. Synchronous (no plugin load). */
+function applyFcThemeAssets() {
+  const themeId = settings.fcTheme;
+  const t = FC_THEMES[themeId];
+  const flavor = t.flavor;
+  const root = document.documentElement;
+  root.dataset.fctheme = themeId;
+
+  // Calendar view CSS: the stock flavor's theme.css + its palette css.
+  ensureCssLink('fc-theme-css', FC_VENDOR + '/themes/' + flavor + '/theme.css');
+  if (flavor === 'classic') {
+    ensureCssLink('fc-palette-css', FC_VENDOR + '/themes/classic/palette.css');
+  } else {
+    // shadcn / mui keep the monarch flavor on the OFFICIAL default palette
+    // (blue) — the playground's default combination; their own palette
+    // setting styles the app chrome instead.
+    const pal = (themeId === 'shadcn' || themeId === 'mui') ? 'blue' : settings.fcPalette;
+    ensureCssLink('fc-palette-css', FC_VENDOR + '/themes/' + flavor + '/palettes/' + pal + '.css');
+  }
+
+  // Chrome palette CSS for the UI-language themes + activation attributes.
+  if (themeId === 'shadcn') {
+    ensureCssLink('fc-chrome-palettes', FC_VENDOR + '/chrome/shadcn-palettes.css');
+    root.dataset.palette = settings.fcPalette;
+  } else {
+    ensureCssLink('fc-chrome-palettes', null);
+    delete root.dataset.palette;
+  }
+  if (themeId === 'mui') {
+    ensureCssLink('fc-chrome-palettes', FC_VENDOR + '/chrome/mui-palettes.css');
+    root.dataset.muiPalette = settings.fcPalette;
+  } else {
+    delete root.dataset.muiPalette;
+  }
+}
+
+/** Apply the FULL theme state: assets + (on flavor change) Calendar rebuild.
+ * Async — callers fire-and-forget; failures toast loudly. */
+async function applyFcTheme({ rebuild = true } = {}) {
+  applyFcThemeAssets();
+  const flavor = flavorOf(settings.fcTheme);
+  let plugin;
+  try {
+    plugin = await fcThemePlugin(flavor);
+  } catch (e) {
+    toast('Theme failed to load: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+    return;
+  }
+  if (plugin === activeFcTheme) return;
+  activeFcTheme = plugin;
+  if (rebuild && fcCal) {
+    fcCal.destroy();
+    fcCal = null;
+    await ensureCalendar();
+    renderAll();
+  }
 }
 
 /** Apply the FULL settings state: DOM tokens + FullCalendar options.
  * resetOptions re-processes view specs, so slotDuration/firstDay/formats/
- * weekNumbers/duration all apply live. */
+ * weekNumbers/duration all apply live. (A theme FLAVOR switch is handled by
+ * applyFcTheme's rebuild, not resetOptions.) */
 function applySettings({ fc = true } = {}) {
   applyTheme();
   document.documentElement.dataset.density = settings.density;
-  applyAccentVars();
+  applyFcThemeAssets();
   fmtTimeCache = { key: null, fmt: new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }) }; // rebuilt per hour12 (F-A5-7)
   if (fc && fcCal) fcCal.resetOptions(buildFcOptions());
+}
+
+/* ---------------- local-first cache (v4.5) ----------------
+ * The decrypted model (calendars + evt row payloads) is cached in
+ * localStorage under clock_poc_cache_v45 so an unlock paints IMMEDIATELY
+ * from local data; the cloud sync reconciles afterwards (manifest diff +
+ * §9b batch — the cloud is the secondary, authoritative store).
+ * Writes are debounced (CACHE_WRITE_DELAY) and best-effort (quota never
+ * breaks the app); lock()/forgetBrowser PURGE the cache so no plaintext
+ * survives Lock (E5-5 parity — the same guarantee the in-memory model has).
+ * Offline note: reads are local-first; MUTATIONS still require the network
+ * (an offline write queue is out of scope — see docs/DEVIATIONS.md). */
+
+function hydrateLocalCache() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_CACHE) || 'null');
+    if (!o || typeof o !== 'object' || o.v !== 1) return false;
+    if (Array.isArray(o.cals)) {
+      for (const c of o.cals) {
+        const meta = core.validateCalendarMeta(c && c.meta);
+        if (c && typeof c.uuid === 'string' && meta && Number.isInteger(c.ver)) {
+          state.cals.set(c.uuid, { ver: c.ver, meta });
+        }
+      }
+    }
+    if (Array.isArray(o.evt)) {
+      for (const r of o.evt) {
+        if (!r || typeof r.id !== 'string' || !Number.isInteger(r.ver) || typeof r.text !== 'string') continue;
+        if (!core.parseEvtId(r.id)) continue; // cache hygiene: only evt rows
+        const parsed = core.parseEvtPayload(r.text);
+        if (!parsed) continue; // stale/foreign payload shape — drop quietly
+        state.evt.set(r.id, { ver: r.ver, parsed });
+      }
+    }
+    return state.cals.size > 0 || state.evt.size > 0;
+  } catch {
+    return false; // corrupt cache — ignored, rebuilt from the next sync
+  }
+}
+
+let cacheWriteTimer = null;
+function scheduleCacheWrite() {
+  if (cacheWriteTimer) return;
+  cacheWriteTimer = setTimeout(() => {
+    cacheWriteTimer = null;
+    writeLocalCache();
+  }, CACHE_WRITE_DELAY);
+}
+function writeLocalCache() {
+  try {
+    const o = { v: 1, cals: [], evt: [] };
+    for (const [uuid, c] of state.cals) o.cals.push({ uuid, ver: c.ver, meta: c.meta });
+    for (const [id, r] of state.evt) o.evt.push({ id, ver: r.ver, text: core.serializeEvtPayload(r.parsed) });
+    localStorage.setItem(LS_CACHE, JSON.stringify(o));
+  } catch {
+    /* quota / privacy mode — the cache is best-effort by design */
+  }
+}
+function purgeLocalCache() {
+  if (cacheWriteTimer) {
+    clearTimeout(cacheWriteTimer);
+    cacheWriteTimer = null;
+  }
+  try { localStorage.removeItem(LS_CACHE); } catch { /* ignore */ }
 }
 
 /* ---------------- provisioning & boot (unchanged from v4.1 client) ---------------- */
@@ -444,7 +667,25 @@ async function unlock() {
   setBusy(true, 'Deriving keys (PBKDF2 100000 iterations)…');
   try {
     const probe = new Api(url, token);
-    const cfg = await probe.getConfig();
+    let cfg;
+    let offline = false;
+    try {
+      cfg = await probe.getConfig();
+      // LOCAL-FIRST: cache the (public, §8-unauthenticated) config row so a
+      // LATER unlock can derive keys and open the cached calendar even
+      // while the server is unreachable.
+      safeSetItem(LS_CFG, JSON.stringify(cfg));
+    } catch (e) {
+      // Offline fallback: use the cached config when one exists — the
+      // local cache then renders without any network round-trip.
+      let cached = null;
+      try { cached = JSON.parse(localStorage.getItem(LS_CFG) || 'null'); } catch { /* ignore */ }
+      const okCfg = cached && typeof cached === 'object' &&
+        typeof cached.salt === 'string' && Number.isInteger(cached.iters) && typeof cached.wrapped === 'string';
+      if (!okCfg || !(e instanceof ApiError) || e.kind !== 'network') throw e;
+      cfg = cached;
+      offline = true;
+    }
     const { aes1, kData, authUiHex } = await deriveKeys(password, cfg.salt, cfg.iters, cfg.wrapped);
     if (authUiHex !== token) {
       toast('Warning: stored provisioning code does not match the derived AUTH_UI. Using derived token.', 'warn', 8000);
@@ -452,6 +693,15 @@ async function unlock() {
     state.api = new Api(url, authUiHex);
     state.rowKey = await importRowKey(kData);
     state.today = core.localToday();
+    if (offline) {
+      toast('Server unreachable — showing your locally cached calendar (read-only until sync succeeds).', 'warn', 8000);
+      state.batchOk = false; // every read would fail anyway; per-row fallback is quiet
+    }
+    // v4.5 LOCAL-FIRST: hydrate the decrypted model from the local cache
+    // and paint BEFORE any network round-trip; the sync below then
+    // reconciles with the cloud. A cache-less first unlock keeps the old
+    // "busy until synced" UX so an empty calendar never flashes.
+    const hadLocal = hydrateLocalCache();
     // v4.3 §5.4 — SOFT version gate: a mismatch degrades features (per-row
     // GETs instead of §9b batch) but NEVER locks the user out of their data.
     // E2-2: the gate runs CONCURRENTLY with the first sync — the batch path is
@@ -474,10 +724,22 @@ async function unlock() {
         state.batchOk = false;
       }
     })();
-    await syncAll(true);
-    await versionGate;
     $('#password').value = '';
-    showApp();
+    await showApp();
+    if (hadLocal) {
+      // Cached data is on screen — reconcile silently (failure-tolerant,
+      // toasts handled inside syncAll; autosync keeps retrying every 60 s).
+      setBusy(false);
+      syncAll(true).catch(() => {});
+    } else {
+      setBusy(true, 'Syncing…');
+      try {
+        await syncAll(true);
+      } finally {
+        setBusy(false);
+      }
+    }
+    await versionGate;
   } catch (e) {
     const srvErr =
       e instanceof ApiError && e.body && e.body.error ? ` (server said "${e.body.error}")` : '';
@@ -495,14 +757,14 @@ async function unlock() {
   }
 }
 
-function showApp() {
+async function showApp() {
   $('#login').hidden = true;
   $('#app').hidden = false;
   $('#btn-sync').hidden = false;
   $('#btn-lock').hidden = false;
   $('#btn-forget').hidden = false;
   $('#btn-settings').hidden = false;
-  ensureCalendar(); // construct + render the FullCalendar instance once
+  await ensureCalendar(); // construct + render the FullCalendar instance once
   renderAll();
 }
 
@@ -515,6 +777,9 @@ function lock() {
   state.evt.clear();
   state.corrupt.clear();
   state.today = null;
+  // v4.5 LOCAL-FIRST: purge the plaintext cache — no titles/descriptions
+  // may survive Lock on disk either (E5-5 parity).
+  purgeLocalCache();
   // §9 conditional read: drop the manifest etag on lock — a fresh unlock
   // MUST do a full manifest fetch (a 304 against a cleared state would
   // render an empty calendar).
@@ -541,6 +806,7 @@ function forgetBrowser() {
   localStorage.removeItem(LS_TOKEN);
   localStorage.removeItem(LS_SERVER);
   localStorage.removeItem(LS_CALVIS);
+  try { localStorage.removeItem(LS_CFG); } catch { /* ignore */ }
   calVis = new Map();
   calVisible.clear();
   lock();
@@ -953,6 +1219,8 @@ function viewEventsForRange(firstDay, lastDay) {
         recId: occ.recId,
         isException: occ.isException,
         isCancelled: occ.isCancelled,
+        isTask: occ.isTask,
+        isCompleted: occ.isCompleted,
         isAllDay,
         isAllPartDay,
         isRecurring: !!rec.parsed.master.rrule,
@@ -984,13 +1252,15 @@ function viewEventsForRange(firstDay, lastDay) {
 
 /* ==================================================================
  * FullCalendar bridge (view layer — everything in this section drives
- * FullCalendar v6.1.22 through its DOCUMENTED options only; its DnD,
+ * FullCalendar v7.1.3 through its DOCUMENTED options only; its DnD,
  * resizing, layout and popovers are used exactly as shipped).
  * ================================================================== */
 
 let fcCal = null; // the FullCalendar.Calendar instance (created on unlock)
 
-/** Plugin classes from the vendored global bundles (verified by smoke test). */
+/** Plugin objects from the official global bundle (verified by smoke test)
+ * + the ACTIVE stock theme plugin (official themes are plugins — see
+ * applyFcTheme; activeFcTheme is set before any Calendar is constructed). */
 function fcPlugins() {
   return [
     window.FullCalendar.DayGrid.default,
@@ -998,7 +1268,8 @@ function fcPlugins() {
     window.FullCalendar.Interaction.default,
     window.FullCalendar.MultiMonth.default,
     window.FullCalendar.List.default,
-  ];
+    activeFcTheme,
+  ].filter(Boolean);
 }
 
 /** Local (browser) wall components of a Date — for create/convert paths. */
@@ -1032,16 +1303,28 @@ function fcEventInput(ev) {
     end = core.wallToInstantUTC({ date: ev.end.date, time: endTime }, tz);
     if (end.getTime() <= start.getTime()) end = new Date(start.getTime()); // zero-length
   }
-  const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
+  const [colorMain] = genAccentShades(calendarColor(ev.calUuid));
   return {
     id: ev.uniqueId,
     title: ev.title || '',
     start,
     end,
     allDay,
-    backgroundColor: colorMain,
-    borderColor: colorAlt,
-    textColor: '#FFFFFF',
+    // v7 EventInput colors: `color` + `contrastColor` replace v6's
+    // backgroundColor/borderColor/textColor (the theme derives borders from
+    // the color itself). Per-calendar colors still drive the chip.
+    color: colorMain,
+    contrastColor: '#FFFFFF',
+    // v7 themes style events via hashed utility classes; the canonical
+    // semantic name is carried on OUR event data (documented EventInput
+    // `class` field — pure data, string-only in v7) so the app's CSS and the
+    // e2e suite have a stable handle (the official test theme does exactly
+    // this via eventClass).
+    class: 'fc-event',
+    // Tasks are anchored at DTSTART (no DTEND): duration-resizing a task
+    // would write a nonstandard DTEND on a VTODO — resizing is events-only
+    // (FullCalendar's per-event flag; moves stay enabled).
+    ...(ev.isTask ? { durationEditable: false } : {}),
     extendedProps: { ev },
   };
 }
@@ -1094,6 +1377,7 @@ function buildFcOptions() {
     viewDidMount: onViewDidMount,
     datesSet: onDatesSet,
     eventClick: handleEventClick,
+    eventDidMount: onEventDidMount,
     eventDrop: handleEventDrop,
     eventResize: handleEventResize,
     select: handleSelect,
@@ -1103,20 +1387,42 @@ function buildFcOptions() {
     firstDay: settings.firstDay,
     weekNumbers: !!settings.weekNumbers,
     slotDuration: settings.slotDuration,
-    slotLabelInterval: settings.slotDuration === '00:15:00' ? '01:00:00' : undefined,
+    // v7 renames: slotLabelInterval → slotHeaderInterval (hourly labels
+    // under 15-minute slots, the previous explicit setting).
+    slotHeaderInterval: settings.slotDuration === '00:15:00' ? '01:00:00' : undefined,
     scrollTime: p(now.getHours()) + ':' + p(now.getMinutes()) + ':00',
     eventTimeFormat: timeFmt,
-    slotLabelFormat: timeFmt,
+    // v7 rename: slotLabelFormat → slotHeaderFormat.
+    slotHeaderFormat: timeFmt,
     titleFormat: { year: 'numeric', month: 'long' },
     views: {
-      custom: { type: 'timeGrid', duration: { days: settings.customDays }, buttonText: 'Custom' },
-      timeGridDay: { buttonText: 'Day' },
-      timeGridWeek: { buttonText: 'Week' },
-      dayGridMonth: { buttonText: 'Month' },
-      multiMonthYear: { buttonText: 'Year' },
-      listYear: { buttonText: 'Agenda' },
+      custom: { type: 'timeGrid', duration: { days: settings.customDays } },
     },
-    eventClassNames: (arg) => (arg.event.extendedProps.ev && arg.event.extendedProps.ev.isCancelled ? ['fc-event-cancelled'] : []),
+    // v7: per-view toolbar button labels move from views{}.buttonText to the
+    // `buttons` map (the option the toolbar reads — see buildContentButtons).
+    buttons: {
+      custom: { text: 'Custom' },
+      timeGridDay: { text: 'Day' },
+      timeGridWeek: { text: 'Week' },
+      dayGridMonth: { text: 'Month' },
+      multiMonthYear: { text: 'Year' },
+      listYear: { text: 'Agenda' },
+    },
+    // v7 rename of v6's eventClassNames — NOTE: v7 accepts a STRING (or
+    // falsy) ONLY (refineClassName), never an array. Tasks get their own
+    // classes; completed tasks render dimmed+struck (Fossify's
+    // dimCompletedTasks look); cancelled events keep the strikethrough.
+    eventClass: (arg) => {
+      const ev = arg.event.extendedProps.ev;
+      if (!ev) return '';
+      const cls = [];
+      if (ev.isCancelled) cls.push('fc-event-cancelled');
+      if (ev.isTask) {
+        cls.push('fc-task');
+        if (ev.isCompleted) cls.push('fc-task-completed');
+      }
+      return cls.join(' ');
+    },
     moreLinkClick: 'popover', // native "+N more" popover
   };
 }
@@ -1150,21 +1456,57 @@ function onDatesSet() {
   renderMiniCalendar();
 }
 
-/** Construct + render the calendar once (on first unlock). */
-function ensureCalendar() {
+/** Construct + render the calendar (on first unlock, or after a theme
+ * FLAVOR switch destroyed it). Async: the theme plugin global.js is loaded
+ * on first use — every later switch is a synchronous cache hit. */
+async function ensureCalendar() {
   if (fcCal) return;
+  if (!activeFcTheme) {
+    activeFcTheme = await fcThemePlugin(flavorOf(settings.fcTheme));
+  }
   fcCal = new window.FullCalendar.Calendar($('#calendar'), buildFcOptions());
   fcCal.render();
 }
 
 /* ---------------- FullCalendar → backbone handlers ---------------- */
 
-/** Click on an event chip → read-only popover (backbone UI, unchanged). */
+/** Click on an event chip → task checkbox toggles completion (Fossify
+ * semantics); anything else opens the read-only popover. */
 function handleEventClick(info) {
   info.jsEvent.preventDefault();
   const ev = info.event.extendedProps.ev;
   if (!ev) return;
+  if (ev.isTask && info.jsEvent.target && info.jsEvent.target.closest && info.jsEvent.target.closest('.fc-task-check')) {
+    toggleTaskCompletion(ev);
+    return;
+  }
   openEventPopover(ev, info.el.getBoundingClientRect());
+}
+
+/** eventDidMount: prepend the task CHECKBOX (Fossify renders a task icon
+ * beside every task; ours is interactive). Official FullCalendar render
+ * hook — FullCalendar's own time/title content is untouched. Idempotent
+ * (a re-mount of the same element never duplicates the box). */
+function onEventDidMount(arg) {
+  const ev = arg.event.extendedProps.ev;
+  if (!ev || !ev.isTask || arg.isMirror) return;
+  const root = arg.el;
+  if (root.querySelector(':scope > .fc-task-check, :scope .fc-event-main > .fc-task-check')) return;
+  const box = el('span', 'fc-task-check' + (ev.isCompleted ? ' is-completed' : ''), {
+    role: 'checkbox',
+    'aria-checked': ev.isCompleted ? 'true' : 'false',
+    'aria-label': ev.isCompleted ? 'Mark task incomplete' : 'Mark task complete',
+    tabindex: '0',
+  });
+  box.addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleTaskCompletion(ev);
+    }
+  });
+  const host = root.querySelector('.fc-event-main') || root;
+  host.prepend(box);
 }
 
 /** Duration → {days, minutes} (FullCalendar Duration objects carry
@@ -1295,13 +1637,16 @@ function handleDateClick(info) {
 /* ---------------- rendering (view refresh) ---------------- */
 
 /** Render everything from the CURRENT decrypted state. The grid itself is
- * FullCalendar's — refetchEvents re-runs the (synchronous) event source. */
+ * FullCalendar's — refetchEvents re-runs the (synchronous) event source.
+ * v4.5 LOCAL-FIRST: every completed render schedules a debounced cache
+ * write (sync ingestion, mutations and deletes ALL funnel through here). */
 function renderAll() {
   state.today = state.today || core.localToday();
   if (fcCal) fcCal.refetchEvents();
   renderCalendarList();
   renderMiniCalendar();
   renderClockPreview();
+  scheduleCacheWrite();
 }
 
 /** Switch the FullCalendar view (toolbar buttons call this via view-did-mount
@@ -1521,6 +1866,11 @@ function openEventPopover(ev, anchor) {
   bar.style.background = calendarColor(ev.calUuid);
   const headMain = el('div');
   headMain.style.flex = '1';
+  if (ev.isTask) {
+    headMain.appendChild(el('span', 'badge proto' + (ev.isCompleted ? ' task-done' : ''), {
+      text: ev.isCompleted ? 'task — completed' : 'task',
+    }));
+  }
   if (ev.isCancelled) {
     headMain.appendChild(el('span', 'badge proto', { text: 'canceled' }));
   }
@@ -1531,6 +1881,19 @@ function openEventPopover(ev, anchor) {
   if (freq) headMain.appendChild(el('div', 'eventpopover-date freq', { text: freq }));
   head.append(bar, headMain);
   const actions = el('div', 'eventpopover-actions');
+  // Task completion toggle (Fossify's mark-complete action): a checkbox
+  // button beside edit/delete.
+  if (ev.isTask) {
+    const btnDone = el('button', 'button button-ghost icon-only' + (ev.isCompleted ? ' task-toggle-done' : ''), {
+      type: 'button',
+      title: ev.isCompleted ? 'Mark task incomplete' : 'Mark task complete',
+      'aria-label': ev.isCompleted ? 'Mark task incomplete' : 'Mark task complete',
+      'aria-pressed': ev.isCompleted ? 'true' : 'false',
+    });
+    btnDone.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.2"/><path d="M5.2 8.3l1.9 1.9 3.7-4.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    btnDone.addEventListener('click', () => { closePopover(); toggleTaskCompletion(ev); });
+    actions.appendChild(btnDone);
+  }
   const btnEdit = el('button', 'button button-ghost icon-only', {
     type: 'button', title: 'Edit', 'aria-label': 'Edit',
   });
@@ -1703,6 +2066,34 @@ function beginCreateRange(startDay, endDay) {
   });
 }
 
+/** New TASK (Fossify Calendar's "New task" — MainActivity split). A task is
+ * a VTODO row: start anchor + optional recurrence + completion checkbox.
+ * The editor hides the Ends row (Fossify's TaskActivity has no end field). */
+function beginCreateTask() {
+  closeAllOverlays();
+  const uuid = defaultCalendarUuid();
+  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
+  const start = defaultStart();
+  const day = core.localToday();
+  editor.mode = 'create';
+  editor.scope = null;
+  editor.target = null;
+  editor.custom = null;
+  openEditor({
+    isTask: true,
+    completed: false,
+    title: '',
+    allDay: false,
+    start: { date: day, time: hhmm(start) },
+    end: { date: day, time: hhmm(new Date(start.getTime() + 30 * 60000)) }, // unused by tasks
+    freq: '',
+    calUuid: uuid,
+    location: '',
+    notifs: [],
+    description: '',
+  });
+}
+
 function hhmm(d) {
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
@@ -1717,7 +2108,7 @@ function defaultCalendarUuid() {
 function beginEdit(ev) {
   closeAllOverlays();
   if (ev.isRecurring || ev.isException) {
-    openRecurringChoice('Edit recurring event', (scope) => {
+    openRecurringChoice(ev.isTask ? 'Edit recurring task' : 'Edit recurring event', (scope) => {
       editor.mode = 'edit';
       editor.scope = scope;
       editor.target = ev;
@@ -1761,6 +2152,8 @@ function openEditorFormFor(ev, scope) {
   const freq = freqKeyFromComponent(comp, ev.parsed.master);
   editor.custom = freq === 'CUSTOM' ? (ev.parsed.master.rrule || '') : null;
   openEditor({
+    isTask: !!ev.isTask,
+    completed: !!ev.isTask && comp.status === 'COMPLETED',
     title: comp.summary || '',
     allDay: isAllDay,
     start: {
@@ -1794,8 +2187,12 @@ function openEditor(form) {
   const backdrop = $('#editor-backdrop');
   const close = () => closeModalSurface(modal, backdrop);
   const box = el('div', 'eventform');
+  const isTask = !!form.isTask;
   const headRow = el('div', 'modal-head');
-  headRow.appendChild(el('h1', { text: editor.mode === 'create' ? 'Add event' : 'Edit event' }));
+  const headTitle = isTask
+    ? (editor.mode === 'create' ? 'Add task' : 'Edit task')
+    : (editor.mode === 'create' ? 'Add event' : 'Edit event');
+  headRow.appendChild(el('h1', { text: headTitle }));
   const closeX = el('button', 'button button-ghost icon-only', { type: 'button', 'aria-label': 'Close', title: 'Close' });
   closeX.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8" stroke-linecap="round"/></svg>';
   closeX.addEventListener('click', close);
@@ -1804,6 +2201,8 @@ function openEditor(form) {
 
   const f = { ...form };
   const val = () => ({
+    isTask: !!f.isTask,
+    completed: !!f.completed,
     title: f.title,
     allDay: f.allDay,
     start: { ...f.start },
@@ -1859,7 +2258,26 @@ function openEditor(form) {
   rowEnd.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3l2 2" stroke-linecap="round"/></svg>';
   const dtEnd = mkDT('Ends', 'end');
   rowEnd.appendChild(dtEnd.body);
+  // Tasks carry no end boundary (Fossify TaskActivity has none; VTODO ends
+  // via DUE, which our editor does not manage) — the Ends row is events-only.
+  if (isTask) rowEnd.hidden = true;
   box.appendChild(rowEnd);
+
+  /* ---- task completion toggle (edit mode — Fossify toggleMarkComplete) ---- */
+  if (isTask && editor.mode === 'edit') {
+    const rowDone = el('div', 'form-row');
+    rowDone.appendChild(el('span', 'ic'));
+    rowDone.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 8.5l3 3 7-7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const doneBody = el('div', 'form-row-body');
+    const doneChk = el('input', null, { type: 'checkbox', id: 'task-done-chk' });
+    doneChk.checked = !!f.completed;
+    doneChk.addEventListener('change', () => { f.completed = doneChk.checked; });
+    const doneLbl = el('label', null, { for: 'task-done-chk' });
+    doneLbl.append(doneChk, document.createTextNode('Mark complete'));
+    doneBody.appendChild(doneLbl);
+    rowDone.appendChild(doneBody);
+    box.appendChild(rowDone);
+  }
 
   /* ---- all-day + frequency ---- */
   const rowFR = el('div', 'form-row');
@@ -2092,17 +2510,21 @@ async function saveEvent(form) {
   if (editor.mode === 'create') {
     if (!form.calUuid || !state.cals.has(form.calUuid)) throw new Error('no_calendar');
     const uid = crypto.randomUUID();
+    const isTask = !!form.isTask;
     const cal = buildVCalendarOf({
+      type: isTask ? 'VTODO' : 'VEVENT',
       uid,
       dtstamp,
       dtstart: mkStart(),
-      dtend: mkEnd(),
+      // Tasks anchor at DTSTART only (Fossify TaskActivity shape): a VTODO
+      // carries no DTEND — its span is the start day.
+      dtend: isTask ? null : mkEnd(),
       rrule: rruleFor(form.freq, form),
       summary: form.title,
       description: form.description || null,
       location: form.location || null,
-      status: null,
-      transp: form.allDay ? 'TRANSPARENT' : null,
+      status: isTask && form.completed ? 'COMPLETED' : null,
+      transp: !isTask && form.allDay ? 'TRANSPARENT' : null,
       sequence: 0,
       alarms,
     });
@@ -2115,7 +2537,7 @@ async function saveEvent(form) {
     if (res.ver !== 1) throw new Error('unexpected_ver: ' + id);
     applyRowLocally(id, res.ver, res.text);
     renderAll();
-    toast('Event saved.', 'ok', 2000);
+    toast((isTask ? 'Task' : 'Event') + ' saved.', 'ok', 2000);
     return;
   }
 
@@ -2124,6 +2546,7 @@ async function saveEvent(form) {
   const rowId = target.rowId;
   const parsed = target.parsed;
   const isExceptionEdit = editor.scope === 'exception';
+  const isTask = !!form.isTask;
   // A9: guard BOTH calendars up front — a deleted target calendar must not
   // be resurrected by a plain edit, and a deleted picked calendar must not
   // silently drop the user's move.
@@ -2159,12 +2582,18 @@ async function saveEvent(form) {
       ...base,
       dtstamp,
       dtstart: mkStart(),
-      dtend: mkEnd(),
+      // Tasks keep their foreign DTEND verbatim (our editor writes none).
+      dtend: isTask ? (base.dtend || null) : mkEnd(),
       rrule: isExceptionEdit ? base.rrule : rruleFor(form.freq, form),
       summary: form.title,
       description: form.description || null,
       location: form.location || null,
-      transp: form.allDay ? 'TRANSPARENT' : null,
+      // Tasks: the editor's Mark-complete toggle drives STATUS:COMPLETED
+      // (any foreign non-COMPLETED status survives when un-checked).
+      status: isTask
+        ? (form.completed ? 'COMPLETED' : (base.status === 'COMPLETED' ? null : base.status))
+        : base.status,
+      transp: isTask ? null : (form.allDay ? 'TRANSPARENT' : null),
       sequence: (base.sequence === null || base.sequence === undefined ? 0 : base.sequence) + 1,
       alarms,
     };
@@ -2215,10 +2644,11 @@ async function saveEvent(form) {
       : events.findIndex((e) => e.recurrenceId === null);
     const old = idx >= 0 ? events[idx] : null;
     const base = old || {
+      type: isTask ? 'VTODO' : 'VEVENT',
       uid: p.uid,
       dtstamp,
       dtstart: mkStart(),
-      dtend: mkEnd(),
+      dtend: isTask ? null : mkEnd(),
       duration: null,
       recurrenceId: recId,
       rrule: null,
@@ -2237,12 +2667,18 @@ async function saveEvent(form) {
       ...base,
       dtstamp,
       dtstart: mkStart(),
-      dtend: mkEnd(),
+      // Tasks keep their foreign DTEND verbatim (our editor writes none).
+      dtend: isTask ? (base.dtend || null) : mkEnd(),
       rrule: isExceptionEdit ? base.rrule : rruleFor(form.freq, form),
       summary: form.title,
       description: form.description || null,
       location: form.location || null,
-      transp: form.allDay ? 'TRANSPARENT' : null,
+      // Tasks: the editor's Mark-complete toggle drives STATUS:COMPLETED
+      // (any foreign non-COMPLETED status survives when un-checked).
+      status: isTask
+        ? (form.completed ? 'COMPLETED' : (base.status === 'COMPLETED' ? null : base.status))
+        : base.status,
+      transp: isTask ? null : (form.allDay ? 'TRANSPARENT' : null),
       sequence: (base.sequence === null || base.sequence === undefined ? 0 : base.sequence) + 1,
       alarms,
     };
@@ -2253,7 +2689,7 @@ async function saveEvent(form) {
 
   applyRowLocally(rowId, res.ver, res.text);
   renderAll();
-  toast('Event saved.', 'ok', 2000);
+  toast((form.isTask ? 'Task' : 'Event') + ' saved.', 'ok', 2000);
 }
 
 /** Re-serialize a locally-held parsed row (for the RMW fast-path payload). */
@@ -2264,6 +2700,7 @@ function serializeEvtOf(rec) {
 /** Build a minimal VCALENDAR model around one component spec. */
 function buildVCalendarOf(spec) {
   const ev = {
+    type: spec.type || 'VEVENT', // v4.5: 'VTODO' rows are tasks
     uid: spec.uid,
     dtstamp: spec.dtstamp,
     dtstart: spec.dtstart,
@@ -2581,6 +3018,104 @@ async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
     }
     if (idx >= 0) events[idx] = upd;
     else events.push(upd);
+    return serializeVCalendar(p.calendar);
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
+  applyRowLocally(target.rowId, res.ver, res.text);
+  renderAll();
+}
+
+/* ---------------- task completion mutations (v4.5) ----------------
+ * Fossify Calendar semantics on our RMW backbone: STATUS:COMPLETED on the
+ * master completes a whole task; on a RECURRENCE-ID exception it completes
+ * ONE occurrence of a repeating task (the RFC-native analogue of Fossify's
+ * per-occurrence completed-tasks rows). Un-completing clears the STATUS
+ * line (an open task carries no STATUS — Fossify's exporter does the same). */
+
+/** Entry point from the event-block checkbox / popover / editor toggle. */
+function toggleTaskCompletion(ev) {
+  if (!state.api || state.busy) return;
+  if (!ev.isTask) return;
+  if (ev.isException) {
+    // A completed occurrence un-completes ITSELF; an edited exception of a
+    // repeating task also toggles just this occurrence.
+    runTaskCompletionToggle(ev, 'exception');
+    return;
+  }
+  if (ev.isRecurring) {
+    openRecurringChoice(
+      ev.isCompleted ? 'Mark recurring task incomplete' : 'Mark recurring task complete',
+      (choice) => { runTaskCompletionToggle(ev, choice === 'exception' ? 'exception' : 'master'); },
+      null
+    );
+    return;
+  }
+  runTaskCompletionToggle(ev, 'master');
+}
+
+async function runTaskCompletionToggle(ev, scope) {
+  const wasCompleted = ev.isCompleted;
+  try {
+    setBusy(true, 'Saving…');
+    await applyCompletionChange(ev, scope, !wasCompleted);
+    toast('Task marked ' + (wasCompleted ? 'incomplete' : 'complete') + '.', 'ok', 2000);
+  } catch (e) {
+    toast('Update failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+  } finally {
+    setBusy(false);
+  }
+}
+
+/** RMW: set/clear STATUS:COMPLETED on the master or on the occurrence's
+ * exception component (creating it from the master when needed — the same
+ * exception-creation pattern as applyDayShift). */
+async function applyCompletionChange(ev, scope, completed) {
+  const target = ev;
+  const localRow = state.evt.get(target.rowId) || null;
+  const now = { date: new Date().toISOString().slice(0, 10), time: new Date().toISOString().slice(11, 19), tz: 'UTC' };
+  const res = await putRowRMW(target.rowId, (payload) => {
+    let p;
+    try { p = core.parseEvtPayload(payload); } catch { p = null; }
+    if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
+    if (!p.isTask) throw new Error('not_a_task: this row is not a task');
+    const events = p.calendar.events;
+    const isException = scope === 'exception';
+    const idx = isException
+      ? events.findIndex((e) => e.recurrenceId && e.recurrenceId.date === target.recId.date &&
+          (e.recurrenceId.time || '') === (target.recId.time || ''))
+      : events.findIndex((e) => e.recurrenceId === null);
+    if (isException && !target.recId) throw new Error('bad_scope: no occurrence id');
+    let comp;
+    if (idx >= 0) {
+      comp = events[idx];
+    } else {
+      // Create the exception from the master occurrence (same shape as
+      // applyDayShift's exception creation).
+      comp = {
+        type: 'VTODO',
+        uid: p.uid,
+        dtstamp: null,
+        dtstart: target.component.dtstart,
+        dtend: target.component.dtend,
+        duration: null,
+        recurrenceId: { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz },
+        rrule: null,
+        exdates: [],
+        rdates: [],
+        summary: target.component.summary || '',
+        description: target.component.description || null,
+        location: target.component.location || null,
+        status: target.component.status && target.component.status !== 'COMPLETED' ? target.component.status : null,
+        transp: null,
+        sequence: null,
+        alarms: target.component.alarms || [],
+        extra: [],
+      };
+    }
+    comp.dtstamp = now;
+    comp.status = completed ? 'COMPLETED' : (comp.status === 'COMPLETED' ? null : comp.status);
+    comp.sequence = (comp.sequence === null || comp.sequence === undefined ? 0 : comp.sequence) + 1;
+    if (idx >= 0) events[idx] = comp;
+    else events.push(comp);
     return serializeVCalendar(p.calendar);
   }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
   applyRowLocally(target.rowId, res.ver, res.text);
@@ -2983,27 +3518,64 @@ function openSettingsModal() {
   themeRow.appendChild(tb);
   box.appendChild(themeRow);
 
-  /* ---- accent colour ---- */
-  const accentRow = el('div', 'form-row');
-  accentRow.appendChild(el('span', 'ic'));
-  accentRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" stroke-linecap="round"/></svg>';
-  const ab = el('div', 'form-row-body');
-  ab.appendChild(el('label', { text: 'Accent colour' }));
-  const agrid = el('div', 'palette-grid');
-  for (const c of ['#6d4aff', '#ec3e7c', '#f78400', '#1da583', '#179fd9', '#db60d6']) {
-    const sw = el('button', 'palette-swatch' + (settings.accent === c ? ' selected' : ''), {
-      type: 'button', 'aria-label': c, title: c,
+  /* ---- calendar theme (the 7 official FullCalendar themes) ---- */
+  const fcThemeRow = el('div', 'form-row');
+  fcThemeRow.appendChild(el('span', 'ic'));
+  fcThemeRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" stroke-linecap="round"/></svg>';
+  const fctb = el('div', 'form-row-body');
+  fctb.appendChild(el('label', { text: 'Calendar theme', for: 'set-fctheme' }));
+  const fcThemeSeg = el('div', 'settings-segment settings-segment-wrap', { role: 'group', 'aria-label': 'Calendar theme' });
+  for (const id of FC_THEME_IDS) {
+    const b = el('button', 'settings-segment-button' + (settings.fcTheme === id ? ' is-selected' : ''), {
+      type: 'button', text: FC_THEMES[id].label, 'aria-pressed': settings.fcTheme === id ? 'true' : 'false',
     });
-    sw.style.background = c;
-    sw.addEventListener('click', () => {
-      change(() => { settings.accent = c; });
-      agrid.querySelectorAll('.palette-swatch').forEach((x) => x.classList.toggle('selected', x.getAttribute('aria-label') === c));
+    b.addEventListener('click', () => {
+      if (settings.fcTheme === id) return;
+      const prevFlavor = flavorOf(settings.fcTheme);
+      change(() => {
+        settings.fcTheme = id;
+        settings.fcPalette = defaultPaletteOf(id);
+      });
+      fcThemeSeg.querySelectorAll('.settings-segment-button').forEach((x) => {
+        const on = x.textContent.toLowerCase() === FC_THEMES[id].label.toLowerCase();
+        x.classList.toggle('is-selected', on);
+        x.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      rebuildPaletteRow();
+      // A flavor change swaps the theme PLUGIN — rebuild the Calendar.
+      if (flavorOf(id) !== prevFlavor) applyFcTheme({ rebuild: true }).catch(() => {});
     });
-    agrid.appendChild(sw);
+    fcThemeSeg.appendChild(b);
   }
-  ab.appendChild(agrid);
-  accentRow.appendChild(ab);
-  box.appendChild(accentRow);
+  fctb.appendChild(fcThemeSeg);
+  fcThemeRow.appendChild(fctb);
+  box.appendChild(fcThemeRow);
+
+  /* ---- theme palette (per-theme official palettes; classic has none) ---- */
+  const palRow = el('div', 'form-row');
+  palRow.appendChild(el('span', 'ic'));
+  palRow.firstChild.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2.5a5.5 5.5 0 1 1 0 11C6.2 13.5 6 11.8 7.2 11a1.6 1.6 0 0 0-1-2.9H5A2.5 2.5 0 0 1 8 2.5z" stroke-linejoin="round"/><circle cx="6" cy="6.5" r="0.4" fill="currentColor"/><circle cx="8" cy="5.2" r="0.4" fill="currentColor"/><circle cx="10" cy="6.5" r="0.4" fill="currentColor"/></svg>';
+  const palBody = el('div', 'form-row-body');
+  const palSel = el('select', null, { id: 'set-fcpalette', 'aria-label': 'Theme palette' });
+  const rebuildPaletteRow = () => {
+    const opts = FC_THEMES[settings.fcTheme].palettes;
+    palSel.replaceChildren();
+    for (const p of opts) {
+      palSel.appendChild(el('option', null, { value: p, text: p.charAt(0).toUpperCase() + p.slice(1) }));
+    }
+    palSel.value = settings.fcPalette;
+    palRow.hidden = opts.length === 0;
+    palLabel.textContent = settings.fcTheme === 'shadcn' || settings.fcTheme === 'mui'
+      ? 'Palette (app chrome)'
+      : 'Palette';
+  };
+  const palLabel = el('label', { for: 'set-fcpalette' });
+  palBody.appendChild(palLabel);
+  palSel.addEventListener('change', () => change(() => { settings.fcPalette = palSel.value; }));
+  palBody.appendChild(palSel);
+  palRow.appendChild(palBody);
+  box.appendChild(palRow);
+  rebuildPaletteRow();
 
   /* ---- first day of week ---- */
   const fdRow = el('div', 'form-row');
@@ -3156,10 +3728,43 @@ function bind() {
     fcCal.gotoDate(new Date(d.getFullYear(), d.getMonth() + 1, d.getDate()));
     renderMiniCalendar();
   });
+  // New event / New task (Fossify MainActivity's split): the caret opens a
+  // small menu; the button body stays "New event".
   $('#btn-new-event').addEventListener('click', () => {
     if (!state.api || state.busy) return;
     if (state.cals.size === 0) { openCalendarModal(null); return; }
     beginCreate(null);
+  });
+  const newTaskMenu = () => {
+    const old = document.getElementById('new-task-menu');
+    if (old) { old.remove(); return; }
+    const menu = el('div', 'item-menu new-task-menu');
+    menu.id = 'new-task-menu';
+    const evt = el('button', { type: 'button', text: 'New event' });
+    evt.addEventListener('click', () => { menu.remove(); $('#btn-new-event').click(); });
+    const tsk = el('button', { type: 'button', text: 'New task' });
+    tsk.addEventListener('click', () => {
+      menu.remove();
+      if (!state.api || state.busy) return;
+      if (state.cals.size === 0) { openCalendarModal(null); return; }
+      beginCreateTask();
+    });
+    menu.append(evt, tsk);
+    const anchor = $('#btn-new-task');
+    const r = anchor.getBoundingClientRect();
+    menu.style.top = r.bottom + 4 + 'px';
+    menu.style.left = Math.min(r.left, window.innerWidth - 170) + 'px';
+    document.body.appendChild(menu);
+    setTimeout(() => {
+      const closer = (ev) => {
+        if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', closer, true); }
+      };
+      document.addEventListener('mousedown', closer, true);
+    }, 0);
+  };
+  $('#btn-new-task').addEventListener('click', (e) => {
+    e.stopPropagation();
+    newTaskMenu();
   });
   $('#btn-add-calendar').addEventListener('click', () => openCalendarModal(null));
 
@@ -3277,7 +3882,7 @@ function boot() {
     if (v && VIEWS.includes(v)) state.view = v;
   } catch { /* ignore */ }
   bind();
-  applySettings({ fc: false }); // theme/accent/density before first paint
+  applySettings({ fc: false }); // theme assets/density before first paint
 }
 
 boot();

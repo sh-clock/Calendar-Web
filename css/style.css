@@ -1,15 +1,17 @@
 /*
- * Calendar PoC v4.4 — UI powered by FullCalendar v6.1.22 (MIT, vendored at
- * js/vendor/fullcalendar/ — official prebuilt bundles, unmodified). The
- * FullCalendar look is customised ONLY through its documented CSS custom
- * properties (--fc-*) and public class names (.fc-button, .fc-toolbar…),
- * mapped onto the app's Proton-derived design tokens.
+ * Calendar PoC v4.5 — UI powered by FullCalendar v7.1.3 (MIT, vendored at
+ * js/vendor/fullcalendar/v7/ — the official all.global.js bundle +
+ * skeleton.css + the official stock THEMES, unmodified). Calendar styling
+ * is the OFFICIAL theme CSS (skeleton.css + the active theme.css/palette
+ * css, managed by app.js); the app adds only its own semantic classes.
  *
  * Design tokens below are extracted VERBATIM from ProtonMail WebClients
  * (GPL-3.0): packages/colors/themes/dist/snow.theme.css (light) and
  * packages/colors/themes/src/lumo-dark/dark-base.css (dark), structure from
  * packages/styles/scss/lib/_config.scss. Values reproduced under GPL-3.0
- * with attribution (see LICENSE and docs/PROVENANCE.md).
+ * with attribution (see LICENSE and docs/PROVENANCE.md). The [data-fctheme]
+ * blocks at the END map the official FullCalendar theme variables onto
+ * these tokens so every theme drives the app chrome.
  */
 
 [hidden] { display: none !important; }
@@ -394,172 +396,53 @@ input:focus, select:focus { outline: var(--focus-ring-size) solid var(--focus-ri
 .corrupt-note { color: var(--signal-danger); font-size: 12px; }
 
 /* ==================================================================
-   FullCalendar theming — documented --fc-* custom properties and public
-   class names, mapped onto the Proton-derived tokens above. The `html`
-   prefix lifts specificity above FullCalendar's runtime-injected rules
-   (which define the same variables on `.fc`); the dark block follows the
-   light block so equal-specificity order resolves correctly.
+   FullCalendar v7.1.3 — the official skeleton.css + the ACTIVE stock
+   theme's theme.css + palette css (managed <link> elements, see
+   applyFcThemeAssets in app.js) own ALL calendar styling: layout,
+   toolbar buttons, day cells, events, popovers, dark mode (via
+   <html data-color-scheme>). The app adds ONLY its own semantic classes
+   below (cancelled events, tasks) — everything else is the official CSS.
    ================================================================== */
 
-html .fc {
-  --fc-border-color: var(--border-weak);
-  --fc-page-bg-color: var(--background-norm);
-  --fc-neutral-bg-color: var(--background-weak);
-  --fc-list-event-hover-bg-color: var(--background-weak);
-  --fc-highlight-color: var(--interaction-norm-minor-1); /* select/ghost wash */
-  --fc-today-bg-color: var(--background-weak);           /* neutral today wash */
-  --fc-now-indicator-color: var(--primary);
-  --fc-more-link-bg-color: var(--background-norm);
-  --fc-non-business-color: var(--background-weak);
-  --fc-event-selected-overlay-color: rgb(0 0 0 / 0.25);
-  font-family: inherit;
-}
+/* Cancelled occurrences (our class via eventClass). */
+.fc-event.fc-event-cancelled { text-decoration: line-through; opacity: 0.6; }
 
-/* Toolbar (headerToolbar): Proton Button atoms applied to FullCalendar's
-   public .fc-button classes. */
-html .fc .fc-button {
-  background: var(--interaction-default);
-  color: var(--text-weak);
-  border: 1px solid transparent;
-  border-radius: var(--border-radius-md);
-  padding: 5px 12px;
-  font-weight: var(--font-weight-normal);
-  font-size: 13px;
-  box-shadow: none;
+/* TASKS (v4.5, Fossify Calendar look): a checkbox inside the chip; a
+ * completed task is dimmed with its title struck through (Fossify's
+ * dimCompletedTasks). */
+.fc-event.fc-task-completed { opacity: 0.55; }
+.fc-event.fc-task-completed .fc-event-title,
+.fc-event.fc-task-completed .fc-event-main { text-decoration: line-through; }
+.fc-task-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-inline-end: 5px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
   cursor: pointer;
-  transition: background-color .15s ease-out, color .15s ease-out, border-color .15s ease-out;
+  vertical-align: -2px;
 }
-html .fc .fc-button:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
-html .fc .fc-button:active { background: var(--interaction-default-active); }
-html .fc .fc-button:focus, html .fc .fc-button:focus-visible {
-  outline: var(--focus-ring-size) solid var(--focus-ring);
-  box-shadow: none;
+.fc-task-check:focus-visible {
+  outline: 2px solid var(--focus-outline, currentColor);
+  outline-offset: 1px;
 }
-html .fc .fc-button:disabled { background: var(--interaction-weak); color: var(--text-disabled); cursor: default; }
-html .fc .fc-button-primary {
-  background: var(--interaction-default);
-  color: var(--text-norm);
-  border-color: var(--border-norm);
-}
-html .fc .fc-button-primary:hover { background: var(--interaction-default-hover); color: var(--text-norm); }
-html .fc .fc-button-primary:disabled {
-  background: var(--interaction-default);
-  color: var(--text-disabled);
-  border-color: var(--border-weak);
-}
-/* The ACTIVE view button (fc-button-active) = Proton selected segment.
- * F-A3-1 (audit wave): FullCalendar's own rule
- * .fc .fc-button-primary:not(:disabled).fc-button-active carries (0,4,0)
- * specificity and is injected at runtime (AFTER this stylesheet), so it
- * defeated the previous (0,2,1) override — the active button rendered in
- * FullCalendar's default navy. The 5-class chains below win on specificity. */
-html .fc .fc-button.fc-button-primary.fc-button-active,
-html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active,
-html .fc .fc-button.fc-button-primary:not(:disabled):active.fc-button-active {
-  background: var(--interaction-norm);
-  color: var(--interaction-norm-contrast);
-  border-color: transparent;
-  font-weight: var(--font-weight-semibold);
-}
-html .fc .fc-button.fc-button-primary.fc-button-active:hover,
-html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:hover {
-  background: var(--interaction-norm-major-1);
-  color: var(--interaction-norm-contrast);
-}
-html .fc .fc-button.fc-button-primary.fc-button-active:focus,
-html .fc .fc-button.fc-button-primary.fc-button-active:focus-visible,
-html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:focus,
-html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:focus-visible {
-  outline: var(--focus-ring-size) solid var(--focus-ring);
-}
-html .fc .fc-toolbar-title {
-  font-size: 20px;
-  font-weight: var(--font-weight-bold);
-  color: var(--text-norm);
-  margin: 0;
-}
-html .fc .fc-toolbar-chunk { gap: 2px; }
-html .fc .fc-toolbar-chunk .fc-button + .fc-button { margin-left: 2px; }
+.fc-task-check.is-completed { background: currentColor; }
+/* list-view rows: the checkbox rides inline with the title */
+.fc-task-check { margin-inline-end: 6px; }
 
-/* Day-grid cells: today's date number in the accent colour (Proton style),
-   nav-link hover. */
-html .fc .fc-daygrid-day-number {
-  color: var(--text-norm);
-  padding: 2px 4px;
-  border-radius: var(--border-radius-sm);
-  font-weight: var(--font-weight-normal);
-}
-html .fc .fc-day-today .fc-daygrid-day-number {
-  color: var(--primary);
-  font-weight: var(--font-weight-bold);
-}
-html .fc .fc-daygrid-day-number:hover, html .fc .fc-daygrid-day-number:focus:hover {
-  background: var(--interaction-default-hover);
-}
-html .fc .fc-day-other .fc-daygrid-day-number { color: var(--text-weak); }
-
-/* Event chips: per-event backgroundColor/borderColor come from the event
-   source (Proton accent shades); cancelled occurrences strike through. */
-html .fc .fc-event {
-  border-radius: var(--border-radius-sm);
-  font-size: 12px;
-  cursor: pointer;
-}
-html .fc .fc-event.fc-event-cancelled { text-decoration: line-through; opacity: 0.6; }
-html .fc .fc-daygrid-event { border-radius: var(--border-radius-sm); }
-html .fc .fc-daygrid-event .fc-event-title { font-weight: var(--font-weight-semibold); }
-html .fc .fc-timegrid-event { border-radius: var(--border-radius-sm); font-size: 12px; }
-html .fc .fc-timegrid-event .fc-event-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-html .fc .fc-list-event:hover td { background: var(--fc-list-event-hover-bg-color); }
-
-/* "+N more" link (native FullCalendar more-popover). */
-html .fc .fc-daygrid-more-link {
-  color: var(--text-weak);
-  font-size: 12px;
-  font-weight: var(--font-weight-semibold);
-  padding: 1px 4px;
-}
-html .fc .fc-daygrid-more-link:hover { color: var(--text-norm); }
-html .fc .fc-more-popover .fc-popover-body { padding: 4px; }
-html .fc .fc-popover {
-  background: var(--background-norm);
-  border: 1px solid var(--border-weak);
-  border-radius: var(--border-radius-lg);
-  box-shadow: var(--shadow-lifted);
-  overflow: hidden;
-}
-html .fc .fc-popover-header {
-  background: var(--background-weak);
-  color: var(--text-norm);
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-weak);
-}
-
-/* Now indicator (native). */
-html .fc .fc-timegrid-now-indicator-line { border-color: var(--primary); border-width: 2px; }
-html .fc .fc-timegrid-now-indicator-arrow { border-color: var(--primary); }
-
-/* Week-number gutter (settings toggle). */
-html .fc .fc-timegrid-axis-frame, html .fc .fc-daygrid-week-number {
-  color: var(--text-hint);
-  font-size: 11px;
-}
-
-/* Scrollbars inside the calendar: match the app. */
-html .fc .fc-scroller::-webkit-scrollbar { width: 10px; height: 10px; }
-html .fc .fc-scroller::-webkit-scrollbar-thumb {
-  background: var(--interaction-weak-major-2);
-  border-radius: 5px;
-}
-html .fc .fc-scroller::-webkit-scrollbar-track { background: transparent; }
-
-/* ---------- density (settings): compact tightens the shell + chips ---------- */
+/* Density (settings): the official themes own calendar spacing; compact
+ * only tightens the app shell. */
 html[data-density="compact"] { --width-sidebar: 220px; --header-height: 48px; }
-html[data-density="compact"] .fc .fc-event { font-size: 11px; }
-html[data-density="compact"] .fc .fc-toolbar-title { font-size: 17px; }
-html[data-density="compact"] .fc .fc-daygrid-day-number { padding: 1px 3px; }
 
-/* ---------- dark theme (Proton lumo-dark tokens, verbatim) ---------- */
+/* ---------- dark theme (Proton lumo-dark tokens, verbatim) ----------
+ * Fallback chrome palette; the [data-fctheme] blocks BELOW map the official
+ * FullCalendar theme variables onto these same tokens (they win the
+ * equal-specificity order, so every theme drives its own chrome — and the
+ * official dark palette blocks flow straight through the mapping). */
 [data-theme="dark"] {
   color-scheme: dark;
   --primary: #8a6eff;
@@ -610,24 +493,361 @@ html[data-density="compact"] .fc .fc-daygrid-day-number { padding: 1px 3px; }
 [data-theme="dark"] .toast.err { background: var(--signal-danger); color: var(--signal-danger-contrast); }
 [data-theme="dark"] .toast.warn { background: var(--signal-warning); color: #241a00; }
 
-/* FullCalendar dark overrides — html[data-theme="dark"] .fc (0,2,1) beats
-   the light block's html .fc (0,1,1) on specificity (the runtime-injected
-   .fc rules are below both). */
-html[data-theme="dark"] .fc {
-  --fc-border-color: var(--border-weak);
-  --fc-page-bg-color: var(--background-norm);
-  --fc-neutral-bg-color: var(--background-weak);
-  --fc-list-event-hover-bg-color: var(--interaction-default-hover);
-  --fc-highlight-color: var(--interaction-norm-minor-1);
-  --fc-today-bg-color: var(--background-weak);
-  --fc-now-indicator-color: var(--primary);
-  --fc-more-link-bg-color: var(--background-norm);
-  --fc-non-business-color: rgb(0 0 0 / 0.2);
-  --fc-event-selected-overlay-color: rgb(255 255 255 / 0.18);
+/* ==================================================================
+   THEME CHROME MAPPINGS — the 7 official FullCalendar themes.
+   Each block maps the ACTIVE theme's official palette variables onto the
+   app's Proton-named chrome tokens (the chrome classes above consume
+   those). NO colors are invented: every value is an official theme
+   variable (the palette CSS swaps them per palette + dark mode), a
+   color-mix of one, or a structural token. shadcn's own token names
+   (--primary/--background/…, set by the vendored official
+   demo-palettes.css via <html data-palette>) and MUI's --mui-palette-*
+   (chrome/mui-palettes.css, values from @mui/material's source) feed the
+   same mapping. Blocks sit AFTER the dark block on purpose: they win the
+   equal-specificity order in BOTH color schemes.
+   ================================================================== */
+
+/* ---- Monarch (stock) ---- */
+[data-fctheme="monarch"] {
+  --primary: var(--fc-monarch-primary);
+  --primary-contrast: var(--fc-monarch-primary-foreground);
+  --interaction-norm: var(--fc-monarch-primary);
+  --interaction-norm-contrast: var(--fc-monarch-primary-foreground);
+  --interaction-norm-major-1: var(--fc-monarch-primary-over);
+  --interaction-norm-major-2: var(--fc-monarch-primary-down);
+  --interaction-norm-major-3: var(--fc-monarch-primary-down);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--fc-monarch-primary) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--fc-monarch-primary) 9%, transparent);
+  --interaction-weak-minor-1: var(--fc-monarch-faint);
+  --interaction-weak-minor-2: var(--fc-monarch-faint);
+  --interaction-weak: var(--fc-monarch-muted);
+  --interaction-weak-major-1: var(--fc-monarch-strong);
+  --interaction-weak-major-2: var(--fc-monarch-strong);
+  --interaction-weak-major-3: var(--fc-monarch-stronger);
+  --interaction-weak-contrast: var(--fc-monarch-foreground);
+  --text-norm: var(--fc-monarch-foreground);
+  --text-weak: var(--fc-monarch-muted-foreground);
+  --text-hint: var(--fc-monarch-faint-foreground);
+  --text-disabled: var(--fc-monarch-faint-foreground);
+  --field-norm: var(--fc-monarch-border);
+  --field-hover: var(--fc-monarch-muted-foreground);
+  --focus-outline: var(--fc-monarch-primary);
+  --focus-ring: color-mix(in srgb, var(--fc-monarch-primary) 20%, transparent);
+  --border-norm: var(--fc-monarch-strong-border);
+  --border-weak: var(--fc-monarch-border);
+  --background-norm: var(--fc-monarch-background);
+  --background-weak: var(--fc-monarch-muted);
+  --background-strong: var(--fc-monarch-strong);
+  --background-invert: var(--fc-monarch-foreground);
+  --interaction-default-hover: color-mix(in srgb, var(--fc-monarch-foreground) 8%, transparent);
+  --interaction-default-active: color-mix(in srgb, var(--fc-monarch-foreground) 16%, transparent);
+  --signal-danger: var(--fc-monarch-now);
+  --signal-danger-contrast: var(--fc-monarch-background);
+  --signal-danger-minor-2: color-mix(in srgb, var(--fc-monarch-now) 10%, transparent);
 }
-html[data-theme="dark"] .fc .fc-daygrid-day-number { color: var(--text-norm); }
-html[data-theme="dark"] .fc .fc-day-today .fc-daygrid-day-number { color: var(--primary); }
-html[data-theme="dark"] .fc .fc-day-other .fc-daygrid-day-number { color: var(--text-hint); }
+
+/* ---- Forma (stock) ---- */
+[data-fctheme="forma"] {
+  --primary: var(--fc-forma-primary);
+  --primary-contrast: var(--fc-forma-primary-foreground);
+  --interaction-norm: var(--fc-forma-primary);
+  --interaction-norm-contrast: var(--fc-forma-primary-foreground);
+  --interaction-norm-major-1: var(--fc-forma-primary-over);
+  --interaction-norm-major-2: var(--fc-forma-primary-down);
+  --interaction-norm-major-3: var(--fc-forma-primary-down);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--fc-forma-primary) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--fc-forma-primary) 9%, transparent);
+  --interaction-weak-minor-1: var(--fc-forma-faint);
+  --interaction-weak-minor-2: var(--fc-forma-faint);
+  --interaction-weak: var(--fc-forma-muted);
+  --interaction-weak-major-1: var(--fc-forma-strong);
+  --interaction-weak-major-2: var(--fc-forma-strong);
+  --interaction-weak-major-3: var(--fc-forma-stronger);
+  --interaction-weak-contrast: var(--fc-forma-foreground);
+  --text-norm: var(--fc-forma-foreground);
+  --text-weak: var(--fc-forma-muted-foreground);
+  --text-hint: var(--fc-forma-faint-foreground);
+  --text-disabled: var(--fc-forma-faint-foreground);
+  --field-norm: var(--fc-forma-border);
+  --field-hover: var(--fc-forma-muted-foreground);
+  --focus-outline: var(--fc-forma-primary);
+  --focus-ring: color-mix(in srgb, var(--fc-forma-primary) 20%, transparent);
+  --border-norm: var(--fc-forma-strong-border);
+  --border-weak: var(--fc-forma-border);
+  --background-norm: var(--fc-forma-background);
+  --background-weak: var(--fc-forma-muted);
+  --background-strong: var(--fc-forma-strong);
+  --background-invert: var(--fc-forma-foreground);
+  --interaction-default-hover: color-mix(in srgb, var(--fc-forma-foreground) 8%, transparent);
+  --interaction-default-active: color-mix(in srgb, var(--fc-forma-foreground) 16%, transparent);
+  --signal-danger: var(--fc-forma-now);
+  --signal-danger-contrast: var(--fc-forma-background);
+  --signal-danger-minor-2: color-mix(in srgb, var(--fc-forma-now) 10%, transparent);
+}
+
+/* ---- Breezy (stock) ---- */
+[data-fctheme="breezy"] {
+  --primary: var(--fc-breezy-primary);
+  --primary-contrast: var(--fc-breezy-primary-foreground);
+  --interaction-norm: var(--fc-breezy-primary);
+  --interaction-norm-contrast: var(--fc-breezy-primary-foreground);
+  --interaction-norm-major-1: var(--fc-breezy-primary-over);
+  --interaction-norm-major-2: var(--fc-breezy-primary-down);
+  --interaction-norm-major-3: var(--fc-breezy-primary-down);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--fc-breezy-primary) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--fc-breezy-primary) 9%, transparent);
+  --interaction-weak-minor-1: var(--fc-breezy-faint);
+  --interaction-weak-minor-2: var(--fc-breezy-faint);
+  --interaction-weak: var(--fc-breezy-muted);
+  --interaction-weak-major-1: var(--fc-breezy-strong);
+  --interaction-weak-major-2: var(--fc-breezy-strong);
+  --interaction-weak-major-3: var(--fc-breezy-stronger);
+  --interaction-weak-contrast: var(--fc-breezy-foreground);
+  --text-norm: var(--fc-breezy-foreground);
+  --text-weak: var(--fc-breezy-muted-foreground);
+  --text-hint: var(--fc-breezy-faint-foreground);
+  --text-disabled: var(--fc-breezy-faint-foreground);
+  --field-norm: var(--fc-breezy-border);
+  --field-hover: var(--fc-breezy-muted-foreground);
+  --focus-outline: var(--fc-breezy-primary);
+  --focus-ring: color-mix(in srgb, var(--fc-breezy-primary) 20%, transparent);
+  --border-norm: var(--fc-breezy-strong-border);
+  --border-weak: var(--fc-breezy-border);
+  --background-norm: var(--fc-breezy-background);
+  --background-weak: var(--fc-breezy-muted);
+  --background-strong: var(--fc-breezy-strong);
+  --background-invert: var(--fc-breezy-foreground);
+  --interaction-default-hover: color-mix(in srgb, var(--fc-breezy-foreground) 8%, transparent);
+  --interaction-default-active: color-mix(in srgb, var(--fc-breezy-foreground) 16%, transparent);
+  --signal-danger: var(--fc-breezy-now);
+  --signal-danger-contrast: var(--fc-breezy-background);
+  --signal-danger-minor-2: color-mix(in srgb, var(--fc-breezy-now) 10%, transparent);
+}
+
+/* ---- Pulse (stock) ---- */
+[data-fctheme="pulse"] {
+  --primary: var(--fc-pulse-primary);
+  --primary-contrast: var(--fc-pulse-primary-foreground);
+  --interaction-norm: var(--fc-pulse-primary);
+  --interaction-norm-contrast: var(--fc-pulse-primary-foreground);
+  --interaction-norm-major-1: var(--fc-pulse-primary-over);
+  --interaction-norm-major-2: var(--fc-pulse-primary-down);
+  --interaction-norm-major-3: var(--fc-pulse-primary-down);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--fc-pulse-primary) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--fc-pulse-primary) 9%, transparent);
+  --interaction-weak-minor-1: var(--fc-pulse-faint);
+  --interaction-weak-minor-2: var(--fc-pulse-faint);
+  --interaction-weak: var(--fc-pulse-muted);
+  --interaction-weak-major-1: var(--fc-pulse-strong);
+  --interaction-weak-major-2: var(--fc-pulse-strong);
+  --interaction-weak-major-3: var(--fc-pulse-stronger);
+  --interaction-weak-contrast: var(--fc-pulse-foreground);
+  --text-norm: var(--fc-pulse-foreground);
+  --text-weak: var(--fc-pulse-muted-foreground);
+  --text-hint: var(--fc-pulse-faint-foreground);
+  --text-disabled: var(--fc-pulse-faint-foreground);
+  --field-norm: var(--fc-pulse-border);
+  --field-hover: var(--fc-pulse-muted-foreground);
+  --focus-outline: var(--fc-pulse-primary);
+  --focus-ring: color-mix(in srgb, var(--fc-pulse-primary) 20%, transparent);
+  --border-norm: var(--fc-pulse-strong-border);
+  --border-weak: var(--fc-pulse-border);
+  --background-norm: var(--fc-pulse-background);
+  --background-weak: var(--fc-pulse-muted);
+  --background-strong: var(--fc-pulse-strong);
+  --background-invert: var(--fc-pulse-foreground);
+  --interaction-default-hover: color-mix(in srgb, var(--fc-pulse-foreground) 8%, transparent);
+  --interaction-default-active: color-mix(in srgb, var(--fc-pulse-foreground) 16%, transparent);
+  --signal-danger: var(--fc-pulse-now);
+  --signal-danger-contrast: var(--fc-pulse-background);
+  --signal-danger-minor-2: color-mix(in srgb, var(--fc-pulse-now) 10%, transparent);
+}
+
+/* ---- Classic (stock) ---- */
+[data-fctheme="classic"] {
+  --primary: var(--fc-classic-primary);
+  --primary-contrast: var(--fc-classic-primary-foreground);
+  --interaction-norm: var(--fc-classic-primary);
+  --interaction-norm-contrast: var(--fc-classic-primary-foreground);
+  --interaction-norm-major-1: color-mix(in srgb, var(--fc-classic-primary) 85%, #000);
+  --interaction-norm-major-2: color-mix(in srgb, var(--fc-classic-primary) 72%, #000);
+  --interaction-norm-major-3: color-mix(in srgb, var(--fc-classic-primary) 60%, #000);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--fc-classic-primary) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--fc-classic-primary) 9%, transparent);
+  --interaction-weak-minor-1: var(--fc-classic-faint);
+  --interaction-weak-minor-2: var(--fc-classic-faint);
+  --interaction-weak: var(--fc-classic-muted);
+  --interaction-weak-major-1: var(--fc-classic-strong);
+  --interaction-weak-major-2: var(--fc-classic-strong);
+  --interaction-weak-major-3: var(--fc-classic-strong);
+  --interaction-weak-contrast: var(--fc-classic-foreground);
+  --text-norm: var(--fc-classic-foreground);
+  --text-weak: var(--fc-classic-muted-foreground);
+  --text-hint: var(--fc-classic-faint-foreground);
+  --text-disabled: var(--fc-classic-faint-foreground);
+  --field-norm: var(--fc-classic-border);
+  --field-hover: var(--fc-classic-muted-foreground);
+  --focus-outline: var(--fc-classic-primary);
+  --focus-ring: color-mix(in srgb, var(--fc-classic-primary) 20%, transparent);
+  --border-norm: var(--fc-classic-strong-border);
+  --border-weak: var(--fc-classic-border);
+  --background-norm: var(--fc-classic-background);
+  --background-weak: var(--fc-classic-muted);
+  --background-strong: var(--fc-classic-strong);
+  --background-invert: var(--fc-classic-foreground);
+  --interaction-default-hover: color-mix(in srgb, var(--fc-classic-foreground) 8%, transparent);
+  --interaction-default-active: color-mix(in srgb, var(--fc-classic-foreground) 16%, transparent);
+  --signal-danger: var(--fc-classic-now);
+  --signal-danger-contrast: var(--fc-classic-background);
+  --signal-danger-minor-2: color-mix(in srgb, var(--fc-classic-now) 10%, transparent);
+  --border-radius-sm: 2px;
+  --border-radius-md: 3px;
+  --border-radius-lg: 4px;
+  --border-radius-xl: 5px;
+}
+
+/* ---- Shadcn (official fullcalendar-workspace ui-shadcn design language;
+   views use the monarch flavor, the chrome uses the official shadcn
+   tokens — demo-palettes.css, activated by <html data-palette>). ---- */
+[data-fctheme="shadcn"] {
+  /* --primary is the shadcn token itself (set by demo-palettes.css);
+     everything else maps the shadcn token set onto the chrome. */
+  --primary-contrast: var(--primary-foreground);
+  --interaction-norm: var(--primary);
+  --interaction-norm-contrast: var(--primary-foreground);
+  /* shadcn Button cva: hover = bg-primary/90, active darker (no invented
+     ramp — opacity mixes of the token itself). */
+  --interaction-norm-major-1: color-mix(in srgb, var(--primary) 90%, transparent);
+  --interaction-norm-major-2: color-mix(in srgb, var(--primary) 80%, transparent);
+  --interaction-norm-major-3: color-mix(in srgb, var(--primary) 70%, transparent);
+  --interaction-norm-minor-1: var(--accent);
+  --interaction-norm-minor-2: var(--secondary);
+  --interaction-weak-minor-1: var(--muted);
+  --interaction-weak-minor-2: var(--muted);
+  --interaction-weak: var(--secondary);
+  --interaction-weak-major-1: var(--accent);
+  --interaction-weak-major-2: var(--accent);
+  --interaction-weak-major-3: var(--accent);
+  --interaction-weak-contrast: var(--foreground);
+  --text-norm: var(--foreground);
+  --text-weak: var(--muted-foreground);
+  --text-hint: var(--muted-foreground);
+  --text-disabled: color-mix(in srgb, var(--foreground) 40%, transparent);
+  --field-norm: var(--input);
+  --field-hover: var(--muted-foreground);
+  --focus-outline: var(--ring);
+  --focus-ring: color-mix(in srgb, var(--ring) 30%, transparent);
+  --border-norm: var(--border);
+  --border-weak: var(--border);
+  --background-norm: var(--background);
+  --background-weak: var(--muted);
+  --background-strong: var(--accent);
+  --background-invert: var(--foreground);
+  --interaction-default-hover: var(--accent);
+  --interaction-default-active: color-mix(in srgb, var(--accent) 60%, var(--background));
+  --signal-danger: var(--destructive);
+  --signal-danger-contrast: #ffffff;
+  --signal-danger-minor-2: color-mix(in srgb, var(--destructive) 10%, transparent);
+  /* radius ramp — VERBATIM from the official ui-shadcn.css @theme block */
+  --border-radius-sm: calc(var(--radius) - 4px);
+  --border-radius-md: calc(var(--radius) - 2px);
+  --border-radius-lg: var(--radius);
+  --border-radius-xl: calc(var(--radius) + 4px);
+}
+[data-fctheme="shadcn"] body {
+  /* ui-shadcn.css: html { font-family: 'Geist Variable', sans-serif } */
+  font-family: 'Geist Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+[data-fctheme="shadcn"] .button-primary {
+  /* shadcn Button (default variant): shadow-xs, no letter-spacing tricks */
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+/* ---- MUI (Material Design; views use the monarch flavor, the chrome uses
+   the MUI palette tokens — chrome/mui-palettes.css from @mui/material's
+   source + FullCalendar's official demo palettes). ---- */
+[data-fctheme="mui"] {
+  --primary: var(--mui-palette-primary-main);
+  --primary-contrast: var(--mui-palette-primary-contrastText);
+  --interaction-norm: var(--mui-palette-primary-main);
+  --interaction-norm-contrast: var(--mui-palette-primary-contrastText);
+  --interaction-norm-major-1: var(--mui-palette-primary-dark);
+  --interaction-norm-major-2: color-mix(in srgb, var(--mui-palette-primary-main) 85%, #000);
+  --interaction-norm-major-3: var(--mui-palette-primary-dark);
+  --interaction-norm-minor-1: color-mix(in srgb, var(--mui-palette-primary-main) 17%, transparent);
+  --interaction-norm-minor-2: color-mix(in srgb, var(--mui-palette-primary-main) 9%, transparent);
+  --interaction-weak-minor-1: color-mix(in srgb, var(--mui-palette-grey-100) 60%, var(--mui-palette-background-paper));
+  --interaction-weak-minor-2: var(--mui-palette-grey-100);
+  --interaction-weak: var(--mui-palette-grey-200);
+  --interaction-weak-major-1: color-mix(in srgb, var(--mui-palette-grey-200) 70%, var(--mui-palette-text-secondary));
+  --interaction-weak-major-2: var(--mui-palette-grey-900);
+  --interaction-weak-major-3: var(--mui-palette-grey-900);
+  --interaction-weak-contrast: var(--mui-palette-text-primary);
+  --text-norm: var(--mui-palette-text-primary);
+  --text-weak: var(--mui-palette-text-secondary);
+  --text-hint: var(--mui-palette-text-secondary);
+  --text-disabled: var(--mui-palette-text-disabled);
+  --field-norm: var(--mui-palette-divider);
+  --field-hover: var(--mui-palette-text-secondary);
+  --focus-outline: var(--mui-palette-primary-main);
+  --focus-ring: color-mix(in srgb, var(--mui-palette-primary-main) 20%, transparent);
+  --border-norm: var(--mui-palette-divider);
+  --border-weak: var(--mui-palette-divider);
+  --background-norm: var(--mui-palette-background-default);
+  --background-weak: var(--mui-palette-grey-100);
+  --background-strong: var(--mui-palette-grey-200);
+  --background-invert: var(--mui-palette-text-primary);
+  --interaction-default-hover: var(--mui-palette-action-hover);
+  --interaction-default-active: var(--mui-palette-action-selected);
+  --signal-danger: var(--mui-palette-error-main);
+  --signal-danger-contrast: var(--mui-palette-error-contrastText);
+  --signal-danger-minor-2: color-mix(in srgb, var(--mui-palette-error-main) 10%, transparent);
+  /* MUI shape.borderRadius = 4 */
+  --border-radius-sm: 2px;
+  --border-radius-md: 4px;
+  --border-radius-lg: 4px;
+  --border-radius-xl: 6px;
+}
+[data-fctheme="mui"] body {
+  /* MUI typography.fontFamily (verbatim from @mui/material + the demo
+     palettes' typography block) */
+  font-family: 'Roboto', 'Helvetica', 'Arial', sans-serif;
+}
+[data-fctheme="mui"] .button {
+  /* MUI button (the official demo's theme overrides): uppercase, weight
+     600, pill radius (shape 4 + MuiButton root override borderRadius 20) */
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+[data-fctheme="mui"] .button-primary,
+[data-fctheme="mui"] .button-outline {
+  border-radius: 20px;
+}
+
+/* ---------- new-event / new-task split (Fossify MainActivity split) ---------- */
+.newevent-group { display: flex; gap: 0; }
+.newevent-group .button-newevent { flex: 1 1 auto; border-radius: var(--border-radius-md); }
+.newevent-group .button-newtask-caret {
+  flex: 0 0 auto;
+  margin-left: 1px;
+  width: 26px;
+  padding: 0;
+  border-radius: 0 var(--border-radius-md) var(--border-radius-md) 0;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.new-task-menu { z-index: var(--z-floating-frames); }
+
+/* ---------- settings segment wrap (7 themes need multiple rows) ---------- */
+.settings-segment-wrap { flex-wrap: wrap; }
+.settings-segment-wrap .settings-segment-button { flex: 0 0 auto; }
+
+/* ---------- task badges (popover) ---------- */
+.badge.task-done { text-decoration: none; }
+.task-toggle-done { color: var(--signal-success); }
 
 /* ---------- responsive ---------- */
 @media (max-width: 870px) {

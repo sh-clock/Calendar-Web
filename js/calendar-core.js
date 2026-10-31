@@ -135,9 +135,12 @@ export function newCalendarMeta(name, color) {
 
 /**
  * Validate + parse an evt row payload (VCALENDAR text).
- * Returns { calendar, master, exceptions:[], uids:[..] } or null when
- * structurally invalid (corrupt row: surfaced, never rewritten).
- * Enforces the v4.2 one-UID-per-row rule.
+ * Returns { calendar, master, exceptions:[], uids:[..], isTask } or null
+ * when structurally invalid (corrupt row: surfaced, never rewritten).
+ * Enforces the v4.2 one-UID-per-row rule and the v4.5 task extension: the
+ * payload may hold a VTODO master + VTODO exceptions (a TASK, RFC 5545
+ * §3.6.2; STATUS:COMPLETED = done) INSTEAD of VEVENTs — but never a MIX of
+ * component types in one row (a CalDAV resource is single-kind).
  */
 export function parseEvtPayload(text) {
   if (typeof text !== 'string' || text.length === 0 || text.length > 200000) return null;
@@ -159,6 +162,10 @@ export function parseEvtPayload(text) {
   if (exceptions.length > 0 && !master.rrule) {
     return null; // RECURRENCE-ID exceptions require a recurring master
   }
+  // v4.5: one component KIND per row — a VEVENT row never mixes VTODOs and
+  // vice versa (mixed payloads are ambiguous to render and to CalDAV map).
+  if (new Set(cal.events.map((e) => e.type || 'VEVENT')).size !== 1) return null;
+  const isTask = (master.type || 'VEVENT') === 'VTODO';
   // RFC 5545 §3.8.4.4: the RECURRENCE-ID value type MUST match DTSTART.
   // A mismatch would make the override key never match the occurrence key
   // (instant vs day), rendering BOTH on one day with a duplicate
@@ -181,7 +188,7 @@ export function parseEvtPayload(text) {
   if (master.rrule && !/^FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)([;].*)?$/.test(master.rrule)) {
     return null; // FREQ required first (RFC 5545 §3.3.10); SECONDLY/MINUTELY/HOURLY rejected (clock ecosystem scale)
   }
-  return { calendar: cal, uid, master, exceptions };
+  return { calendar: cal, uid, master, exceptions, isTask };
 }
 
 /** Serialize an evt payload from {calendar} (round-trips unknown props). */
@@ -365,6 +372,8 @@ export function expandEvtRow(parsed, rowId, fromDay, toDay) {
     allDay: comp.dtstart.time === null,
     isException,
     isCancelled: comp.status === 'CANCELLED',
+    isTask: (comp.type || 'VEVENT') === 'VTODO',
+    isCompleted: (comp.type || 'VEVENT') === 'VTODO' && comp.status === 'COMPLETED',
     master: comp,
   });
 
@@ -505,6 +514,10 @@ export function deriveBucketEntries(occurrences, day) {
   const entries = [];
   for (const occ of occurrences) {
     if (occ.isCancelled) continue;
+    // v4.5 tasks: COMPLETED → not projected (a done task must not occupy
+    // the clock's 16-slot day budget; Fossify likewise stops reminding for
+    // completed tasks — see the skip in its reminder scheduling).
+    if (occ.isCompleted) continue;
     if (!(occ.start.date <= day && day <= spanDays(occ.master).last)) continue;
     const t = occ.start.time || '00:00:00';
     const title = occ.master.summary || '(untitled)';

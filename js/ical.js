@@ -1,11 +1,14 @@
 /**
- * ical.js — minimal strict RFC 5545 iCalendar codec for PROTOCOL v4.2 rows.
+ * ical.js — minimal strict RFC 5545 iCalendar codec for PROTOCOL v4.5 rows.
  *
  * Scope: VCALENDAR wrapper containing VEVENT components (master +
- * RECURRENCE-ID exceptions) and nested VALARM. Unknown properties are
- * round-tripped verbatim (never dropped — another client's fields must
- * survive a web-client edit). No DOM, no fetch: imported by the browser UI
- * and by the Node test suite (same code as production).
+ * RECURRENCE-ID exceptions) and, since v4.5, VTODO components (tasks —
+ * master + exceptions; STATUS:COMPLETED marks a task done, Fossify
+ * Calendar semantics). Nested VALARM. Unknown properties are round-tripped
+ * verbatim (never dropped — another client's fields must survive a
+ * web-client edit; this includes VTODO-specific properties like DUE /
+ * COMPLETED / PERCENT-COMPLETE / PRIORITY). No DOM, no fetch: imported by
+ * the browser UI and by the Node test suite (same code as production).
  *
  * Time model: every date-time is a WALL time {date:'YYYY-MM-DD',
  * time:'HH:MM:SS'|null, tz:'IANA name'|'UTC'|null}. time === null means a
@@ -285,13 +288,22 @@ export function wallToInstantUTC(dt, tz) {
   return new Date(wall - o3 * 60000); // fixed point (ambiguous → later offset)
 }
 
-/* ---------------- VEVENT model ---------------- */
+/* ---------------- VEVENT / VTODO model ---------------- */
 
 const KNOWN = new Set([
   'UID', 'DTSTAMP', 'DTSTART', 'DTEND', 'DURATION', 'RECURRENCE-ID',
   'RRULE', 'EXDATE', 'RDATE', 'SUMMARY', 'DESCRIPTION', 'LOCATION',
   'STATUS', 'TRANSP', 'SEQUENCE',
 ]);
+
+/** Per-component-type STATUS vocabularies (RFC 5545 §3.8.1.11). */
+const STATUS_VALUES = {
+  VEVENT: new Set(['CONFIRMED', 'TENTATIVE', 'CANCELLED']),
+  VTODO: new Set(['NEEDS-ACTION', 'COMPLETED', 'IN-PROCESS', 'CANCELLED']),
+};
+
+/** Component types a v4.5 row payload may contain (one type per row). */
+const COMPONENT_TYPES = new Set(['VEVENT', 'VTODO']);
 
 /**
  * Parse one VEVENT's property list (already unfolded, component-stripped).
@@ -304,8 +316,9 @@ const SINGLE_OCCURRING = new Set([
   'RRULE', 'SUMMARY', 'DESCRIPTION', 'LOCATION', 'STATUS', 'TRANSP', 'SEQUENCE',
 ]);
 
-function veventFromProps(props) {
+function veventFromProps(props, type = 'VEVENT') {
   const ev = {
+    type,
     uid: null,
     dtstamp: null,
     dtstart: null,
@@ -369,7 +382,7 @@ function veventFromProps(props) {
       case 'LOCATION': ev.location = unescapeText(p.value); ev.locationParams = p.params; break;
       case 'STATUS': {
         const s = p.value.toUpperCase();
-        if (s !== 'CONFIRMED' && s !== 'TENTATIVE' && s !== 'CANCELLED') throw new Error('bad_status');
+        if (!STATUS_VALUES[type].has(s)) throw new Error('bad_status');
         ev.status = s;
         break;
       }
@@ -390,6 +403,9 @@ function veventFromProps(props) {
   if (typeof ev.uid !== 'string' || ev.uid.length === 0 || ev.uid.includes(':')) {
     throw new Error('bad_uid'); // v4.2 row-id grammar: UID must not contain ':'
   }
+  // v4.5: BOTH VEVENTs and VTODOs need a DTSTART in this ecosystem (the
+  // row is a calendar-display unit; a task without a date cannot anchor to
+  // the grid — Fossify Calendar tasks likewise always carry a start).
   if (!ev.dtstart) throw new Error('missing_dtstart');
   if (!ev.dtstamp) {
     // RFC 5545 requires DTSTAMP; tolerate on parse (treat as corrupt-free),
@@ -425,10 +441,12 @@ function alarmFromProps(props) {
 }
 
 /**
- * Parse a full VCALENDAR text → { prodId, events:[VEvent], extra:[prop] }.
+ * Parse a full VCALENDAR text → { prodId, events:[VEvent|VTodo], extra:[prop] }
+ * (v4.5: `events` holds both component kinds — each carries a `type`).
  * Strict: structural errors throw (the caller treats the row as corrupt);
- * the v4.2 row rule (all VEVENTs share one UID) is NOT enforced here (it is
- * a row-level rule enforced by the calendar core).
+ * the v4.2/v4.5 row rules (all components share one UID; ONE component type
+ * per row) are NOT enforced here (row-level rules enforced by the calendar
+ * core).
  */
 export function parseVCalendar(text) {
   const lines = unfoldLines(text);
@@ -444,10 +462,11 @@ export function parseVCalendar(text) {
   let line = next();
   while (line !== null && line !== 'END:VCALENDAR') {
     const prop = parseContentLine(line);
-    if (prop.name === 'BEGIN' && prop.value === 'VEVENT') {
+    if (prop.name === 'BEGIN' && COMPONENT_TYPES.has(prop.value)) {
+      const type = prop.value; // 'VEVENT' | 'VTODO'
       const props = [];
       let l = next();
-      while (l !== null && !(l === 'END:VEVENT')) {
+      while (l !== null && (l !== 'END:' + type)) {
         if (l.startsWith('BEGIN:VALARM')) {
           const alarmProps = [];
           let al = next();
@@ -462,8 +481,8 @@ export function parseVCalendar(text) {
         }
         l = next();
       }
-      if (l !== 'END:VEVENT') throw new Error('bad_structure');
-      cal.events.push(veventFromProps(props));
+      if (l !== 'END:' + type) throw new Error('bad_structure');
+      cal.events.push(veventFromProps(props, type));
     } else if (prop.name === 'BEGIN' && prop.value === 'VTIMEZONE') {
       // VTIMEZONE blocks are not stored by v4.2 clients; skip verbatim.
       let l = next();
@@ -488,7 +507,7 @@ export function parseVCalendar(text) {
   }
   if (line !== 'END:VCALENDAR') throw new Error('bad_structure');
   if (next() !== null) throw new Error('trailing_content');
-  if (cal.events.length === 0) throw new Error('no_vevent');
+  if (cal.events.length === 0) throw new Error('no_components');
   return cal;
 }
 
@@ -572,7 +591,8 @@ export function serializeVCalendar(cal) {
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:' + (cal.prodId || PRODID)];
   for (const p of cal.extra || []) lines.push(formatContentLine(p));
   for (const ev of cal.events) {
-    lines.push('BEGIN:VEVENT');
+    const type = ev.type || 'VEVENT'; // v4.5: VTODO components serialize as VTODO
+    lines.push('BEGIN:' + type);
     for (const p of veventToProps(ev)) {
       if (p.name === 'VALARM') {
         lines.push('BEGIN:VALARM');
@@ -582,7 +602,7 @@ export function serializeVCalendar(cal) {
         lines.push(formatContentLine(p));
       }
     }
-    lines.push('END:VEVENT');
+    lines.push('END:' + type);
   }
   lines.push('END:VCALENDAR');
   return lines.map(foldLine).join('\r\n') + '\r\n';

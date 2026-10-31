@@ -20,6 +20,8 @@ jobs:
           node-version: '22'
       - name: Pure-logic unit tests (calendar core)
         run: node test/core-unit.mjs
+      - name: Task (VTODO) unit tests (v4.5)
+        run: node test/core-tasks.mjs
       - name: Crypto parity KATs (JS client vs worker crypto)
         run: node test/crypto-parity.mjs
       - name: Syntax check the client entry points
@@ -29,13 +31,24 @@ jobs:
           node --check js/crypto.js
           node --check js/ical.js
           node --check js/calendar-core.js
-      - name: Vendored FullCalendar integrity (official v6.1.22 bundles present)
+      - name: Vendored FullCalendar integrity (official v7.1.3 artifacts present)
         run: |
           set -e
-          for p in core daygrid timegrid interaction multimonth list; do
-            f="js/vendor/fullcalendar/$p/index.global.min.js"
-            test -s "$f" || { echo "MISSING $f"; exit 1; }
-            grep -q "FullCalendar" "$f" || { echo "BANNER MISSING in $f"; exit 1; }
-            test -s "js/vendor/fullcalendar/$p/LICENSE.txt" || { echo "MISSING license for $p"; exit 1; }
+          V=js/vendor/fullcalendar/v7
+          test -s "$V/all.global.js" || { echo "MISSING all.global.js"; exit 1; }
+          grep -q "FullCalendar" "$V/all.global.js" || { echo "BANNER MISSING in all.global.js"; exit 1; }
+          test -s "$V/skeleton.css" || { echo "MISSING skeleton.css"; exit 1; }
+          test -s "$V/LICENSE.md" || { echo "MISSING LICENSE.md"; exit 1; }
+          for t in monarch forma breezy pulse classic; do
+            test -s "$V/themes/$t/global.js" || { echo "MISSING theme $t global.js"; exit 1; }
+            test -s "$V/themes/$t/theme.css" || { echo "MISSING theme $t theme.css"; exit 1; }
+            if [ -d "$V/themes/$t/palettes" ]; then
+              test -n "$(ls "$V/themes/$t/palettes"/*.css)" || { echo "MISSING palettes for $t"; exit 1; }
+            else
+              test -s "$V/themes/$t/palette.css" || { echo "MISSING palette.css for $t"; exit 1; }
+            fi
           done
-          echo "vendored bundles OK"
+          test -s "$V/chrome/shadcn-palettes.css" || { echo "MISSING shadcn-palettes.css"; exit 1; }
+          test -s "$V/chrome/mui-palettes.css" || { echo "MISSING mui-palettes.css"; exit 1; }
+          test -s "$V/chrome/MUI-LICENSE.md" || { echo "MISSING MUI license"; exit 1; }
+          echo "vendored v7 artifacts OK"

@@ -6,22 +6,24 @@
   <title>Calendar — Encrypted Clock PoC</title>
   <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.3, calendar scope) — Proof of Concept.">
   <script>
-    // Theme boot (FOUC guard): decide light/dark BEFORE first paint.
-    // Precedence (F-A3-2/F-A5-1, audit wave): v44 settings theme (light/dark)
-    // > [no settings yet] legacy v4.3 theme key > OS preference. A settings
-    // value of 'system' ALWAYS follows the OS (the legacy key is only a
-    // pre-settings migration source, never an override).
+    // Theme boot (FOUC guard): decide light/dark + the active FullCalendar
+    // theme attributes BEFORE first paint.
+    // Precedence (F-A3-2/F-A5-1, audit wave): v45 settings theme (light/dark)
+    // > [no settings yet] legacy v44/v4.3 keys > OS preference. A settings
+    // value of 'system' ALWAYS follows the OS (legacy keys are only
+    // pre-settings migration sources, never overrides).
     (function () {
       try {
         var t = null;
         var raw = null;
-        try { raw = localStorage.getItem('clock_poc_settings_v44'); } catch (e) {}
         var s = null;
-        try { s = raw ? JSON.parse(raw) : null; } catch (e) {}
+        try { raw = localStorage.getItem('clock_poc_settings_v45'); } catch (e) {}
+        if (!raw) { try { raw = localStorage.getItem('clock_poc_settings_v44'); } catch (e) {} }
+        try { s = raw ? JSON.parse(raw) : null; } catch (e) { s = null; }
         if (s && (s.theme === 'light' || s.theme === 'dark')) {
           t = s.theme;
         } else if (!s || !s.theme) {
-          // No settings (or no theme field): legacy migration source.
+          // No settings (or no theme field): legacy migration sources.
           var l = null;
           try { l = localStorage.getItem('clock_poc_theme'); } catch (e) {}
           if (l === 'light' || l === 'dark') t = l;
@@ -30,11 +32,26 @@
         if (t === null) {
           t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
-        document.documentElement.dataset.theme = t;
+        var d = document.documentElement;
+        d.dataset.theme = t;
+        d.dataset.colorScheme = t; // drives the official FC theme + shadcn/MUI dark blocks
+        // Theme attributes: the calendar theme + palette drive the managed
+        // CSS links (app.js applyFcThemeAssets); setting data-fctheme early
+        // keeps chrome-token selectors correct from the first paint.
+        var theme = s && typeof s.fcTheme === 'string' ? s.fcTheme : 'monarch';
+        var themes = { monarch:1, forma:1, breezy:1, pulse:1, classic:1, shadcn:1, mui:1 };
+        if (!themes[theme]) theme = 'monarch';
+        d.dataset.fctheme = theme;
+        if (theme === 'shadcn') d.dataset.palette = (s && typeof s.fcPalette === 'string') ? s.fcPalette : 'neutral';
+        if (theme === 'mui') d.dataset.muiPalette = (s && typeof s.fcPalette === 'string') ? s.fcPalette : 'blue';
       } catch (e) { /* private mode etc. */ }
     })();
   </script>
   <link rel="stylesheet" href="css/style.css">
+  <!-- FullCalendar v7.1.3 (MIT, (c) Adam Shaw) — the official structural
+       stylesheet (vendored verbatim from npm fullcalendar@7.1.3; the active
+       theme's theme.css + palette css are managed by app.js). -->
+  <link rel="stylesheet" href="js/vendor/fullcalendar/v7/skeleton.css">
   <!-- E5-1: the vendored rrule module (18.9 KB gz, 31% of JS) is statically
        imported by calendar-core.js; modulepreload takes it off the critical
        path and warms the HTTP cache before the module graph is parsed. -->
@@ -95,10 +112,13 @@
       <div id="layout">
         <!-- ---------- sidebar ---------- -->
         <aside id="sidebar">
-          <button id="btn-new-event" class="button button-primary button-newevent" type="button">
-            <svg viewBox="0 0 16 16" class="ic" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            New event
-          </button>
+          <div class="newevent-group">
+            <button id="btn-new-event" class="button button-primary button-newevent" type="button">
+              <svg viewBox="0 0 16 16" class="ic" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              New event
+            </button>
+            <button id="btn-new-task" class="button button-primary button-newtask-caret" type="button" aria-label="New event or task" title="New event or task">▾</button>
+          </div>
 
           <div id="minicalendar" aria-label="Mini calendar">
             <div class="minicalendar-head">
@@ -160,16 +180,12 @@
 
   <div id="toasts" aria-live="polite"></div>
 
-  <!-- FullCalendar v6.1.22 (MIT, (c) Adam Shaw) — official prebuilt bundles,
-       vendored VERBATIM from npm @fullcalendar/*@6.1.22 (see
-       js/vendor/fullcalendar/*/LICENSE.txt). Core first: it defines the
-       FullCalendar global namespace; plugins bind onto it. -->
-  <script src="js/vendor/fullcalendar/core/index.global.min.js"></script>
-  <script src="js/vendor/fullcalendar/daygrid/index.global.min.js"></script>
-  <script src="js/vendor/fullcalendar/timegrid/index.global.min.js"></script>
-  <script src="js/vendor/fullcalendar/interaction/index.global.min.js"></script>
-  <script src="js/vendor/fullcalendar/multimonth/index.global.min.js"></script>
-  <script src="js/vendor/fullcalendar/list/index.global.min.js"></script>
+  <!-- FullCalendar v7.1.3 (MIT, (c) Adam Shaw) — the official all-plugins
+       global bundle, vendored VERBATIM from npm fullcalendar@7.1.3 (see
+       js/vendor/fullcalendar/v7/LICENSE.md). The active stock THEME plugin
+       (themes/{monarch,forma,breezy,pulse,classic}/global.js) is loaded
+       dynamically by app.js via the official globalPlugins mechanism. -->
+  <script src="js/vendor/fullcalendar/v7/all.global.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

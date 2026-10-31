@@ -1,0 +1,151 @@
+/*
+ * mui-palettes.css — MUI (Material UI) theme palettes for the app chrome.
+ *
+ * SOURCE OF VALUES (verbatim):
+ *  - The default (blue) palette is extracted from @mui/material's own
+ *    source (esm/styles/createPalette.js + esm/colors/*.js):
+ *      light: primary blue[700] #1976d2 / light blue[400] #42a5f5 /
+ *             dark blue[800] #1565c0; secondary purple[500] #9c27b0 /
+ *             light purple[300] #ba68c8 / dark purple[700] #7b1fa2;
+ *             error red[700] #d32f2f / light #ef5350 / dark #c62828;
+ *             text rgba(0 0 0 /.87|.6|.38), divider rgba(0 0 0 /.12),
+ *             background paper/default #ffffff.
+ *      dark:  primary blue[200] #90caf9 / light #e3f2fd / dark #42a5f5;
+ *             secondary purple[200] #ce93d8 / light #f3e5f5 / dark #ab47bc;
+ *             error red[500] #f44336; text #fff / rgba(255 255 255 /.7);
+ *             divider rgba(255 255 255 /.12), background #121212.
+ *  - The purple palette is FullCalendar's own official MUI demo palette
+ *    (fullcalendar-workspace theming/ui-mui-tailwind/src/demo-palettes.ts,
+ *    MIT — @fullcalendar/mui): primary #6200ea/#9d46ff/#0a00b6 (light) and
+ *    #bb86fc/#efb7ff/#8856c3 (dark), secondary #03dac6/#66fff9/#00a896,
+ *    error #b00020 (light) / #cf6679 (dark), background #f5f5f5/#ffffff
+ *    (light) and #121212/#1e1e1e (dark), text #000/#5f5f5f and #fff/#ccc,
+ *    divider #373737 (dark).
+ *
+ * The variable NAMES follow MUI's documented cssVariables theme naming
+ * (--mui-palette-primary-main, --mui-palette-primary-mainChannel with the
+ * "r g b" channel triplet used by color-mix/rgba composition) — the same
+ * names @fullcalendar/mui's compiled styles consume. Activation:
+ * <html data-fctheme="mui" data-mui-palette="blue|purple">; dark blocks key
+ * on [data-color-scheme=dark] exactly like the official stock palettes.
+ */
+
+/* ---- blue (MUI default) ---- */
+[data-fctheme="mui"][data-mui-palette="blue"] {
+  --mui-palette-primary-main: #1976d2;
+  --mui-palette-primary-light: #42a5f5;
+  --mui-palette-primary-dark: #1565c0;
+  --mui-palette-primary-contrastText: #ffffff;
+  --mui-palette-primary-mainChannel: 25 118 210;
+  --mui-palette-secondary-main: #9c27b0;
+  --mui-palette-secondary-light: #ba68c8;
+  --mui-palette-secondary-dark: #7b1fa2;
+  --mui-palette-secondary-contrastText: #ffffff;
+  --mui-palette-secondary-mainChannel: 156 39 176;
+  --mui-palette-error-main: #d32f2f;
+  --mui-palette-error-light: #ef5350;
+  --mui-palette-error-dark: #c62828;
+  --mui-palette-error-contrastText: #ffffff;
+  --mui-palette-error-mainChannel: 211 47 47;
+  --mui-palette-text-primary: rgba(0, 0, 0, 0.87);
+  --mui-palette-text-secondary: rgba(0, 0, 0, 0.6);
+  --mui-palette-text-disabled: rgba(0, 0, 0, 0.38);
+  --mui-palette-text-primaryChannel: 0 0 0;
+  --mui-palette-divider: rgba(0, 0, 0, 0.12);
+  --mui-palette-background-paper: #ffffff;
+  --mui-palette-background-default: #ffffff;
+  --mui-palette-action-hover: rgba(0, 0, 0, 0.04);
+  --mui-palette-action-selected: rgba(0, 0, 0, 0.08);
+  --mui-palette-grey-100: #f5f5f5;
+  --mui-palette-grey-200: #eeeeee;
+  --mui-palette-grey-900: #212121;
+}
+[data-fctheme="mui"][data-mui-palette="blue"][data-color-scheme="dark"] {
+  --mui-palette-primary-main: #90caf9;
+  --mui-palette-primary-light: #e3f2fd;
+  --mui-palette-primary-dark: #42a5f5;
+  --mui-palette-primary-contrastText: rgba(0, 0, 0, 0.87);
+  --mui-palette-primary-mainChannel: 144 202 249;
+  --mui-palette-secondary-main: #ce93d8;
+  --mui-palette-secondary-light: #f3e5f5;
+  --mui-palette-secondary-dark: #ab47bc;
+  --mui-palette-secondary-contrastText: rgba(0, 0, 0, 0.87);
+  --mui-palette-secondary-mainChannel: 206 147 216;
+  --mui-palette-error-main: #f44336;
+  --mui-palette-error-light: #ef9a9a;
+  --mui-palette-error-dark: #e53935;
+  --mui-palette-error-contrastText: #ffffff;
+  --mui-palette-error-mainChannel: 244 67 54;
+  --mui-palette-text-primary: #ffffff;
+  --mui-palette-text-secondary: rgba(255, 255, 255, 0.7);
+  --mui-palette-text-disabled: rgba(255, 255, 255, 0.5);
+  --mui-palette-text-primaryChannel: 255 255 255;
+  --mui-palette-divider: rgba(255, 255, 255, 0.12);
+  --mui-palette-background-paper: #121212;
+  --mui-palette-background-default: #121212;
+  --mui-palette-action-hover: rgba(255, 255, 255, 0.08);
+  --mui-palette-action-selected: rgba(255, 255, 255, 0.16);
+  --mui-palette-grey-100: #212121;
+  --mui-palette-grey-200: #424242;
+  --mui-palette-grey-900: #f5f5f5;
+}
+
+/* ---- purple (FullCalendar's official MUI demo palette) ---- */
+[data-fctheme="mui"][data-mui-palette="purple"] {
+  --mui-palette-primary-main: #6200ea;
+  --mui-palette-primary-light: #9d46ff;
+  --mui-palette-primary-dark: #0a00b6;
+  --mui-palette-primary-contrastText: #ffffff;
+  --mui-palette-primary-mainChannel: 98 0 234;
+  --mui-palette-secondary-main: #03dac6;
+  --mui-palette-secondary-light: #66fff9;
+  --mui-palette-secondary-dark: #00a896;
+  --mui-palette-secondary-contrastText: #000000;
+  --mui-palette-secondary-mainChannel: 3 218 198;
+  --mui-palette-error-main: #b00020;
+  --mui-palette-error-light: #d05f74;
+  --mui-palette-error-dark: #8b0019;
+  --mui-palette-error-contrastText: #ffffff;
+  --mui-palette-error-mainChannel: 176 0 32;
+  --mui-palette-text-primary: #000000;
+  --mui-palette-text-secondary: #5f5f5f;
+  --mui-palette-text-disabled: rgba(0, 0, 0, 0.38);
+  --mui-palette-text-primaryChannel: 0 0 0;
+  --mui-palette-divider: rgba(0, 0, 0, 0.12);
+  --mui-palette-background-paper: #ffffff;
+  --mui-palette-background-default: #f5f5f5;
+  --mui-palette-action-hover: rgba(0, 0, 0, 0.04);
+  --mui-palette-action-selected: rgba(0, 0, 0, 0.08);
+  --mui-palette-grey-100: #f5f5f5;
+  --mui-palette-grey-200: #eeeeee;
+  --mui-palette-grey-900: #212121;
+}
+[data-fctheme="mui"][data-mui-palette="purple"][data-color-scheme="dark"] {
+  --mui-palette-primary-main: #bb86fc;
+  --mui-palette-primary-light: #efb7ff;
+  --mui-palette-primary-dark: #8856c3;
+  --mui-palette-primary-contrastText: #000000;
+  --mui-palette-primary-mainChannel: 187 134 252;
+  --mui-palette-secondary-main: #03dac6;
+  --mui-palette-secondary-light: #66fff9;
+  --mui-palette-secondary-dark: #00a896;
+  --mui-palette-secondary-contrastText: #000000;
+  --mui-palette-secondary-mainChannel: 3 218 198;
+  --mui-palette-error-main: #cf6679;
+  --mui-palette-error-light: #e0929f;
+  --mui-palette-error-dark: #b04a5c;
+  --mui-palette-error-contrastText: #ffffff;
+  --mui-palette-error-mainChannel: 207 102 121;
+  --mui-palette-text-primary: #ffffff;
+  --mui-palette-text-secondary: #cccccc;
+  --mui-palette-text-disabled: rgba(255, 255, 255, 0.5);
+  --mui-palette-text-primaryChannel: 255 255 255;
+  --mui-palette-divider: #373737;
+  --mui-palette-background-paper: #1e1e1e;
+  --mui-palette-background-default: #121212;
+  --mui-palette-action-hover: rgba(255, 255, 255, 0.08);
+  --mui-palette-action-selected: rgba(255, 255, 255, 0.16);
+  --mui-palette-grey-100: #212121;
+  --mui-palette-grey-200: #424242;
+  --mui-palette-grey-900: #f5f5f5;
+}
