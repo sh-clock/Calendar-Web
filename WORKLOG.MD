@@ -2216,3 +2216,71 @@ O(1) base64 canonicality check was additionally property-tested by me over
   a virtual-device job like upstream's synctools matrix would be the next
   evidence level); calendar CREATION from davx5 (MKCALENDAR-analog); the
   '/'-in-UID row-id grammar edge.
+
+## SESSION: FULLCALENDAR UI REWORK (directive 2026-10-31 #2)
+
+User directive (verbatim intent): rework the UI based on
+https://github.com/fullcalendar/fullcalendar (MIT) — copy the code verbatim
+where possible. Theme settings hidden under a settings menu for
+customisability. Keep all protocol and backbone logic the same — ONLY the
+design is reworked. FullCalendar's drag-and-drop and resizing are to be used
+as-is ("do not manually tweak it if possible").
+
+### Version research (verified, not assumed)
+- @fullcalendar/core 7.1.3 (npm latest) is a TYPES-ONLY stub over the new
+  headless engine (@full-ui/headless-calendar) — NOT the classic view/plugin
+  architecture; no prebuilt view bundles.
+- The classic architecture (core + daygrid/timegrid/interaction/multimonth/
+  list plugins with official prebuilt `index.global.min.js` browser bundles)
+  lives in the maintained **legacy line v6.1.22** — MIT, (c) Adam Shaw.
+  DECISION: vendor the six official v6.1.22 `index.global.min.js` artifacts
+  VERBATIM (byte-identical from `npm pack`) into js/vendor/fullcalendar/,
+  with each package's MIT LICENSE.txt — same policy as the vendored rrule.mjs.
+  Load order: core first (defines the `FullCalendar` global + .Internal/
+  .Preact chunks), then daygrid → timegrid → interaction → multimonth → list
+  (plugin bundles bind via `FullCalendar.X = (function(exports, core,
+  internal){…})({}, FullCalendar, FullCalendar.Internal)`).
+  Plugin classes: `FullCalendar.DayGrid.default` etc. (verified by smoke test).
+
+### Verified by smoke test BEFORE building on it (test/fc-smoke/)
+- All 6 globals load; Calendar constructs; dayGridMonth/timeGridWeek/
+  timeGridDay/multiMonthYear/listYear all render.
+- Custom N-day view: registered via `views: {custom: {type:'timeGrid',
+  duration:{days:N}}}` at construction; duration CHANGES require
+  `calendar.resetOptions(...)` (plain setOption does NOT rebuild view specs).
+- DnD (interaction plugin): month-grid drag fires eventDrop with
+  delta {days, milliseconds} + allDay; week-view timed drag gives minute
+  deltas; resize gives endDelta. Playwright mouse drags work.
+
+### Plan
+- KEEP VERBATIM (backbone — must remain byte-identical in behavior):
+  js/api.js, js/crypto.js, js/ical.js, js/calendar-core.js, worker/, the sync
+  engine in app.js (syncAll/fetchRowsIntoState/ingestRow/putRowRMW/
+  applyRowLocally/unlock/lock/autosync/A3 generation tracking), ALL mutations
+  (saveEvent/deleteEvent/applyDayShift/calendar CRUD), editor + recurring
+  choice + custom frequency modals, popover, clock preview, calendar list,
+  corrupt-row policy. protocol.md untouched (protocol unchanged).
+- REPLACE (view layer only): month/day/week/year/custom rendering, the Proton
+  layout ports, ALL custom DnD mouse handlers → ONE FullCalendar instance in
+  #calendar with native eventDrop/eventResize/select/dateClick/eventClick,
+  native toolbar (headerToolbar prev/next/today/title/views), native +more,
+  nowIndicator, navLinks. Views: dayGridMonth, timeGridWeek, timeGridDay,
+  multiMonthYear, listYear, custom (timeGrid N days).
+- NEW: settings menu (gear in topbar): theme (light/dark/system), accent
+  color, first day of week, 12/24h, slot duration, week numbers, density,
+  custom-view days — persisted (localStorage clock_poc_settings_v44),
+  applied live via CSS vars + calendar.resetOptions.
+- NEW mutation (required to use FC resize verbatim): applyDurationChange —
+  RMW shifting dtend by {days, minutes} (master or exception scope) — same
+  putRowRMW pattern. Plus all-day↔timed conversion on cross-slot drops.
+- css/style.css: keep app chrome tokens/modals/login/toasts/sidebar classes
+  (editor depends on them); delete the Proton grid ports; add --fc-* theming
+  for light/dark + settings-driven vars.
+- index.html: 6 vendor script tags + module app.js; FC mount div; settings
+  modal surface; keep login/modals/popover/toasts markup.
+- E2E: new scripts/e2e-fc.mjs covering every e2e-v43 scenario against the
+  FC DOM + resize + settings + persistence.
+- CI: fix deploy-pages.yml (found corrupted: `branches: ain]` → `[main]`),
+  add vendor copying, add ci.yml (node unit tests on push) — PAT permits.
+- Audit: 6 parallel agents after implementation; visual audits (VLM) of all
+  views in both themes; stress tests; fix until zero errors.

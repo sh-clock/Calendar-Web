@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>FC vendor smoke test</title></head>
+<body>
+<div id="cal" style="height:600px"></div>
+<script src="/js/vendor/fullcalendar/core/index.global.min.js"></script>
+<script src="/js/vendor/fullcalendar/daygrid/index.global.min.js"></script>
+<script src="/js/vendor/fullcalendar/timegrid/index.global.min.js"></script>
+<script src="/js/vendor/fullcalendar/interaction/index.global.min.js"></script>
+<script src="/js/vendor/fullcalendar/multimonth/index.global.min.js"></script>
+<script src="/js/vendor/fullcalendar/list/index.global.min.js"></script>
+<script>
+  window.__fcsmoke = { loaded: typeof FullCalendar, plugins: {} };
+  for (const k of ['Calendar','DayGrid','TimeGrid','Interaction','MultiMonth','List']) {
+    window.__fcsmoke.plugins[k] = !!(window.FullCalendar && FullCalendar[k]);
+  }
+  try {
+    const cal = new FullCalendar.Calendar(document.getElementById('cal'), {
+      initialView: 'dayGridMonth',
+      plugins: [FullCalendar.DayGrid.default, FullCalendar.TimeGrid.default,
+                FullCalendar.Interaction.default, FullCalendar.MultiMonth.default,
+                FullCalendar.List.default],
+      editable: true, selectable: true,
+      headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,timeGridDay,multiMonthYear,listYear' },
+      events: [
+        { title: 'smoke event', start: new Date().toISOString().slice(0,10) },
+        { title: 'timed', start: new Date().toISOString().slice(0,10) + 'T10:00:00' },
+      ],
+    });
+    cal.render();
+    window.__fcsmoke.constructed = true;
+    window.__fcsmoke.eventCount = cal.getEvents().length;
+    cal.changeView('timeGridWeek'); window.__fcsmoke.week = true;
+    cal.changeView('multiMonthYear'); window.__fcsmoke.year = true;
+    cal.changeView('listYear'); window.__fcsmoke.list = true;
+    cal.changeView('dayGridMonth');
+    // custom N-day view
+    cal.setOption('views', { custom: { type: 'timeGrid', duration: { days: 10 } } });
+    cal.changeView('custom');
+    window.__fcsmoke.custom = cal.view.type === 'custom';
+  } catch (e) { window.__fcsmoke.error = String(e && e.stack || e); }
+</script>
+</body>
+</html>
