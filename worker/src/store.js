@@ -15,13 +15,14 @@
  * verbatim, compares only the clear `ver`, and never reads `nonce`/`ct`.
  */
 
-const PROTO_VERSION = '4.2';                       // §22 (v4.2: additive evt/cmeta row types; see docs/PROTOCOL-v4.2.md)
+const PROTO_VERSION = '4.3';                       // §22 (v4.3: client stops maintaining cal: buckets; POST /rows:batch added — see protocol.md)
 const KDF_ITERS = 100000;                          // §2
 const ROW_CT_MAX = 65536;                          // §2 — ciphertext incl. tag
 const VER_U32_MAX = 4294967295;                    // §2 VER_WIDTH (u32)
 const WRAPPED_LEN = 60;                            // WORKLOG D2: 12 nonce || 32 ct || 16 tag
 const NONCE_LEN = 12;                              // §2 GCM_NONCE_LEN
 const ID_MAX = 256;                                // WORKLOG D9
+const BATCH_MAX_IDS = 256;                         // protocol.md §9b
 const BODY_MAX = 1048576;                          // hygiene cap on request bodies (WORKLOG D16)
 const BODY_DRAIN_MAX = 32 * 1048576;               // drain ceiling for rejected oversized bodies
 const BACKUP_RETENTION_DAYS = 7;                   // §2
@@ -267,6 +268,10 @@ export class Store {
     } else if (path === '/rows' && method === 'GET') {
       family = 'app';
       handler = () => this.hManifest();
+    } else if (path === '/rows:batch' && method === 'POST') {
+      // protocol.md §9b — bulk envelope read (read-only: ui OR clock class).
+      family = 'app';
+      handler = () => this.hBatchGet(req);
     } else if (
       path.startsWith('/rows/') &&
       (method === 'GET' || method === 'PUT' || method === 'DELETE')
@@ -455,6 +460,43 @@ export class Store {
       nonce: b64Encode(toU8(row.nonce)),
       ct: b64Encode(toU8(row.ct)),
     });
+  }
+
+  /**
+   * POST /rows:batch — protocol.md §9b (v4.3). Body {ids:[...]} (unique,
+   * ≤256 ids, each ≤256 chars) → {rows:[envelope | {id,missing:true}]} in
+   * REQUEST ORDER. Pure read: envelopes are relayed verbatim; the server
+   * never inspects nonce/ct (§1 threat model unchanged).
+   */
+  async hBatchGet(req) {
+    const { val, err } = await readJson(req);
+    if (err) return badRequest(err);
+    if (!val || typeof val !== 'object' || Array.isArray(val)) return badRequest('bad_body');
+    const ids = val.ids;
+    if (!Array.isArray(ids) || ids.length === 0) return badRequest('bad_ids');
+    if (ids.length > BATCH_MAX_IDS) return badRequest('bad_ids');
+    for (const id of ids) {
+      if (typeof id !== 'string' || !id || id.length > ID_MAX) return badRequest('bad_id');
+    }
+    if (new Set(ids).size !== ids.length) return badRequest('bad_ids'); // unique (§9b)
+
+    const out = [];
+    for (const id of ids) {
+      const r = this.ctx.storage.sql
+        .exec('SELECT ver, nonce, ct FROM rows WHERE id = ?', id)
+        .toArray();
+      if (r.length === 0) {
+        out.push({ id, missing: true });
+      } else {
+        out.push({
+          id,
+          ver: r[0].ver,
+          nonce: b64Encode(toU8(r[0].nonce)),
+          ct: b64Encode(toU8(r[0].ct)),
+        });
+      }
+    }
+    return json({ rows: out });
   }
 
   /**

@@ -20,7 +20,8 @@ function allowedOrigin(origin, env) {
 function corsHeaders(origin) {
   return {
     'access-control-allow-origin': origin,
-    'access-control-allow-methods': 'GET, PUT, DELETE, OPTIONS',
+    // v4.3 §9b: POST is needed for /rows:batch (browser preflight must pass).
+    'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'access-control-allow-headers': 'Authorization, Content-Type',
     'access-control-max-age': '86400',
     vary: 'Origin',

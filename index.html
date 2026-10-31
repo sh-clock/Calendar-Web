@@ -4,7 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Calendar — Encrypted Clock PoC</title>
-  <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.2, calendar scope) — Proof of Concept.">
+  <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.3, calendar scope) — Proof of Concept.">
+  <script>
+    // Theme boot (FOUC guard): decide light/dark BEFORE first paint.
+    (function () {
+      try {
+        var t = localStorage.getItem('clock_poc_theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.dataset.theme = t;
+      } catch (e) { /* private mode etc. */ }
+    })();
+  </script>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -17,6 +29,9 @@
     </div>
     <div class="right">
       <span id="proto-badge" class="badge proto"></span>
+      <button id="btn-theme" class="button button-ghost icon-only" type="button" title="Switch to dark theme" aria-label="Switch to dark theme">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7z" stroke-linejoin="round"/></svg>
+      </button>
       <button id="btn-sync" class="button button-ghost" hidden>Sync</button>
       <button id="btn-lock" class="button button-ghost" hidden>Lock</button>
       <button id="btn-forget" class="button button-ghost button-danger" hidden>Forget browser</button>
@@ -93,17 +108,14 @@
         <div id="main-area">
           <div id="toolbar">
             <button id="btn-today" class="button button-outline" type="button">Today</button>
-            <button id="btn-prev" class="button button-ghost icon-only" type="button" aria-label="Previous month">‹</button>
-            <button id="btn-next" class="button button-ghost icon-only" type="button" aria-label="Next month">›</button>
+            <button id="btn-prev" class="button button-ghost icon-only" type="button" aria-label="Previous">‹</button>
+            <button id="btn-next" class="button button-ghost icon-only" type="button" aria-label="Next">›</button>
             <h2 id="month-label" class="current-range"></h2>
             <span class="grow"></span>
-            <span class="view-selector" aria-label="Month view">Month</span>
+            <div id="view-selector" class="view-selector" role="group" aria-label="View"></div>
           </div>
 
-          <div id="daygrid" class="is-month-view">
-            <div id="grid-head" class="calendar-daygrid-days"></div>
-            <div id="grid-rows" class="calendar-daygrid-rows"></div>
-          </div>
+          <div id="view-root" class="view-root"></div>
         </div>
       </div>
     </section>

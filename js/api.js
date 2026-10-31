@@ -1,8 +1,9 @@
 /**
- * api.js — HTTP client for the calendar PoC server (protocol v4.1 + v4.2 delta, §5 policy).
+ * api.js — HTTP client for the calendar PoC server (protocol v4.3, §5 policy).
  *
  * Distinguishes the three failure shapes the wire spec defines:
- *  - silent drop (§4): 404 with an EMPTY body — authentication failed.
+ *  - silent drop (§4): 404 with an EMPTY body — authentication failed
+ *    (or a route the server does not know, e.g. /rows:batch on a v4.2 worker).
  *  - not_found (§5):   404 WITH a JSON body — authenticated, missing resource.
  *  - forbidden (§5):   403 with an empty body — capability violation.
  */
@@ -83,6 +84,16 @@ export class Api {
   /** §9 — manifest, excludes the config row. */
   getManifest() {
     return this.#req('GET', '/rows');
+  }
+
+  /**
+   * protocol.md §9b (v4.3) — bulk envelope read. Body {ids}; response
+   * {rows:[envelope | {id, missing:true}]} in request order. Throws
+   * ApiError(kind 'silent') when the server predates v4.3 (unknown route
+   * → empty 404): callers MUST fall back to per-row getRow().
+   */
+  batchRows(ids) {
+    return this.#req('POST', '/rows:batch', { ids });
   }
 
   /** §9 — full envelope, or null when the row does not exist (404 not_found). */

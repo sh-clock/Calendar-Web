@@ -1,28 +1,35 @@
 /**
- * app.js — web client orchestration for PROTOCOL v4.2 (calendar domain),
+ * app.js — web client orchestration for PROTOCOL v4.3 (calendar domain),
  * UI ported from Proton Calendar (ProtonMail WebClients, GPL-3.0).
  *
  * Provenance of ported logic (see docs/PROVENANCE.md):
  *  - Month-grid layout: applications/calendar/src/app/components/calendar/
  *    layout.ts + useDayGridEventLayout.ts + splitDayEventsInInterval.ts
  *    (GPL-3.0) — ported verbatim below (layout(), dayGridRowLayout()).
- *  - Drag & drop: .../calendar/interactions/dayGridMouseHandler.ts +
+ *  - Drag & drop (month): .../calendar/interactions/dayGridMouseHandler.ts +
  *    mouseHelpers/{mathHelpers,domHelpers}.ts (GPL-3.0) — ported verbatim
  *    (dayGridMouseDown(), getTargetIndex(), blockClick()).
+ *  - Week/day/custom time grid: .../calendar/TimeGrid.tsx + TimeGrid/* +
+ *    splitTimeGridEventsPerDay.ts + interactions/timeGridMouseHandler.ts +
+ *    mouseHelpers/dateHelpers.ts (GPL-3.0) — ported below
+ *    (splitTimeGridEventsPerDay(), getTargetMinutes(), getSnappedDate(),
+ *    timeGridMouseDown()).
  *  - Event colors: packages/colors/gen-accent-shades.ts formula.
  *  - Default calendar name/color: packages/shared/lib/calendar/constants.ts
  *    DEFAULT_CALENDAR = { name: 'My calendar', color: ACCENT_COLORS[0] }.
  *  - Default event duration: DEFAULT_EVENT_DURATION = 30 (minutes).
+ *  - Dark theme tokens: packages/colors/themes/src/lumo-dark/dark-base.css.
  *  Visual tokens live in css/style.css (verbatim values, commented).
  *
- * v4.2 model (docs/PROTOCOL-v4.2.md):
+ * v4.3 model (protocol.md — REPOSITORY ROOT, normative):
  *  - `cmeta:{uuid}` rows → calendars (name, color).
  *  - `evt:{cal}:{uid}` rows → source of truth, RFC 5545 payloads.
- *  - `cal:{yyyymmdd}` rows → derived clock projection (§13 format).
- *
- * Flow: provisioning (setup link) -> unlock (§3) -> syncAll() (manifest diff
- * of evt/cmeta rows + §13 bucket rotation/derivation) -> render. Mutations
- * RMW the evt/cmeta row, then re-derive the bucket window.
+ *  - `cal:{yyyymmdd}` day buckets → DEPRECATED: never read or written by
+ *    this client; the clock preview is a LOCAL derivation (§13c).
+ *  - Sync = read-only manifest diff + POST /rows:batch (§9b) — 1–2 requests,
+ *    failure-tolerant, ALWAYS renders. Mutations RMW the row directly,
+ *    update local state and re-render — NO post-mutation sync chain (§5).
+ *  - Autosync: 60 s poll + focus/visibility (never blocks the UI).
  */
 
 import { deriveKeys, importRowKey, encryptRow, decryptRow } from './crypto.js';
@@ -34,9 +41,17 @@ const DEFAULT_SERVER_URL = 'https://calendar-poc.sh-clock.workers.dev';
 const LS_TOKEN = 'clock_poc_auth_ui';
 const LS_SERVER = 'clock_poc_server';
 const LS_CALVIS = 'clock_poc_calvis_v42';
+const LS_VIEW = 'clock_poc_view_v43';
+const LS_THEME = 'clock_poc_theme';
 const REBASE_MAX = 8;
 const DAY_EVENT_HEIGHT = 28;   // Proton DAY_EVENT_HEIGHT (px)
 const CREATE_SENSITIVITY = 20; // Proton dayGridMouseHandler CREATE_SENSITIVITY
+const AUTOSYNC_MS = 60000;     // v4.3 §5.3: 60 s poll while visible
+const TOTAL_MINUTES = 24 * 60; // Proton TimeGrid totalMinutes
+const MIN_DURATION = 15;       // Proton splitTimeGridEventsPerDay MIN_DURATION
+const TIMEGRID_INTERVAL = 30;  // Proton TimeGrid interval (30 min snapping)
+
+const VIEWS = ['day', 'week', 'month', 'custom', 'year'];
 
 const state = {
   api: null,
@@ -44,12 +59,15 @@ const state = {
   cals: new Map(),      // uuid -> { ver, meta }   (cmeta rows)
   evt: new Map(),       // rowId -> { ver, parsed } (evt rows)
   corrupt: new Map(),   // rowId -> reason (undecryptable/unparseable rows)
-  buckets: new Map(),   // day -> { ver, events } | null (null = corrupt bucket)
   today: null,
   viewYM: null,
   selectedDate: null,
+  view: 'month',        // 'day' | 'week' | 'month' | 'custom' | 'year'
+  customDays: 5,        // custom-view day count (2..14)
   gridRows: 3,          // measured visible chip rows (Proton useLayoutEffect)
   busy: false,
+  batchOk: true,        // false when the server predates v4.3 (§5.1c fallback)
+  syncing: false,       // one background sync at a time (§5.3)
 };
 
 /* ---------------- tiny DOM helpers ---------------- */
@@ -264,14 +282,25 @@ async function unlock() {
     }
     state.api = new Api(url, authUiHex);
     state.rowKey = await importRowKey(kData);
-    const ver = await state.api.getVersion();
-    $('#proto-badge').textContent = 'protocol ' + ver.proto;
-    if (ver.proto !== '4.2') {
-      throw new Error('This client needs protocol 4.2 (server reports ' + ver.proto +
-        '). Deploy the updated worker first.');
+    state.today = core.localToday();
+    state.viewYM = state.viewYM || state.today.slice(0, 7);
+    state.selectedDate = state.selectedDate || state.today;
+    // v4.3 §5.4 — SOFT version gate: a mismatch degrades features (per-row
+    // GETs instead of §9b batch) but NEVER locks the user out of their data.
+    state.batchOk = true;
+    try {
+      const ver = await state.api.getVersion();
+      $('#proto-badge').textContent = 'protocol ' + ver.proto;
+      if (ver.proto !== '4.3') {
+        state.batchOk = false;
+        toast('Server reports protocol ' + ver.proto + ' (this client targets 4.3). ' +
+          'Sync falls back to per-row reads. Deploy the updated worker for batch sync.', 'warn', 9000);
+      }
+    } catch {
+      $('#proto-badge').textContent = 'protocol ?';
+      toast('Could not read /version — continuing with per-row reads.', 'warn', 7000);
+      state.batchOk = false;
     }
-    state.viewYM = core.localToday().slice(0, 7);
-    state.selectedDate = core.localToday();
     await syncAll();
     $('#password').value = '';
     showApp();
@@ -306,7 +335,6 @@ function lock() {
   state.cals.clear();
   state.evt.clear();
   state.corrupt.clear();
-  state.buckets.clear();
   state.today = null;
   $('#password').value = '';
   $('#app').hidden = true;
@@ -328,7 +356,7 @@ function forgetBrowser() {
   toast('Provisioning code forgotten on this browser.', 'ok');
 }
 
-/* ---------------- sync: manifest diff + bucket rotation + derivation ---------------- */
+/* ---------------- sync: v4.3 read-only manifest diff + §9b batch ---------------- */
 
 /** GET+decrypt+parse one row by id. Returns {ver, payload}|{ver, corrupt:reason}. */
 async function fetchRow(id) {
@@ -343,77 +371,125 @@ async function fetchRow(id) {
   return { ver: env.ver, payload };
 }
 
-async function syncAll() {
-  if (!state.api) return;
-  const today = core.localToday();
-  state.today = today;
-  const winDays = core.windowDays(today);
-  const windowSet = new Set(winDays);
+/** Ingest one decrypted envelope into state (failure-tolerant, per-row). */
+async function ingestRow(id, ver, nonce, ct) {
+  let payload;
+  try {
+    payload = await decryptRow(state.rowKey, id, ver, nonce, ct);
+  } catch {
+    state.corrupt.set(id, 'decrypt_failed');
+    state.evt.delete(id);
+    const cu = core.parseCmetaId(id);
+    if (cu) state.cals.delete(cu);
+    return;
+  }
+  if (core.parseEvtId(id)) {
+    const parsed = core.parseEvtPayload(payload);
+    if (!parsed) {
+      state.corrupt.set(id, 'bad_payload');
+      state.evt.delete(id);
+    } else {
+      state.evt.set(id, { ver, parsed });
+      state.corrupt.delete(id);
+    }
+  } else {
+    const uuid = core.parseCmetaId(id);
+    let meta = null;
+    try { meta = JSON.parse(payload); } catch { /* corrupt */ }
+    const v = core.validateCalendarMeta(meta);
+    if (!uuid || !v) {
+      state.corrupt.set(id, 'bad_payload');
+      if (uuid) state.cals.delete(uuid);
+    } else {
+      state.cals.set(uuid, { ver, meta: v });
+      state.corrupt.delete(id);
+    }
+  }
+}
 
-  setBusy(true, 'Syncing…');
+/**
+ * Fetch the given row ids into state: one POST /rows:batch (§9b) when the
+ * server supports it, else per-row GETs (v4.2 fallback, §5.1c). Individual
+ * failures NEVER abort the batch — the row is flagged corrupt instead.
+ */
+async function fetchRowsIntoState(ids) {
+  let envelopes = null;
+  if (state.batchOk && ids.length > 0) {
+    try {
+      const res = await state.api.batchRows(ids);
+      envelopes = (res && res.rows) || [];
+    } catch (e) {
+      if (e instanceof ApiError && e.kind === 'silent') {
+        state.batchOk = false; // v4.2 server: degrade to per-row GETs
+      } else if (e instanceof ApiError && e.status === 400) {
+        throw e; // malformed request — a bug, surface it loudly
+      } else {
+        throw e; // network/other — the sync layer catches and toasts once
+      }
+    }
+  }
+  if (!envelopes) {
+    envelopes = await Promise.all(ids.map(async (id) => {
+      const env = await state.api.getRow(id); // null when missing
+      return env || { id, missing: true };
+    }));
+  }
+  for (const env of envelopes) {
+    if (!env || !env.id) continue;
+    if (env.missing) {
+      state.evt.delete(env.id);
+      state.corrupt.delete(env.id);
+      const cu = core.parseCmetaId(env.id);
+      if (cu) state.cals.delete(cu);
+      continue;
+    }
+    await ingestRow(env.id, env.ver, env.nonce, env.ct);
+  }
+}
+
+/**
+ * v4.3 §5.1 sync — READ-ONLY, failure-tolerant, always renders.
+ * 1 request when nothing changed; 2 when anything did. Never writes rows;
+ * never lets one bad row (corrupt/unparseable) abort the others.
+ */
+async function syncAll() {
+  if (!state.api || state.syncing) return;
+  state.syncing = true;
   const errors = [];
   try {
     const manifest = await state.api.getManifest();
     const rows = manifest.rows || [];
     const seen = new Set();
+    const toFetch = [];
 
-    /* ---- evt + cmeta rows: manifest diff ---- */
     for (const r of rows) {
       const id = r.id;
+      // `cal:` day buckets are DEPRECATED in v4.3 (protocol.md §13c):
+      // never read, never written, ignored entirely.
       if (core.parseEvtId(id)) {
         seen.add(id);
         const local = state.evt.get(id);
-        const corruptLocal = state.corrupt.has(id);
-        if (!local || local.ver !== r.ver || corruptLocal) {
-          const res = await fetchRow(id);
-          if (res.missing) continue; // raced delete
-          if (res.corrupt) {
-            state.corrupt.set(id, res.corrupt);
-            state.evt.delete(id);
-          } else {
-            const parsed = core.parseEvtPayload(res.payload);
-            if (!parsed) {
-              state.corrupt.set(id, 'bad_payload');
-              state.evt.delete(id);
-            } else {
-              state.evt.set(id, { ver: res.ver, parsed });
-              state.corrupt.delete(id);
-            }
-          }
-        }
+        if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
       } else if (core.parseCmetaId(id)) {
         seen.add(id);
         const uuid = core.parseCmetaId(id);
         const local = state.cals.get(uuid);
-        const corruptLocal = state.corrupt.has(id);
-        if (!local || local.ver !== r.ver || corruptLocal) {
-          const res = await fetchRow(id);
-          if (res.missing) continue;
-          if (res.corrupt) {
-            state.corrupt.set(id, res.corrupt);
-            state.cals.delete(uuid);
-          } else {
-            let meta = null;
-            try { meta = JSON.parse(res.payload); } catch { /* corrupt */ }
-            const v = core.validateCalendarMeta(meta);
-            if (!v) {
-              state.corrupt.set(id, 'bad_payload');
-              state.cals.delete(uuid);
-            } else {
-              state.cals.set(uuid, { ver: res.ver, meta: v });
-              state.corrupt.delete(id);
-            }
-          }
-        }
+        if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
       }
     }
+
+    if (toFetch.length > 0) {
+      // ≤256 ids per call (protocol.md §9b); chunk larger sets.
+      for (let i = 0; i < toFetch.length; i += 256) {
+        await fetchRowsIntoState(toFetch.slice(i, i + 256));
+      }
+    }
+
     // Locally-known rows absent from the manifest were deleted elsewhere.
     for (const id of [...state.evt.keys()]) if (!seen.has(id)) state.evt.delete(id);
     for (const [uuid] of state.cals) {
-      const id = core.cmetaId(uuid);
-      if (!seen.has(id)) state.cals.delete(uuid);
+      if (!seen.has(core.cmetaId(uuid))) state.cals.delete(uuid);
     }
-    // Corrupt flags of rows that no longer exist must not linger forever.
     for (const id of [...state.corrupt.keys()]) if (!seen.has(id)) state.corrupt.delete(id);
 
     /* ---- calendar visibility: unchecking persists; new calendars visible ---- */
@@ -426,144 +502,96 @@ async function syncAll() {
     }
     syncCalVisible();
 
-    /* ---- §13 bucket rotation: DELETE out-of-window, CREATE missing ---- */
-    state.buckets.clear();
-    for (const r of rows) {
-      const day = core.parseBucketId(r.id);
-      if (!day) continue;
-      if (!windowSet.has(day)) {
-        try { await state.api.deleteRow(r.id); } catch { errors.push('delete ' + r.id); }
-        continue;
-      }
-      const res = await fetchRow(r.id);
-      if (res.missing) continue;
-      if (res.corrupt) { state.buckets.set(day, null); continue; }
-      const b = core.normalizeBucket(res.payload);
-      state.buckets.set(day, b ? { ver: res.ver, events: b.events } : null);
-    }
-    for (const day of winDays) {
-      if (!state.buckets.has(day)) {
-        try {
-          const id = core.bucketId(day);
-          const enc = await encryptRow(state.rowKey, id, 1, { events: [] });
-          await state.api.putRow(id, { ver: 1, ...enc });
-          state.buckets.set(day, { ver: 1, events: [] });
-        } catch {
-          errors.push('create ' + day);
-        }
-      }
-    }
-
     /* ---- default calendar bootstrap (Proton DEFAULT_CALENDAR) ---- */
     if (state.cals.size === 0 && state.evt.size === 0) {
       const uuid = crypto.randomUUID();
       const meta = core.newCalendarMeta('My calendar', core.PALETTE[0]);
-      await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), { allowCreate: true });
-      const row = await fetchRow(core.cmetaId(uuid));
-      if (row && !row.corrupt) {
-        state.cals.set(uuid, { ver: row.ver, meta });
-      }
+      const res = await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), {
+        allowCreate: true, local: null,
+      });
+      applyRowLocally(core.cmetaId(uuid), res.ver, res.text);
       calVis.set(uuid, true);
       saveCalVis();
       syncCalVisible();
     }
-
-    /* ---- derive buckets from evt rows (v4.2 projection) ---- */
-    await deriveAndPushBuckets();
-
-    renderAll();
-    if (state.corrupt.size > 0) {
-      toast(`${state.corrupt.size} row(s) could not be decrypted — flagged, never rewritten.`, 'warn', 8000);
-    }
-    if (errors.length > 0) {
-      toast(`Sync incomplete: ${errors.length} operation(s) failed — retry with Sync.`, 'warn', 7000);
-    }
+  } catch (e) {
+    errors.push(e);
   } finally {
-    setBusy(false);
+    state.syncing = false;
   }
+
+  // §5.1d: render ALWAYS runs after a sync, with whatever succeeded.
+  renderAll();
+  if (state.corrupt.size > 0) {
+    toast(`${state.corrupt.size} row(s) could not be decrypted — flagged, never rewritten.`, 'warn', 8000);
+  }
+  if (errors.length > 0) {
+    const e = errors[0];
+    toast('Sync problem: ' + (e && e.message ? e.message : String(e)) + ' — will retry automatically.', 'warn', 7000);
+  }
+  return !errors.length;
 }
 
-/** Regenerate the 23-day §13 window from evt rows; PUT only changed days. */
-async function deriveAndPushBuckets() {
-  const today = core.localToday();
-  const parsedRows = new Map();
-  for (const [id, rec] of state.evt) parsedRows.set(id, rec.parsed);
-  const derived = core.deriveWindowBuckets(parsedRows, today);
+/** v4.3 §5.3 background autosync — never blocks the UI, never shows an overlay. */
+function autosync() {
+  if (!state.api || state.busy || state.syncing) return;
+  syncAll().catch(() => {}); // syncAll itself is failure-tolerant
+}
 
-  for (const [day, entries] of derived) {
-    const stored = state.buckets.get(day);
-    if (stored === null || stored === undefined) {
-      if (stored === null) continue; // corrupt bucket: never rewritten
+/**
+ * v4.3 §5.2c — after an accepted RMW, update local state from the payload we
+ * just wrote (no re-fetch, no sync) and re-render.
+ */
+function applyRowLocally(id, ver, text) {
+  if (core.parseEvtId(id)) {
+    const parsed = core.parseEvtPayload(text);
+    if (parsed) {
+      state.evt.set(id, { ver, parsed });
+      state.corrupt.delete(id);
     }
-    if (stored && sameBucketEvents(stored.events, entries)) continue;
-    await writeBucketRow(day, entries);
-  }
-}
-
-function sameBucketEvents(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i], y = b[i];
-    if (x.id !== y.id || x.date !== y.date || x.hh !== y.hh || x.mm !== y.mm ||
-        x.title !== y.title || x.priority !== y.priority) return false;
-  }
-  return true;
-}
-
-/** RMW one derived bucket row with rebase detection (§9 + WORKLOG D14). */
-async function writeBucketRow(day, entries) {
-  const id = core.bucketId(day);
-  for (let attempt = 0; attempt < REBASE_MAX; attempt++) {
-    const res = await fetchRow(id);
-    let ver = 0;
-    if (!res.missing) {
-      if (res.corrupt) {
-        state.buckets.set(day, null);
-        throw new Error('bucket_corrupt: refusing to rewrite a corrupt bucket');
-      }
-      const b = core.normalizeBucket(res.payload);
-      if (!b) {
-        state.buckets.set(day, null);
-        throw new Error('bucket_corrupt: refusing to rewrite a corrupt bucket');
-      }
-      if (sameBucketEvents(b.events, entries)) { // concurrent writer already derived the same
-        state.buckets.set(day, { ver: res.ver, events: b.events });
-        return;
-      }
-      ver = res.ver;
+  } else {
+    const uuid = core.parseCmetaId(id);
+    let meta = null;
+    try { meta = JSON.parse(text); } catch { /* should not happen */ }
+    const v = core.validateCalendarMeta(meta);
+    if (uuid && v) {
+      state.cals.set(uuid, { ver, meta: v });
+      state.corrupt.delete(id);
     }
-    const newVer = ver + 1;
-    const enc = await encryptRow(state.rowKey, id, newVer, { events: entries });
-    const submitted = { ver: newVer, nonce: enc.nonce, ct: enc.ct };
-    const stored = await state.api.putRow(id, submitted);
-    if (stored.ver === submitted.ver && stored.nonce === submitted.nonce && stored.ct === submitted.ct) {
-      state.buckets.set(day, { ver: newVer, events: entries });
-      return;
-    }
-    // else: rebased — loop re-reads and re-derives.
   }
-  throw new Error('rebase_exhausted: bucket kept changing across ' + REBASE_MAX + ' attempts');
 }
 
-/* ---------------- generic RMW for evt/cmeta rows ---------------- */
+/* ---------------- generic RMW for evt/cmeta rows (v4.3 §5.2) ---------------- */
 
 /**
  * Read-modify-write a row whose payload is produced by build(payload, ver)
  * (pure — re-applied on each rebase attempt). Acceptance is detected by
  * envelope identity (nonce echo, WORKLOG D14).
+ *
+ * v4.3 fast path: when `local` ({ver, payload} — the caller's trusted view of
+ * the row, straight from state) is provided, the first PUT is sent WITHOUT a
+ * preceding GET (the manifest already vouched for that ver). A rebase echoes
+ * the stored envelope; only then do we fetch and re-apply `build`.
  */
-async function putRowRMW(id, build, { allowCreate = true } = {}) {
-  for (let attempt = 0; attempt < REBASE_MAX; attempt++) {
+async function putRowRMW(id, build, { allowCreate = true, local = null } = {}) {
+  let ver;
+  let payload;
+  if (local && typeof local.ver === 'number' && ver_ok(local.ver)) {
+    ver = local.ver;
+    payload = local.payload;
+  } else {
     const res = await fetchRow(id);
     if (res.corrupt) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
-    let ver = 0;
-    let payload = null;
-    if (!res.missing) {
+    if (res.missing) {
+      if (!allowCreate) throw new Error('not_found: ' + id);
+      ver = 0;
+      payload = null;
+    } else {
       ver = res.ver;
       payload = res.payload;
-    } else if (!allowCreate) {
-      throw new Error('not_found: ' + id);
     }
+  }
+  for (let attempt = 0; attempt < REBASE_MAX; attempt++) {
     const text = build(payload, ver);
     const newVer = ver + 1;
     const enc = await encryptRow(state.rowKey, id, newVer, text);
@@ -572,8 +600,25 @@ async function putRowRMW(id, build, { allowCreate = true } = {}) {
     if (stored.ver === submitted.ver && stored.nonce === submitted.nonce && stored.ct === submitted.ct) {
       return { ver: newVer, text };
     }
+    // Rebased: refresh from the server and re-apply the pure build.
+    const res = await fetchRow(id);
+    if (res.missing) {
+      // Deleted concurrently (e.g. calendar deleted elsewhere): an allowed
+      // create retries from scratch; an edit of a vanished row fails loudly.
+      if (!allowCreate) throw new Error('not_found: ' + id);
+      ver = 0;
+      payload = null;
+      continue;
+    }
+    if (res.corrupt) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
+    ver = res.ver;
+    payload = res.payload;
   }
   throw new Error('rebase_exhausted: ' + id);
+}
+
+function ver_ok(v) {
+  return Number.isInteger(v) && v >= 1 && v <= 4294967295;
 }
 
 /* ---------------- occurrence → view event model ---------------- */
@@ -763,11 +808,138 @@ function dayGridRowLayout(eventsInRow, numberOfRows) {
 
 /* ---------------- rendering ---------------- */
 
+/* ---------------- view system (v4.3: day / week / month / custom / year) ---------------- */
+
+/** Proton VIEWS — the subset this client implements (constants.ts). */
+
 function renderAll() {
-  renderMonth();
+  state.today = state.today || core.localToday();
+  const root = viewRoot();
+  root.replaceChildren();
+  if (state.view === 'month') {
+    renderMonth(root);
+  } else if (state.view === 'year') {
+    renderYear(root);
+  } else {
+    renderTimeGrid(root, viewRangeDays());
+  }
+  renderToolbar();
   renderMiniCalendar();
   renderCalendarList();
   renderClockPreview();
+}
+
+function viewRoot() {
+  return $('#view-root');
+}
+
+/** Days shown by the active view (Proton eachDayOfInterval(dateRange)). */
+function viewRangeDays() {
+  const sel = state.selectedDate || state.today || core.localToday();
+  if (state.view === 'day') return [sel];
+  if (state.view === 'week') {
+    const dow = (new Date(sel + 'T00:00:00Z').getUTCDay() + 6) % 7; // Monday = 0
+    const monday = shiftDay(sel, -dow);
+    const out = [];
+    for (let i = 0; i < 7; i++) out.push(shiftDay(monday, i));
+    return out;
+  }
+  // custom: N consecutive days starting at the selected date (2..14)
+  const n = Math.max(2, Math.min(14, state.customDays));
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(shiftDay(sel, i));
+  return out;
+}
+
+/** Navigate the active view one step (Proton navigation arrows). */
+function navView(delta) {
+  if (state.view === 'month' || state.view === 'year') {
+    const step = state.view === 'month' ? delta : delta * 12;
+    const [y, m] = state.viewYM.split('-').map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + step, 1));
+    state.viewYM = d.toISOString().slice(0, 7);
+    // keep the selected date inside the shown month (Proton clamps)
+    const [ny, nm] = state.viewYM.split('-').map(Number);
+    const last = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+    const day = Math.min(Number((state.selectedDate || core.localToday()).slice(8)), last);
+    state.selectedDate = state.viewYM + '-' + String(day).padStart(2, '0');
+  } else {
+    const step = state.view === 'day' ? delta : delta * viewRangeDays().length;
+    state.selectedDate = shiftDay(state.selectedDate || core.localToday(), step);
+    state.viewYM = state.selectedDate.slice(0, 7);
+  }
+  renderAll();
+}
+
+/** Toolbar label for the active view (Proton current-range). */
+function viewLabel() {
+  const today = state.today || core.localToday();
+  if (state.view === 'month') {
+    return MONTHS[Number(state.viewYM.slice(5)) - 1] + ' ' + state.viewYM.slice(0, 4);
+  }
+  if (state.view === 'year') {
+    return state.viewYM.slice(0, 4);
+  }
+  const days = viewRangeDays();
+  const a = days[0];
+  const b = days[days.length - 1];
+  if (state.view === 'day') {
+    return fmtDateLong.format(new Date(a + 'T00:00:00')) + (a === today ? ' · today' : '');
+  }
+  const fmtRange = new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' });
+  const yr = new Intl.DateTimeFormat(locale, { year: 'numeric' });
+  const sameYear = a.slice(0, 4) === b.slice(0, 4);
+  return (
+    fmtRange.format(new Date(a + 'T00:00:00')) +
+    ' – ' +
+    (sameYear ? '' : yr.format(new Date(a + 'T00:00:00')) + ' ') +
+    fmtRange.format(new Date(b + 'T00:00:00')) +
+    ', ' + yr.format(new Date(b + 'T00:00:00'))
+  );
+}
+
+/** Segmented view switcher + custom-day picker (Proton ViewSelector). */
+function renderToolbar() {
+  $('#month-label').textContent = viewLabel();
+  const seg = $('#view-selector');
+  if (!seg.dataset.bound) {
+    seg.dataset.bound = '1';
+    for (const v of VIEWS) {
+      const b = el('button', 'view-button', {
+        type: 'button',
+        text: v === 'custom' ? 'Custom' : v.charAt(0).toUpperCase() + v.slice(1),
+        'aria-pressed': 'false',
+        title: v + ' view',
+        dataset: { view: v },
+      });
+      b.addEventListener('click', () => setView(v));
+      seg.appendChild(b);
+    }
+    const pick = el('select', 'custom-days-select', {
+      'aria-label': 'Custom view days', title: 'Custom view — number of days',
+    });
+    for (let n = 2; n <= 14; n++) {
+      pick.appendChild(el('option', null, { value: String(n), text: n + ' days' }));
+    }
+    pick.value = String(state.customDays);
+    pick.addEventListener('change', () => {
+      state.customDays = Math.max(2, Math.min(14, Number(pick.value) || 5));
+      setView('custom');
+    });
+    seg.appendChild(pick);
+  }
+  for (const b of seg.querySelectorAll('.view-button')) {
+    b.classList.toggle('is-selected', b.dataset.view === state.view);
+    b.setAttribute('aria-pressed', b.dataset.view === state.view ? 'true' : 'false');
+  }
+  seg.querySelector('.custom-days-select').hidden = state.view !== 'custom';
+}
+
+function setView(v) {
+  if (!VIEWS.includes(v)) return;
+  state.view = v;
+  try { localStorage.setItem(LS_VIEW, v); } catch { /* ignore */ }
+  renderAll();
 }
 
 const MONTHS = (() => {
@@ -796,9 +968,16 @@ function monthRows(ym) {
   return { rows, monthDays: new Set(days) };
 }
 
-function renderMonth() {
-  const head = $('#grid-head');
-  const rowsWrap = $('#grid-rows');
+function renderMonth(root) {
+  root = root || viewRoot();
+  const wrap = el('div', 'daygrid-wrap is-month-view');
+  const head = el('div', 'calendar-daygrid-days');
+  head.id = 'grid-head';
+  const rowsWrap = el('div', 'calendar-daygrid-rows');
+  rowsWrap.id = 'grid-rows';
+  rowsWrap.dataset.dnd = 'daygrid';
+  wrap.append(head, rowsWrap);
+  root.appendChild(wrap);
   head.replaceChildren();
   rowsWrap.replaceChildren();
 
@@ -868,7 +1047,7 @@ function renderMonth() {
     rowsWrap.appendChild(week);
   });
 
-  $('#month-label').textContent = MONTHS[Number(state.viewYM.slice(5)) - 1] + ' ' + state.viewYM.slice(0, 4);
+  $('#month-label').textContent = viewLabel();
 
   // Proton useLayoutEffect: measure the first row, derive the visible chip rows.
   requestAnimationFrame(() => {
@@ -887,11 +1066,12 @@ function renderMonth() {
 function eventChip(style, ev, days) {
   if (!ev) return el('div');
   const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
+  const n = (days && days.length) || 7; // row day count (7 in month/week)
   const chip = el('div', 'calendar-dayeventcell', {
     style:
       `--top-custom:${style.row * DAY_EVENT_HEIGHT}px;` +
-      `--left-custom:${(style.start / 7) * 100}%;` +
-      `--w-custom:${((style.end - style.start) / 7) * 100}%;` +
+      `--left-custom:${(style.start / n) * 100}%;` +
+      `--w-custom:${((style.end - style.start) / n) * 100}%;` +
       `--h-custom:${DAY_EVENT_HEIGHT}px;` +
       `--color-main:${colorMain};--color-alt:${colorAlt};--foreground:#fff;`,
     tabindex: '0',
@@ -932,11 +1112,12 @@ function eventChip(style, ev, days) {
 /** The "+N more" chip (Proton MoreFullDayEvent trigger). */
 function moreChip(dayIdx, days, summary, events, eventsInRow, numberOfRows) {
   const more = summary[dayIdx].more;
+  const n = (days && days.length) || 7; // row day count (7 in month/week)
   const chip = el('div', 'calendar-dayeventcell', {
     style:
       `--top-custom:${numberOfRows * DAY_EVENT_HEIGHT}px;` +
-      `--left-custom:${(dayIdx / 7) * 100}%;` +
-      `--w-custom:${(1 / 7) * 100}%;` +
+      `--left-custom:${(dayIdx / n) * 100}%;` +
+      `--w-custom:${(1 / n) * 100}%;` +
       `--h-custom:${DAY_EVENT_HEIGHT}px;`,
   });
   const b = el('button', 'button button-ghost calendar-dayeventcell-more', {
@@ -950,6 +1131,516 @@ function moreChip(dayIdx, days, summary, events, eventsInRow, numberOfRows) {
   });
   chip.appendChild(b);
   return chip;
+}
+
+/* ---------------- TimeGrid (day / week / custom views) — Proton port ----------------
+ * applications/calendar/src/app/components/calendar/TimeGrid.tsx +
+ * TimeGrid/{DayButtons,DayEvents,HourLines,HourTexts}.tsx +
+ * splitTimeGridEventsPerDay.ts (GPL-3.0), adapted to the wall-time model. */
+
+const minutesOf = (dt) => (dt.time === null ? 0 : +dt.time.slice(0, 2) * 60 + +dt.time.slice(3, 5));
+
+function nowMinutes() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/** Rendered-model cache for the time-grid mouse handler (Proton passes the
+ * same data into handleTimeGridMouseDown at mousedown time). */
+const timeGridModel = { days: [], timeEvents: [], perDay: new Map(), gridEl: null };
+
+/**
+ * splitTimeGridEventsPerDay.ts port (verbatim semantics): events → per-day
+ * LayoutEvent [{idx, start(minutes), end(minutes), id}], clamped into the
+ * day range, MIN_DURATION=15 floor, midnight-end special case skipped.
+ */
+function splitTimeGridEventsPerDay(events, days) {
+  const byDay = new Map(days.map((d) => [d, []]));
+  const minDate = days[0];
+  const maxDate = days[days.length - 1];
+  events.forEach((ev, i) => {
+    // Clamp like startOfDay(max(start, min)) / endOfDay(min(end, max)).
+    const startDay = ev.start.date < minDate ? minDate : ev.start.date;
+    const endInstantDay = ev.end.date; // the day the END wall time falls on
+    const endDay = endInstantDay > maxDate ? maxDate : endInstantDay;
+    if (startDay > endDay) return;
+    for (let d = startDay; d <= endDay; d = shiftDay(d, 1)) {
+      if (!byDay.has(d)) continue; // day not shown in this view
+      const startTime = d === ev.start.date ? minutesOf(ev.start) : 0;
+      const endTime = d === endInstantDay ? minutesOf(ev.end) : TOTAL_MINUTES;
+      // Special case: part-day event ending at midnight shows nothing on the
+      // second day (Proton: endTime === 0 && !isSameDay(start, end)).
+      if (endTime === 0 && d !== ev.start.date) continue;
+      const startTimeWithMin =
+        TOTAL_MINUTES - startTime < MIN_DURATION ? TOTAL_MINUTES - MIN_DURATION : startTime;
+      const endTimeWithMin =
+        endTime - startTimeWithMin < MIN_DURATION ? startTimeWithMin + MIN_DURATION : endTime;
+      byDay.get(d).push({ idx: i, start: startTimeWithMin, end: endTimeWithMin, id: ev.uniqueId });
+    }
+  });
+  return byDay;
+}
+
+/**
+ * DayEvents.tsx getEventsLaidOut port: layout() (the verbatim month-grid
+ * collision/columns engine) over a day's minute-ranges → absolute CSS props.
+ * Returns size ('sm'|'xs'|'2xs') for short events (Proton getSize).
+ */
+function timeGridEventStyles(eventsInDay) {
+  return layout(eventsInDay).map(({ column, columns }, i) => {
+    const { start, end } = eventsInDay[i];
+    const duration = end - start;
+    const size =
+      duration < 30 && duration >= 25 ? 'sm' :
+      duration < 25 && duration >= 20 ? 'xs' :
+      duration < 20 ? '2xs' : undefined;
+    const toP = (n) => (n * 100).toFixed(4) + '%';
+    return {
+      idx: eventsInDay[i].idx,
+      size,
+      style: {
+        top: toP(start / TOTAL_MINUTES),
+        left: toP(column / columns),
+        height: toP(duration / TOTAL_MINUTES),
+        width: toP(1 / columns),
+      },
+    };
+  });
+}
+
+/** One part-day chip (Proton PartDayEvent / PartDayRegularEvent). */
+function partDayChip(ls, ev) {
+  const [colorMain, colorAlt] = genAccentShades(calendarColor(ev.calUuid));
+  const duration = ls.style.height; // keep style pure; duration text from ev
+  const chip = el('div', 'calendar-eventcell' +
+    (ls.size ? ' size-' + ls.size : '') +
+    (ev.isCancelled ? ' isCancelled' : ''), {
+    style:
+      `top:${ls.style.top};left:${ls.style.left};width:${ls.style.width};height:${ls.style.height};` +
+      `--color-main:${colorMain};--color-alt:${colorAlt};--foreground:#fff;`,
+    tabindex: '0',
+    role: 'listitem',
+  });
+  const inner = el('div', 'calendar-eventcell-inner');
+  const timeText = ev.start.time === null
+    ? ''
+    : showTime(ev.start) + (ev.end.time !== null && wallHours(ev.start, ev.end) >= 0.75
+        ? ' – ' + showTime(ev.end)
+        : '');
+  if (timeText) inner.appendChild(el('div', 'calendar-eventcell-time', { text: timeText }));
+  inner.appendChild(el('div', 'calendar-eventcell-title', { text: ev.title || '' }));
+  chip.appendChild(inner);
+  chip.addEventListener('mouseup', (e) => {
+    if (!dragState.moved) {
+      e.stopPropagation();
+      openEventPopover(ev, chip.getBoundingClientRect());
+    }
+  });
+  chip.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const r = chip.getBoundingClientRect();
+      openEventPopover(ev, { left: r.left + 5, right: r.left + 5, top: r.top, bottom: r.bottom });
+    }
+  });
+  return chip;
+}
+
+/** TimeGrid DayButtons.tsx port (weekday + date number button). */
+function timeGridDayButton(day, today) {
+  const d = new Date(day + 'T00:00:00');
+  const b = el('button', 'calendar-grid-heading', {
+    type: 'button',
+    'aria-current': day === today ? 'date' : null,
+    'aria-pressed': day === state.selectedDate ? 'true' : null,
+    'aria-label': fmtDateLong.format(d),
+    title: fmtDateLong.format(d),
+  });
+  b.appendChild(el('span', 'calendar-grid-heading-day', { text: WEEKDAY_LONG[(d.getDay() + 6) % 7] }));
+  b.appendChild(el('span', 'calendar-grid-heading-number', { text: String(d.getDate()) }));
+  b.addEventListener('click', () => {
+    state.selectedDate = day;
+    state.viewYM = day.slice(0, 7);
+    renderAll();
+  });
+  return b;
+}
+
+/** The primary-timezone label (Proton shows the tz name in the aside). */
+function tzShort() {
+  try {
+    return Intl.DateTimeFormat(locale, { timeZoneName: 'short' })
+      .formatToParts(new Date())
+      .find((p) => p.type === 'timeZoneName').value;
+  } catch {
+    return '';
+  }
+}
+
+/** Render day/week/custom views (TimeGrid.tsx structure, verbatim layout). */
+function renderTimeGrid(root, days) {
+  const today = state.today || core.localToday();
+  const events = viewEventsForRange(days[0], days[days.length - 1]);
+  // Proton: time events must be chronologically ordered for the layout.
+  const timeEvents = events
+    .filter((ev) => !ev.isAllDay)
+    .sort((a, b) => (a.start.date + (a.start.time || '')).localeCompare(b.start.date + (b.start.time || '')));
+  const dayEvents = events.filter((ev) => ev.isAllDay);
+
+  const viewClass = days.length > 2 ? 'is-week-view' : 'is-day-view';
+
+  /* ---- heading: day buttons row + all-day row (Proton calendar-row-heading) ---- */
+  const heading = el('div', 'calendar-row-heading shrink-0 ' + viewClass);
+  const firstRow = el('div', 'calendar-first-row-heading');
+  for (const day of days) firstRow.appendChild(timeGridDayButton(day, today));
+  heading.appendChild(firstRow);
+
+  const fulldayRow = el('div', 'calendar-fullday-row');
+  const aside = el('div', 'calendar-aside calendar-primary-timezone-cell');
+  aside.appendChild(el('div', 'calendar-primary-timezone-cell--header', { text: tzShort() }));
+  fulldayRow.appendChild(aside);
+  const fdWrap = el('div', 'flex-1 relative');
+  const fdList = el('ul', 'calendar-time-fullday unstyled daygrid-rowevents', {
+    role: 'list', 'data-row': '0', 'data-dnd': 'daygrid',
+  });
+  const eventsInRow = splitDayEventsInInterval(dayEvents, days[0], days[days.length - 1]);
+  const laid = dayGridRowLayout(eventsInRow, 3); // Proton: numberOfRows = 3
+  for (const s of laid.styles) {
+    if (s.type === 'more') {
+      fdList.appendChild(moreChip(s.dayIdx, days, laid.summary, dayEvents, eventsInRow, 3));
+    } else {
+      fdList.appendChild(eventChip(s, eventsInRow[s.idx] ? dayEvents[eventsInRow[s.idx].idx] : null, days));
+    }
+  }
+  fdWrap.appendChild(fdList);
+  fulldayRow.appendChild(fdWrap);
+  heading.appendChild(fulldayRow);
+  root.appendChild(heading);
+
+  /* ---- scrollable time grid ---- */
+  const scroll = el('div', 'calendar-time-grid flex-1 ' + viewClass);
+  const content = el('div', 'relative main-area-content');
+  const flex = el('div', 'timegrid-flex');
+  const hourTexts = el('div', 'calendar-aside calendar-primary-timezone-cell hour-texts');
+  for (let h = 0; h < 24; h++) {
+    const block = el('div', 'calendar-grid-timeBlock');
+    if (h !== 0) {
+      block.appendChild(el('span', 'calendar-grid-timeText', {
+        text: fmtTime.format(new Date(2000, 0, 1, h)),
+      }));
+    }
+    hourTexts.appendChild(block);
+  }
+  const columns = el('div', 'calendar-grid-gridcells timegrid-columns');
+  const hoursEl = el('div', 'calendar-grid-hours');
+  for (let h = 0; h < 24; h++) hoursEl.appendChild(el('div', 'calendar-grid-hourLine'));
+  columns.appendChild(hoursEl);
+  const perDay = splitTimeGridEventsPerDay(timeEvents, days);
+  for (const day of days) {
+    const col = el('div', 'calendar-grid-gridcell timegrid-day', {
+      role: 'region',
+      'aria-label': fmtDateLong.format(new Date(day + 'T00:00:00')),
+    });
+    for (const ls of timeGridEventStyles(perDay.get(day) || [])) {
+      col.appendChild(partDayChip(ls, timeEvents[ls.idx]));
+    }
+    if (day === today) {
+      col.appendChild(el('div', 'calendar-grid-nowHourLine', {
+        style: `top:${((nowMinutes() / TOTAL_MINUTES) * 100).toFixed(4)}%;`,
+      }));
+    }
+    columns.appendChild(col);
+  }
+  flex.append(hourTexts, columns);
+  content.appendChild(flex);
+  scroll.appendChild(content);
+  root.appendChild(scroll);
+
+  timeGridModel.days = days;
+  timeGridModel.timeEvents = timeEvents;
+  timeGridModel.perDay = perDay;
+  timeGridModel.gridEl = columns;
+
+  // Proton useLayoutEffect: scrollToNow on mount (scrollToTime port).
+  requestAnimationFrame(() => {
+    const timeTop = nowMinutes() / TOTAL_MINUTES;
+    const timeRect = columns.getBoundingClientRect();
+    const headingRect = heading.getBoundingClientRect();
+    const scrollRect = scroll.getBoundingClientRect();
+    scroll.scrollTop = timeRect.height * timeTop - scrollRect.height / 2 + headingRect.height / 2;
+  });
+}
+
+/* ---- TimeGrid interactions: timeGridMouseHandler.ts port (GPL-3.0) ---- */
+
+/** dateHelpers.ts getSnappedMinutes (verbatim). */
+function getSnappedMinutes(minutes, interval) {
+  return Math.floor((minutes / 60) * (60 / interval)) * interval;
+}
+
+/** dateHelpers.ts getTargetMinutes (verbatim). */
+function getTargetMinutes(pageY, top, height, totalMinutes, interval) {
+  const targetMinutes = getRelativePosition(pageY, top, height) * totalMinutes;
+  const hourInMinutes = Math.floor(targetMinutes / 60) * 60;
+  const snappedMinutes = getSnappedMinutes(targetMinutes % 60, interval);
+  return hourInMinutes + snappedMinutes;
+}
+
+/** Ghost chip while time-grid dragging (Proton renders a temporary event). */
+let tgGhost = null;
+function drawTimeGridGhost(day, startMin, endMin, title, isCreate) {
+  removeTimeGridGhost();
+  const col = [...timeGridModel.gridEl.querySelectorAll('.timegrid-day')].find(
+    (c) => c.getAttribute('aria-label') === fmtDateLong.format(new Date(day + 'T00:00:00'))
+  );
+  if (!col) return;
+  const g = el('div', 'calendar-eventcell chip-ghost-time' + (isCreate ? ' is-create' : ''), {
+    style:
+      `top:${((startMin / TOTAL_MINUTES) * 100).toFixed(4)}%;` +
+      `height:${((Math.max(MIN_DURATION, endMin - startMin) / TOTAL_MINUTES) * 100).toFixed(4)}%;` +
+      `left:2%;width:96%;`,
+  });
+  g.appendChild(el('div', 'calendar-eventcell-inner', {}));
+  g.appendChild(el('div', 'calendar-eventcell-title', { text: title || '' }));
+  col.appendChild(g);
+  tgGhost = g;
+}
+function removeTimeGridGhost() {
+  if (tgGhost && tgGhost.parentNode) tgGhost.remove();
+  tgGhost = null;
+}
+
+/** timeGridMouseHandler.ts — capture-phase entry (document mousedown). */
+function handleTimeGridMouseDown(e) {
+  if (e.button !== 0) return;
+  const gridEl = timeGridModel.gridEl;
+  if (!gridEl) return;
+  if (!(e.target instanceof HTMLElement)) return;
+  if (!gridEl.contains(e.target)) return;
+  const days = timeGridModel.days;
+  if (!days.length) return;
+
+  const rect = gridEl.getBoundingClientRect();
+  const targetDate = getTargetIndex(e.pageX, rect.left, rect.width, days.length);
+  const targetMinutes = getTargetMinutes(e.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
+
+  const dayContainer = gridEl.children[targetDate + 1]; // +1 for the hour lines
+
+  // If hitting the days container or the day container itself → CREATE.
+  if (gridEl === e.target || dayContainer === e.target) {
+    return createDragCreateTimeGrid({ e, targetDate, targetMinutes, days });
+  }
+
+  const targetIndex = findContainingParent(dayContainer, e.target);
+  if (targetIndex < 0) return;
+
+  const day = days[targetDate];
+  if (!day) return;
+  const eventsInDay = timeGridModel.perDay.get(day) || [];
+  if (targetIndex >= eventsInDay.length) return;
+  const { idx } = eventsInDay[targetIndex];
+  const ev = timeGridModel.timeEvents[idx];
+  if (!ev) return;
+  // Proton getType: normal events only get DRAG_EVENT_MOVE (resize is
+  // booking-only) — verbatim behaviour.
+  createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days });
+}
+
+/** timeGridMouseHandler.ts createDragCreateMouseDown (ported). */
+function createDragCreateTimeGrid({ e, targetDate, targetMinutes, days }) {
+  const startDate = days[targetDate];
+  let endTargetMinutes;
+  let oldMouseY = -1; // CREATE_STATE_INIT
+  let result = null;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const handleMouseMove = (me) => {
+    me.preventDefault();
+    me.stopPropagation();
+    if (oldMouseY === -1) oldMouseY = me.pageY;
+    if (oldMouseY !== -2 && Math.abs(oldMouseY - me.pageY) < CREATE_SENSITIVITY) return;
+    oldMouseY = -2; // CREATE_STATE_ACTIVE
+    dragState.moved = true;
+
+    const rect = timeGridModel.gridEl.getBoundingClientRect();
+    const newEndTargetDate = getTargetIndex(me.pageX, rect.left, rect.width, days.length);
+    const newEndTargetMinutes = getTargetMinutes(me.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
+    if (newEndTargetDate === targetDate && newEndTargetMinutes === endTargetMinutes) return;
+    endTargetMinutes = newEndTargetMinutes;
+    // Proton: only allow d&d on the same day — endTargetDate = targetDate.
+    const isAfter = endTargetMinutes >= targetMinutes;
+    if (isAfter) {
+      const newEnd = Math.min(TOTAL_MINUTES, endTargetMinutes + TIMEGRID_INTERVAL);
+      result = { startMinutes: targetMinutes, endMinutes: newEnd };
+    } else {
+      result = { startMinutes: endTargetMinutes, endMinutes: targetMinutes };
+    }
+    drawTimeGridGhost(startDate, result.startMinutes, result.endMinutes, '', true);
+  };
+
+  const handleMouseUp = () => {
+    document.removeEventListener('mouseup', handleMouseUp, true);
+    document.removeEventListener('mousemove', handleMouseMove, true);
+    removeTimeGridGhost();
+    if (result) {
+      beginCreateTimeGrid(startDate, result.startMinutes, result.endMinutes);
+    } else {
+      // Simple click: default 30-minute event at the snapped time.
+      const end = Math.min(TOTAL_MINUTES, targetMinutes + 30);
+      beginCreateTimeGrid(startDate, targetMinutes, Math.max(end, targetMinutes + MIN_DURATION));
+    }
+  };
+
+  document.addEventListener('mouseup', handleMouseUp, true);
+  document.addEventListener('mousemove', handleMouseMove, true);
+  blockClick();
+}
+
+/** Open the editor for a timed event created on the time grid. */
+function beginCreateTimeGrid(day, startMinutes, endMinutes) {
+  closeAllOverlays();
+  const uuid = defaultCalendarUuid();
+  if (!uuid) { toast('Create a calendar first.', 'warn'); return; }
+  const p2 = (n) => String(Math.floor(n)).padStart(2, '0');
+  editor.mode = 'create';
+  editor.scope = null;
+  editor.target = null;
+  editor.custom = null;
+  openEditor({
+    title: '',
+    allDay: false,
+    start: { date: day, time: p2(startMinutes / 60) + ':' + p2(startMinutes % 60) },
+    end: { date: day, time: p2(endMinutes / 60) + ':' + p2(endMinutes % 60) },
+    freq: '',
+    calUuid: uuid,
+    location: '',
+    notifs: [],
+    description: '',
+  });
+}
+
+/** timeGridMouseHandler.ts createDragMoveEvent (ported; MOVE type only). */
+function createDragMoveTimeGrid({ e, ev, targetDate, targetMinutes, days }) {
+  let oldTargetDate = targetDate;
+  let oldTargetMinutes = targetMinutes;
+  let currentTargetDate;
+  let currentTargetMinutes;
+  let result = null;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const handleMouseMove = (me) => {
+    const rect = timeGridModel.gridEl.getBoundingClientRect();
+    currentTargetDate = getTargetIndex(me.pageX, rect.left, rect.width, days.length);
+    currentTargetMinutes = getTargetMinutes(me.pageY, rect.top, rect.height, TOTAL_MINUTES, TIMEGRID_INTERVAL);
+    if (oldTargetDate === currentTargetDate && oldTargetMinutes === currentTargetMinutes) return;
+    oldTargetDate = currentTargetDate;
+    oldTargetMinutes = currentTargetMinutes;
+    dragState.moved = true;
+
+    const diffDate = currentTargetDate - targetDate;
+    const diffMinutes = currentTargetMinutes - targetMinutes;
+    result = { diffDate, diffMinutes };
+
+    // Ghost at the shifted position (same day column as the pointer).
+    const day = days[Math.max(0, Math.min(days.length - 1, currentTargetDate))];
+    const startMin = Math.max(0, minutesOf(ev.start) + diffMinutes);
+    const endMin = Math.min(TOTAL_MINUTES, minutesOf(ev.end) + diffMinutes);
+    drawTimeGridGhost(day, startMin, Math.max(endMin, startMin + MIN_DURATION), ev.title || '', false);
+  };
+
+  const handleMouseUp = () => {
+    document.removeEventListener('mouseup', handleMouseUp, true);
+    document.removeEventListener('mousemove', handleMouseMove, true);
+    removeTimeGridGhost();
+    timeGridModel.gridEl.querySelectorAll('.isDragging').forEach((n) => n.classList.remove('isDragging'));
+    if (result) {
+      finishTimeGridMove(ev, result.diffDate, result.diffMinutes);
+    }
+    // else: plain click — the chip's own mouseup opens the popover.
+  };
+
+  document.addEventListener('mouseup', handleMouseUp, true);
+  document.addEventListener('mousemove', handleMouseMove, true);
+  blockClick();
+  const chip = e.target.closest('.calendar-eventcell');
+  if (chip) chip.querySelector('.calendar-eventcell-inner')?.classList.add('isDragging');
+}
+
+async function finishTimeGridMove(ev, diffDate, diffMinutes) {
+  if (!diffDate && !diffMinutes) return;
+  const apply = async (scope) => {
+    try {
+      setBusy(true, 'Moving event…');
+      await applyDayShift(ev, diffDate, scope, diffMinutes);
+      toast('Event moved.', 'ok', 2000);
+    } catch (e) {
+      toast('Move failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (ev.isRecurring || ev.isException) {
+    openRecurringChoice('Move recurring event', apply);
+  } else {
+    await apply('master');
+  }
+}
+
+/* ---------------- year view (Proton YEAR: 12 month grids) ---------------- */
+
+function renderYear(root) {
+  const year = state.viewYM.slice(0, 4);
+  const today = state.today || core.localToday();
+  const wrap = el('div', 'yeargrid-wrap');
+  const events = viewEventsForRange(year + '-01-01', year + '-12-31');
+  const daysWithEvents = new Map(); // day -> [calUuid…]
+  for (const ev of events) {
+    for (let d = ev.dispFirst; d <= ev.dispLast; d = shiftDay(d, 1)) {
+      if (!daysWithEvents.has(d)) daysWithEvents.set(d, []);
+      daysWithEvents.get(d).push(ev.calUuid);
+    }
+  }
+  for (let m = 1; m <= 12; m++) {
+    const ym = year + '-' + String(m).padStart(2, '0');
+    const box = el('div', 'yeargrid-month');
+    box.appendChild(el('div', 'yeargrid-month-label', { text: MONTHS[m - 1] }));
+    const grid = el('div', 'minicalendar-grid yeargrid-grid');
+    for (let i = 0; i < 7; i++) {
+      grid.appendChild(el('div', 'wd', { text: WEEKDAY_LONG[i].slice(0, 2) }));
+    }
+    const { rows, monthDays } = monthRows(ym);
+    for (const week of rows) {
+      for (const day of week) {
+        const calIds = daysWithEvents.get(day) || [];
+        const b = el('button', 'minicalendar-day' +
+          (monthDays.has(day) ? '' : ' out') +
+          (day === today ? ' today' : '') +
+          (day === state.selectedDate ? ' selected' : ''), {
+          type: 'button',
+          text: String(Number(day.slice(8))),
+          'aria-label': fmtDateMed.format(new Date(day + 'T00:00:00')),
+        });
+        if (calIds.length > 0) {
+          const dot = el('span', 'yearday-dot');
+          dot.style.background = calendarColor(calIds[0]);
+          b.appendChild(dot);
+        }
+        b.addEventListener('click', () => {
+          state.selectedDate = day;
+          state.viewYM = day.slice(0, 7);
+          setView('month');
+        });
+        grid.appendChild(b);
+      }
+    }
+    box.appendChild(grid);
+    wrap.appendChild(box);
+  }
+  root.appendChild(wrap);
 }
 
 /* ---------------- mini calendar ---------------- */
@@ -1048,29 +1739,30 @@ function renderCalendarList() {
   }
 }
 
-/* ---------------- clock preview (§13 reader, read-only) ---------------- */
+/* ---------------- clock preview (§13c LOCAL derivation, read-only) ---------------- */
 
 function renderClockPreview() {
   const panel = $('#clock-list');
   panel.replaceChildren();
-  for (const day of core.clockPreviewDays(state.today || core.localToday())) {
-    const stored = state.buckets.get(day);
-    const item = el('div', 'clock-item' + (day === state.today ? ' today' : ''));
+  const today = state.today || core.localToday();
+  // v4.3: derived in-memory from evt rows (protocol.md §13c) — ZERO requests,
+  // exactly the §13 format the (unbuilt) clock would cache.
+  const parsedRows = new Map();
+  for (const [id, rec] of state.evt) parsedRows.set(id, rec.parsed);
+  const derived = core.deriveWindowBuckets(parsedRows, today);
+  for (const day of core.clockPreviewDays(today)) {
+    const entries = core.sortBucketEvents(derived.get(day) || []);
+    const item = el('div', 'clock-item' + (day === today ? ' today' : ''));
     item.appendChild(el('div', 'clock-date', {
-      text: fmtDayMonth.format(new Date(day + 'T00:00:00')) + (day === state.today ? ' (today)' : ''),
+      text: fmtDayMonth.format(new Date(day + 'T00:00:00')) + (day === today ? ' (today)' : ''),
     }));
-    if (stored === null || stored === undefined) {
-      item.appendChild(el('div', 'clock-ev err', { text: 'decrypt error' }));
+    if (entries.length === 0) {
+      item.appendChild(el('div', 'clock-ev none', { text: '—' }));
     } else {
-      const list = core.sortBucketEvents(stored.events);
-      if (list.length === 0) {
-        item.appendChild(el('div', 'clock-ev none', { text: '—' }));
-      } else {
-        for (const ev of list) {
-          item.appendChild(el('div', 'clock-ev', {
-            text: `${String(ev.hh).padStart(2, '0')}:${String(ev.mm).padStart(2, '0')} — ${ev.title} [p${ev.priority}]`,
-          }));
-        }
+      for (const ev of entries) {
+        item.appendChild(el('div', 'clock-ev', {
+          text: `${String(ev.hh).padStart(2, '0')}:${String(ev.mm).padStart(2, '0')} — ${ev.title} [p${ev.priority}]`,
+        }));
       }
     }
     panel.appendChild(item);
@@ -1696,8 +2388,14 @@ async function saveEvent(form) {
       alarms,
     });
     const id = core.evtId(form.calUuid, uid);
-    await putRowRMW(id, () => serializeVCalendar(cal), { allowCreate: true });
-    await syncAll();
+    // v4.3 §5.2: ONE request (PUT ver 1) — no pre-GET, no post-save sync.
+    const res = await putRowRMW(id, () => serializeVCalendar(cal), {
+      allowCreate: true,
+      local: { ver: 0, payload: null },
+    });
+    if (res.ver !== 1) throw new Error('unexpected_ver: ' + id);
+    applyRowLocally(id, res.ver, res.text);
+    renderAll();
     toast('Event saved.', 'ok', 2000);
     return;
   }
@@ -1739,8 +2437,11 @@ async function saveEvent(form) {
     else events.push(upd);
     const newId = core.evtId(form.calUuid, current.uid);
     await state.api.deleteRow(rowId);
-    await putRowRMW(newId, () => serializeVCalendar(current.calendar), { allowCreate: true });
-    await syncAll();
+    state.evt.delete(rowId);
+    state.corrupt.delete(rowId);
+    const res = await putRowRMW(newId, () => serializeVCalendar(current.calendar), { allowCreate: true });
+    applyRowLocally(newId, res.ver, res.text);
+    renderAll();
     toast('Event moved and saved.', 'ok', 2000);
     return;
   }
@@ -1748,7 +2449,9 @@ async function saveEvent(form) {
     ? (target.recId ? { date: target.recId.date, time: target.recId.time, tz: target.component.dtstart.tz } : null)
     : null;
 
-  await putRowRMW(rowId, (payload, ver) => {
+  // v4.3 §5.2 fast path: local ver+payload from state; rebase re-fetches.
+  const localRow = state.evt.get(rowId) || null;
+  const res = await putRowRMW(rowId, (payload, ver) => {
     let p;
     try { p = core.parseEvtPayload(payload); } catch { p = null; }
     if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
@@ -1793,10 +2496,16 @@ async function saveEvent(form) {
     if (idx >= 0) events[idx] = upd;
     else events.push(upd);
     return serializeVCalendar(p.calendar);
-  }, { allowCreate: false });
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
 
-  await syncAll();
+  applyRowLocally(rowId, res.ver, res.text);
+  renderAll();
   toast('Event saved.', 'ok', 2000);
+}
+
+/** Re-serialize a locally-held parsed row (for the RMW fast-path payload). */
+function serializeEvtOf(rec) {
+  return core.serializeEvtPayload(rec.parsed);
 }
 
 /** Build a minimal VCALENDAR model around one component spec. */
@@ -1829,13 +2538,16 @@ async function deleteEvent(ev, scope) {
   const rowId = ev.rowId;
   if (!(ev.isRecurring || ev.isException) || scope === 'all') {
     await state.api.deleteRow(rowId);
-    await syncAll();
+    state.evt.delete(rowId);
+    state.corrupt.delete(rowId);
+    renderAll();
     toast('Event deleted.', 'ok', 2000);
     return;
   }
   // scope === 'this': EXDATE the occurrence on the master (+ drop any exception).
   const recId = ev.recId;
-  await putRowRMW(rowId, (payload) => {
+  const localRow = state.evt.get(rowId) || null;
+  const res = await putRowRMW(rowId, (payload) => {
     let p;
     try { p = core.parseEvtPayload(payload); } catch { p = null; }
     if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
@@ -1848,17 +2560,39 @@ async function deleteEvent(ev, scope) {
       (e) => !(e.recurrenceId && e.recurrenceId.date === recId.date && (e.recurrenceId.time || '') === (recId.time || ''))
     );
     return serializeVCalendar(p.calendar);
-  }, { allowCreate: false });
-  await syncAll();
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
+  applyRowLocally(rowId, res.ver, res.text);
+  renderAll();
   toast('Event deleted.', 'ok', 2000);
 }
 
 /* ---- drag & drop save ---- */
 
-async function applyDayShift(ev, days, scope) {
-  const shift = (dt) => wallShift(dt, days);
+/**
+ * Shift an event by whole days AND minutes (wall-clock arithmetic; a time
+ * shift may carry into the next/previous day). scope 'exception' turns a
+ * plain occurrence into its exception component (same semantics as before).
+ */
+async function applyDayShift(ev, days, scope, minutes = 0) {
+  const shiftDt = (dt) => {
+    if (!dt) return dt;
+    const shiftedDate = shiftDay(dt.date, days);
+    if (dt.time === null || minutes === 0) {
+      return { date: shiftedDate, time: dt.time, tz: dt.tz };
+    }
+    const secs = +dt.time.slice(0, 2) * 3600 + +dt.time.slice(3, 5) * 60 + +dt.time.slice(6, 8) + minutes * 60;
+    const dayCarry = Math.floor(secs / 86400);
+    const rem = ((secs % 86400) + 86400) % 86400;
+    const p = (n, w) => String(n).padStart(w || 2, '0');
+    return {
+      date: shiftDay(shiftedDate, dayCarry),
+      time: `${p(Math.floor(rem / 3600))}:${p(Math.floor((rem % 3600) / 60))}:${p(rem % 60)}`,
+      tz: dt.tz,
+    };
+  };
   const target = ev;
-  await putRowRMW(target.rowId, (payload) => {
+  const localRow = state.evt.get(target.rowId) || null;
+  const res = await putRowRMW(target.rowId, (payload) => {
     let p;
     try { p = core.parseEvtPayload(payload); } catch { p = null; }
     if (!p) throw new Error('row_corrupt: refusing to rewrite a corrupt row');
@@ -1896,8 +2630,8 @@ async function applyDayShift(ev, days, scope) {
     const upd = {
       ...old,
       dtstamp: { date: new Date().toISOString().slice(0, 10), time: new Date().toISOString().slice(11, 19), tz: 'UTC' },
-      dtstart: shift(old.dtstart),
-      dtend: old.dtend ? shift(old.dtend) : null,
+      dtstart: shiftDt(old.dtstart),
+      dtend: old.dtend ? shiftDt(old.dtend) : null,
       duration: old.dtend ? null : old.duration, // DURATION stays (relative)
       sequence: (old.sequence === null || old.sequence === undefined ? 0 : old.sequence) + 1,
     };
@@ -1907,8 +2641,9 @@ async function applyDayShift(ev, days, scope) {
     if (idx >= 0) events[idx] = upd;
     else events.push(upd);
     return serializeVCalendar(p.calendar);
-  }, { allowCreate: false });
-  await syncAll();
+  }, { allowCreate: false, local: localRow ? { ver: localRow.ver, payload: serializeEvtOf(localRow) } : null });
+  applyRowLocally(target.rowId, res.ver, res.text);
+  renderAll();
 }
 
 /* ---------------- recurring choice modal ---------------- */
@@ -2111,16 +2846,25 @@ function openCalendarModal(uuid) {
       setBusy(true, 'Saving calendar…');
       if (existing) {
         const meta = core.newCalendarMeta(name, color);
-        await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), { allowCreate: false });
+        const res = await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), {
+          allowCreate: false,
+          local: { ver: existing.ver, payload: JSON.stringify(existing.meta) },
+        });
+        applyRowLocally(core.cmetaId(uuid), res.ver, res.text);
       } else {
         const newUuid = crypto.randomUUID();
         const meta = core.newCalendarMeta(name, color);
-        await putRowRMW(core.cmetaId(newUuid), () => JSON.stringify(meta), { allowCreate: true });
+        const res = await putRowRMW(core.cmetaId(newUuid), () => JSON.stringify(meta), {
+          allowCreate: true,
+          local: { ver: 0, payload: null },
+        });
+        applyRowLocally(core.cmetaId(newUuid), res.ver, res.text);
         calVisible.add(newUuid);
         saveCalVis();
       }
       close();
-      await syncAll();
+      syncCalVisible();
+      renderAll();
       toast('Calendar saved.', 'ok', 2000);
     } catch (e) {
       toast('Save failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
@@ -2156,12 +2900,18 @@ function confirmDeleteCalendar(uuid) {
     try {
       setBusy(true, 'Deleting calendar…');
       for (const id of [...state.evt.keys()]) {
-        if ((core.parseEvtId(id) || {}).cal === uuid) await state.api.deleteRow(id);
+        if ((core.parseEvtId(id) || {}).cal === uuid) {
+          await state.api.deleteRow(id);
+          state.evt.delete(id);
+        }
       }
       await state.api.deleteRow(core.cmetaId(uuid));
+      state.cals.delete(uuid);
+      state.corrupt.delete(core.cmetaId(uuid));
       calVisible.delete(uuid);
       saveCalVis();
-      await syncAll();
+      syncCalVisible();
+      renderAll();
       toast('Calendar deleted.', 'ok', 2000);
     } catch (e) {
       toast('Delete failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
@@ -2266,14 +3016,25 @@ function blockClick() {
   return cancel;
 }
 
-/** Proton layout data for the mouse handler (recomputed per mousedown). */
-function currentGridModel() {
-  const { rows } = monthRows(state.viewYM);
-  const events = viewEventsForRange(rows[0][0], rows[rows.length - 1][6]);
+/** Proton layout data for the mouse handler (recomputed per mousedown).
+ * v4.3: serves BOTH the month grid (multi-row) and the TimeGrid all-day
+ * row (single-row) — Proton wires the same handler into both surfaces. */
+function currentGridModel(dayGridEl) {
+  let rows;
+  let numberOfRows;
+  if (dayGridEl.classList.contains('calendar-time-fullday')) {
+    rows = [timeGridModel.days];
+    numberOfRows = 3; // Proton TimeGrid all-day numberOfRows
+  } else {
+    rows = monthRows(state.viewYM).rows;
+    numberOfRows = Math.max(state.gridRows, 0);
+  }
+  const events = viewEventsForRange(rows[0][0], rows[rows.length - 1][rows[rows.length - 1].length - 1]);
   const perRow = rows.map((days) => {
-    const rowEvents = events.filter((ev) => !(ev.dispFirst > days[6] || ev.dispLast < days[0]));
-    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], days[6]);
-    const laid = dayGridRowLayout(eventsInRow, Math.max(state.gridRows, 0));
+    const last = days[days.length - 1];
+    const rowEvents = events.filter((ev) => !(ev.dispFirst > last || ev.dispLast < days[0]));
+    const eventsInRow = splitDayEventsInInterval(rowEvents, days[0], last);
+    const laid = dayGridRowLayout(eventsInRow, numberOfRows);
     return { days, rowEvents, eventsInRow, eventsInRowStyles: laid.styles, eventsInRowSummary: laid.summary };
   });
   return { rows, events, perRow };
@@ -2282,11 +3043,12 @@ function currentGridModel() {
 /** dayGridMouseHandler.ts handleDayGridMouseDown (ported). */
 function handleDayGridMouseDown(e) {
   if (e.button !== 0) return;
-  const dayGridEl = $('#grid-rows');
   if (!(e.target instanceof HTMLElement)) return;
+  const dayGridEl = e.target.closest('[data-dnd="daygrid"]');
+  if (!dayGridEl) return;
   if (!dayGridEl.contains(e.target)) return;
 
-  const model = currentGridModel();
+  const model = currentGridModel(dayGridEl);
   const rowElement = findUpwards(e.target, dayGridEl, (el) => typeof el.dataset.row !== 'undefined');
   if (!rowElement) return;
 
@@ -2411,9 +3173,13 @@ function createDragMoveEvent({ e, ev, targetRow, targetDay, daysPerRow, model, d
   // EVENT being dragged (Proton keeps them distinct too; shadowing here
   // previously threw inside this handler and silently killed every drag).
   let hl = null; // drop-target row highlight
+  const dndRowEls = () =>
+    dayGridEl.classList.contains('daygrid-rowevents')
+      ? [dayGridEl] // TimeGrid all-day row: the container IS the row element
+      : [...dayGridEl.querySelectorAll('.daygrid-rowevents')];
   const setHighlight = (rowIdx) => {
     if (hl) hl.classList.remove('is-drop-target');
-    const rows = dayGridEl.querySelectorAll('.daygrid-rowevents');
+    const rows = dndRowEls();
     hl = rowIdx >= 0 && rows[rowIdx] ? rows[rowIdx] : null;
     if (hl) hl.classList.add('is-drop-target');
   };
@@ -2486,19 +3252,23 @@ async function finishDragMove(ev, days) {
 /** Ghost chip while dragging (Proton renders the moved event live). */
 function drawGhost(ghost, dayGridEl, model, targetRow, startDay, endDay, ev) {
   removeGhost(ghost);
-  const rowsEls = dayGridEl.querySelectorAll('.daygrid-rowevents');
+  const rowsEls = dayGridEl.classList.contains('daygrid-rowevents')
+    ? [dayGridEl] // TimeGrid all-day row: the container IS the row element
+    : dayGridEl.querySelectorAll('.daygrid-rowevents');
   const target = rowsEls[targetRow];
   if (!target) return null;
   const days = model.rows[targetRow];
   // `diffDays` here is the MODULE function (the drag delta is not needed:
-  // the ghost always spans the shifted start..end days).
+  // the ghost always spans the shifted start..end days). Row width uses the
+  // row's OWN day count (7 in month/week, 1..14 in custom views).
+  const n = days.length;
   const first = Math.max(0, diffDays(startDay, days[0]));
-  const last = Math.min(6, diffDays(endDay, days[0]));
+  const last = Math.min(n - 1, diffDays(endDay, days[0]));
   if (first > last) return null;
   const g = el('div', 'chip-ghost', { text: ev ? (ev.title || '') : '' });
   g.style.top = '0px';
-  g.style.left = (first / 7) * 100 + '%';
-  g.style.width = ((last - first + 1) / 7) * 100 + '%';
+  g.style.left = (first / n) * 100 + '%';
+  g.style.width = ((last - first + 1) / n) * 100 + '%';
   g.style.height = DAY_EVENT_HEIGHT + 'px';
   target.appendChild(g);
   return g;
@@ -2539,13 +3309,14 @@ function bind() {
     if (state.busy || !state.api) return;
     syncAll().catch((e) => toast('Sync failed: ' + (e && e.message ? e.message : String(e)), 'err'));
   });
-  $('#btn-prev').addEventListener('click', () => navMonth(-1));
-  $('#btn-next').addEventListener('click', () => navMonth(1));
-  $('#minical-prev').addEventListener('click', () => navMonth(-1));
-  $('#minical-next').addEventListener('click', () => navMonth(1));
+  $('#btn-prev').addEventListener('click', () => navView(-1));
+  $('#btn-next').addEventListener('click', () => navView(1));
+  $('#minical-prev').addEventListener('click', () => navView(-1));
+  $('#minical-next').addEventListener('click', () => navView(1));
   $('#btn-today').addEventListener('click', () => {
-    state.viewYM = core.localToday().slice(0, 7);
-    state.selectedDate = core.localToday();
+    state.today = core.localToday();
+    state.viewYM = state.today.slice(0, 7);
+    state.selectedDate = state.today;
     renderAll();
   });
   $('#btn-new-event').addEventListener('click', () => {
@@ -2554,6 +3325,7 @@ function bind() {
     beginCreate(null);
   });
   $('#btn-add-calendar').addEventListener('click', () => openCalendarModal(null));
+  $('#btn-theme').addEventListener('click', toggleTheme);
 
   $('#popover-backdrop').addEventListener('click', closePopover);
   $('#editor-backdrop').addEventListener('click', () => {
@@ -2573,13 +3345,20 @@ function bind() {
     if (!modal.hidden) closeModalSurface(modal, $('#freq-backdrop'));
   });
 
-  // Proton: capture-phase document mousedown drives month-grid DnD.
+  // Proton: capture-phase document mousedown drives grid DnD. v4.3 routes
+  // time-grid events (day/week/custom) to the TimeGrid handler FIRST; the
+  // month grid and the all-day row use the day-grid handler.
   document.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
+    if (e.target instanceof HTMLElement && e.target.closest('.timegrid-columns')) {
+      handleTimeGridMouseDown(e);
+      return;
+    }
     handleDayGridMouseDown(e);
   }, true);
 
-  // Keyboard: Escape closes the topmost overlay; n/t/arrows navigate.
+  // Keyboard: Escape closes the topmost overlay; n/t/arrows navigate;
+  // d/w/m/y/c switch views (Proton keyboard shortcuts).
   document.addEventListener('keydown', (e) => {
     const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
     if (e.key === 'Escape') {
@@ -2589,12 +3368,23 @@ function bind() {
     if (inField || state.busy || !state.api || $('#app').hidden) return;
     if (e.key === 'n') { e.preventDefault(); $('#btn-new-event').click(); }
     else if (e.key === 't') { e.preventDefault(); $('#btn-today').click(); }
-    else if (e.key === 'ArrowLeft') { e.preventDefault(); navMonth(-1); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); navMonth(1); }
+    else if (e.key === 'd') { e.preventDefault(); setView('day'); }
+    else if (e.key === 'w') { e.preventDefault(); setView('week'); }
+    else if (e.key === 'm') { e.preventDefault(); setView('month'); }
+    else if (e.key === 'y') { e.preventDefault(); setView('year'); }
+    else if (e.key === 'v') { e.preventDefault(); setView('custom'); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); navView(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); navView(1); }
   });
 
   window.addEventListener('resize', () => {
-    if (!$('#app').hidden) renderMonth();
+    if (!$('#app').hidden) {
+      // Only the grids need re-layout; keep the user's scroll position.
+      const scroll = document.querySelector('.calendar-time-grid');
+      const top = scroll ? scroll.scrollTop : null;
+      renderAll();
+      if (scroll && top !== null) scroll.scrollTop = top;
+    }
   });
 
   $('#btn-paste-setup').addEventListener('click', () => {
@@ -2613,21 +3403,65 @@ function bind() {
       $('#btn-paste-setup').click();
     }
   });
+
+  // v4.3 §5.3 autosync: 60 s poll while visible + one sync on refocus.
+  setInterval(() => {
+    if (document.hidden) return;
+    autosync();
+  }, AUTOSYNC_MS);
+  window.addEventListener('focus', autosync);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) autosync();
+  });
+
+  // Keep the now-line and the "today" marker current (day rollover, minute
+  // hand) without a full re-render.
+  setInterval(() => {
+    const today = core.localToday();
+    if (state.api && today !== state.today) {
+      state.today = today;
+      renderAll();
+      return;
+    }
+    const line = document.querySelector('.calendar-grid-nowHourLine');
+    if (line) line.style.top = ((nowMinutes() / TOTAL_MINUTES) * 100).toFixed(4) + '%';
+  }, 60000);
 }
 
-function navMonth(delta) {
-  const [y, m] = state.viewYM.split('-').map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  state.viewYM = d.toISOString().slice(0, 7);
-  renderAll();
+/* ---------------- theme (Proton light/dark tokens) ---------------- */
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = $('#btn-theme');
+  if (btn) {
+    btn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    btn.setAttribute('aria-label', btn.title);
+  }
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  try { localStorage.setItem(LS_THEME, next); } catch { /* ignore */ }
+  applyTheme(next);
 }
 
 function boot() {
   ingestParams();
   refreshLoginUi();
-  state.viewYM = core.localToday().slice(0, 7);
-  state.selectedDate = core.localToday();
+  state.today = core.localToday();
+  state.viewYM = state.today.slice(0, 7);
+  state.selectedDate = state.today;
+  try {
+    const v = localStorage.getItem(LS_VIEW);
+    if (VIEWS.includes(v)) state.view = v;
+  } catch { /* ignore */ }
   bind();
+  // applyTheme is also set by the inline head script (FOUC guard); re-apply
+  // in case the DOM finished parsing after it.
+  applyTheme((() => {
+    try { return localStorage.getItem(LS_THEME) || null; } catch { return null; }
+  })() || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
 }
 
 boot();
