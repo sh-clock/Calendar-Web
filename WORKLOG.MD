@@ -1612,3 +1612,243 @@ Verified OK (no bug found):
   hidden (matches HourTexts.tsx:13); .calendar-eventcell absolute inside
   relative .timegrid-day (measured); .calendar-time-fullday = 84px = 3*28
   (measured).
+
+## WAVE-7 STRESS S2 (NICHE) FINDINGS
+
+Agent: STRESS-TEST AGENT S2 (niche edge cases), 2026-10-31. Scope: 5 mandated
+scenarios run end-to-end against the local dev stack (web 127.0.0.1:8080,
+worker 127.0.0.1:8787, proto 4.3, browser TZ=UTC, "today" = 2026-10-31),
+each with a fresh wipe. Method: real UI driving via Playwright (editor forms,
+view switching, #btn-sync), plus server-side protocol writes (k_data
+AES-256-GCM envelopes, AAD=id||u32be(ver)) for corruption/volume injection.
+Throwaway scripts: /tmp/s2/{s2lib.mjs,s1.mjs,s1b.mjs,s1c.mjs,s2.mjs,s3.mjs,
+s4.mjs,s5.mjs,s5b.mjs,s5c.mjs,s5probe.mjs}. NOTE: the local worker is shared
+with other live wave-7 agents — foreign rows appeared mid-run and were wiped
+between scenarios (an s1guard:* row from another agent was present at the end
+and removed by the final wipe; final state verified 0 rows).
+
+### Scenario results (all PASS)
+
+1. TIME BOUNDARIES — PASS (27/27 checks + 15/15 in two follow-ups).
+   Events created via the editor on Wed 2026-10-28: 00:00–01:00, 23:30–00:15
+   (+1d), 22:00–01:00 (+1d), 12:00–12:00 (zero-length). Week view: all render;
+   the two overnight events split across exactly 2 day columns; the
+   zero-length chip renders with the 15-min MIN_DURATION floor (visible
+   height). Month view: all 4 render. Server payloads: DTSTART/DTEND exactly
+   as entered (e.g. DTSTART:20261028T233000Z / DTEND:20261029T001500Z),
+   DTEND==DTSTART for the zero-length event, no T240000 anywhere. Follow-up
+   s1b: event 23:00→00:00(+1d) saves DTEND:20261029T000000Z (next-day
+   midnight — the fixed B1 class) and renders on the start day only (Proton
+   end-at-midnight skip). Follow-up s1c: editing the Thursday fragment of the
+   23:30–00:15 event round-trips Starts 2026-10-28 23:30 / Ends 2026-10-29
+   00:15 and a no-op re-save keeps DTSTART/DTEND identical (ver 2).
+2. DATE BOUNDARIES — PASS (25/25). All-day Dec 30–Jan 2 across the year
+   boundary: DTSTART;VALUE=DATE:20261230 / DTEND;VALUE=DATE:20270103
+   (exclusive, no T240000), chip renders in both Dec 2026 and Jan 2027 month
+   views. Jan 29–Feb 2: DTEND;VALUE=DATE:20270203, renders in Jan and Feb.
+   Monthly-on-the-31st (DTSTART 2026-10-31, RRULE:FREQ=MONTHLY): Nov 2026
+   (30-day month) renders with NO in-month occurrence (correct RFC 5545
+   semantics; the only visible occurrence is the Oct 31 master on an
+   outside-day cell), no crash; Dec 2026 shows the Dec 31 occurrence. Feb-29
+   birthday-style yearly: created on 2028-02-29 through the editor's date
+   input (accepted), DTSTART;VALUE=DATE:20280229 / DTEND;VALUE=DATE:20280301
+   / RRULE:FREQ=YEARLY; renders in Feb 2028; zero occurrences in Feb 2029
+   (non-leap) — correct.
+3. CORRUPTION RESILIENCE — PASS (20/20). Valid-envelope evt row with
+   plaintext JSON.stringify('garbage not ical'): after sync the sidebar shows
+   '.corrupt-note' ("1 unreadable row(s)") + a single warn toast, the app
+   stays alive, the healthy event still renders, and the row is never
+   rewritten (ver stays 1, nonce/ct byte-identical). Second row encrypted
+   under a random 32-byte key: note becomes "2 unreadable row(s)", same
+   guarantees, garbage plaintext never leaks into the DOM. After deleting
+   both rows + one sync the note disappears. Matches the "flagged, never
+   rewritten" contract (app.js:679/713/2610 guards; note at app.js:1917-1921).
+4. STORAGE EDGE — PASS (15/15). Pre-seeding localStorage with
+   clock_poc_auth_ui='zzz', clock_poc_calvis_v42='{bad',
+   clock_poc_view_v43='nonsense', clock_poc_theme='purple': the page boots,
+   the unlock form paints with ZERO console/page errors; unknown theme
+   degrades to the :root light tokens; bad calvis JSON is ignored
+   (loadCalVis try/catch, app.js:240-247); 'nonsense' view falls back to
+   month (VIEWS guard, app.js:3703-3706). Unlock via ?server=…&setup=…
+   overwrites the bogus token and unlocks cleanly (default calendar
+   bootstrapped). Setting clock_poc_view_v43='week' + reload + unlock
+   restores the week view (7 TimeGrid day columns). (First s4 run's
+   reload-unlock failure was MY harness artifact: Playwright addInitScript
+   re-poisons the token on every navigation — re-tested with once-only
+   poisoning, all green.)
+5. LARGE DATA — PASS (12/12 substantive). 300 valid evt rows written
+   server-side in <1 s (10/day, Nov 1–25 + Dec 1–5 2026, plain timed,
+   PRODID -//sh-clock//Calendar PoC//EN, VERSION:2.0). Fresh-page unlock =
+   EXACTLY 5 requests (GET /config, GET /version, GET /rows, POST
+   /rows:batch ×2 — 256-id chunking per protocol.md §9b, app.js:544-550),
+   zero per-row GETs, ~1 s wall time — well under the ≤6 budget. Month view
+   (Nov): 120 visible .calendar-dayeventcell at 1440×1200 (3 event chips +
+   '+7 more' per day; 90 at 1440×900 — responsive gridRows measurement,
+   app.js:1166-1176, NOT a defect). Year view: 36 .yearday-dot markers.
+   Deleting all 300 rows: manifest back to the cmeta row only, month view
+   empty after one manual sync, zero page/console errors throughout.
+
+### Findings
+
+1. [NIT] refreshLoginUi treats ANY non-empty clock_poc_auth_ui as
+   "provisioned" — js/app.js:3531-3536 (`const has = !!localStorage.getItem(LS_TOKEN)`),
+   so a malformed stored token (S4's 'zzz') HIDES the provisioning-code paste
+   row and the lock-note, while unlock() surfaces the raw internal error
+   string "Login failed: bad_token" (js/api.js:23 thrown through js/app.js:298,
+   message composed at app.js:328-337). No crash, and recovery exists (the
+   ?setup= link — verified working — or the visible Forget button), but the
+   login screen gives a truthy "you have a code" UI for garbage and a cryptic
+   error for it. Cosmetic/robustness edge only; suggest validating the hex
+   shape (like ingestParams does, app.js:272) before hiding #setup-row, or
+   mapping bad_token to a friendly message.
+2. [NIT] moreChip wrapper is missing the list semantics its siblings have —
+   js/app.js:1227-1248: the "+N more" wrapper div.calendar-dayeventcell gets
+   only a style attr, while eventChip sets role="listitem" + tabindex="0"
+   (js/app.js:1184-1193) inside the same role="list" container
+   (js/app.js:1147). The inner button (app.js:1237) is keyboard-reachable,
+   so impact is limited to screen-reader list-item accounting in the month
+   grid. Internal inconsistency, no upstream diff claimed.
+
+REFUTED (stress-tested, no bug found):
+- "corrupt row gets rewritten or crashes the app" — REFUTED: ver/nonce/ct
+  byte-stable across syncs, other rows render, note appears/disappears with
+  sync lifecycle (S3).
+- "poisoned localStorage bricks the client" — REFUTED: every bad value has a
+  guarded fallback and zero console errors (S4).
+- "300 rows blow the request budget / hang the UI" — REFUTED: 5 requests,
+  ~1 s unlock, batch chunked at 256 exactly per §9b (S5).
+- "T240000 resurfaces via the editor at time boundaries" — REFUTED: all
+  boundary saves produce next-day T000000 DTENDs; B1's fix holds through
+  23:00→00:00, 23:30→00:15, 22:00→01:00, 00:00 start, start==end (S1/S1b).
+- "monthly-on-31 misrenders or crashes in 30-day months" — REFUTED: correct
+  RFC 5545 skip semantics, no errors (S2).
+- Environmental note, not a bug: at 1440×900 the volume month view shows
+  2 event rows/day + "+N more" (90 visible cells); the "≥100 cells"
+  expectation needs ≥~1100px viewport height — the rAF row measurement
+  (app.js:1166-1176) is responsive by design (Proton useDayGridEventLayout).
+
+Verified OK additionally: outside-day rendering of boundary events (Oct 31
+master visible in Nov's grid; Dec 1–5 visible in Nov's last week row); year
+view dots double-count nothing (36 = 25 Nov + 5 Dec in-month + 6 outside-day
+cells in adjacent month boxes — expected mini-calendar grid semantics); the
+'+more' chip selector is a DIV.calendar-dayeventcell wrapper containing
+BUTTON.calendar-dayeventcell-more (app.js:1230-1239) — test selectors must
+match the wrapper, not the button, when counting cells.
+
+Store state at hand-off: wiped (0 rows). Scripts remain in /tmp/s2/ for
+re-runs.
+
+## WAVE-7 STRESS S1 (COMMON) FINDINGS
+
+Agent: STRESS S1 (common-flow stress), 2026-10-31 ~04:55 UTC. Client
+http://127.0.0.1:8080 vs worker http://127.0.0.1:8787 (proto 4.3). Fresh
+Playwright chromium context per scenario, store wiped before each (GET /rows
+then DELETE per row). All server-side verdicts decrypt rows with k_data
+(AAD = id||u32be(ver)); NOTE for future harnesses: the plaintext is
+JSON.stringify(payload) (js/crypto.js:154) — unwrap the JSON string before
+regexing VCALENDAR lines, and fill BOTH Starts and Ends date in the editor
+(Ends defaults to today; leaving it makes every event a multi-day span).
+Scripts remain in /tmp/s1/ (sc1-sc5 + lib.mjs; run-retry.sh re-runs until no
+external interference). Request counts below are worker-origin requests
+observed via page.on('request').
+
+### Scenario reports — 5/5 PASS
+
+1. BULK — 20 events on 2 calendars (10 plain, 4 all-day, 4 daily-recurring,
+   2 weekly-recurring, spread across Oct 2026): every save = EXACTLY 1 PUT
+   (20 PUTs total), 0 GET/POST during saves and 0 requests between saves —
+   the v4.3 §5.2 fast path holds under bulk creation. Reload = 4 requests
+   (GET /config, GET /version, GET /rows, POST /rows:batch) — within the ≤5
+   budget. After reload: 144 .calendar-dayeventcell (143 real event chips +
+   1 "+N more"), all 20 distinct titles render (daily events expand
+   30-33× incl. the Nov 1 outside-day cell, weekly 4-5×; the single day with
+   >gridRows events overflowed into "+N more" and expanded cleanly). Server
+   payloads verified by decrypt: DTSTART/DTEND same-day for timed events,
+   all-day rows are DTSTART;VALUE=DATE + exclusive DTEND (+1 day) +
+   TRANSP:TRANSPARENT, RRULE FREQ=DAILY / FREQ=WEEKLY;BYDAY=SA. 0 pageerror,
+   0 console errors. PASS.
+2. RAPID EDITS — one event, 10 consecutive popover→Edit→Save title edits:
+   each edit = EXACTLY 1 PUT (10 PUTs, 0 GETs — no request storm). Final
+   title R10 wins server-side (row ver 11, SUMMARY:R10, SEQUENCE:10) and is
+   the only chip after reload. 0 errors. PASS.
+3. TWO TABS — two browser contexts over the shared store: A creates → B
+   #btn-sync sees it; A deletes → B syncs → gone (no resurrection); both
+   tabs then edit the same event's title (A saves first: 1 PUT; B saves on a
+   stale row: PUT rejected as rebase echo + GET + PUT accepted — exactly the
+   v4.3 §5.2 rebase shape). After both tabs sync, both render the SAME final
+   title; server row ver 3 with exactly ONE VEVENT (no duplicated master, no
+   corruption) — rebase convergence holds. 0 errors. PASS.
+4. RECURRING LIFECYCLE — daily event from Oct 26 09:00: Edit → recur-modal
+   "This event" → 09:00→11:00 = 1 PUT; server ver 2 = master (RRULE
+   FREQ=DAILY) + exception VEVENT with RECURRENCE-ID:20261028T090000Z,
+   DTSTART:20261028T110000Z, SEQUENCE:1; UI shows Oct 28 at 11:00 while
+   Oct 27/29/31 remain 09:00 (second occurrence still present). Delete one
+   occurrence ("This event", Oct 30) = 1 PUT; server gains
+   EXDATE:20261030T090000Z, Oct 30 chip gone, series continues on the other
+   days. Delete "All events" = 1 DELETE; row now 404 {"error":"not_found"},
+   0 chips, 0 evt rows server-side. 0 errors. PASS.
+5. VIEW HAMMERING — 20 view switches (.view-button month/week/day/custom/
+   year, 150 ms apart) + 10 #btn-next/#btn-prev navigations + #btn-today +
+   10 #btn-theme toggles + 6 window.resizeTo/setViewportSize sizes: ZERO
+   pageerror events, ZERO console errors, ZERO failed worker requests; after
+   the hammering the month view still renders all seeded events (label and
+   Today correct). PASS.
+
+### Findings
+
+1. [MAJOR] Every modal in the app lost its heading and most field labels,
+   and the calendar "Edit" context-menu action is an invisible empty button
+   — `el(tag, cls, props = {})` (js/app.js:95) is called with the props
+   object in the `cls` slot at 14 sites, so those elements get
+   class="[object Object]" and NONE of their props applied (no text, no
+   type, no style):
+   - js/app.js:2261 — editor modal h1 ("Add event"/"Edit event"). Verified
+     in-DOM: `#editor-modal h1` textContent is "".
+   - js/app.js:2296, 2379, 2413 — "Starts"/"Ends", "Calendar",
+     "Notifications" labels in the event editor. Verified in-DOM:
+     `#editor-modal .form-row label` texts are ["","","All day","",""]
+     (only "All day" shows because its text is a TextNode, js/app.js:2336).
+   - js/app.js:2874 — recurring-choice modal h1. Verified during scenario 4:
+     `#recur-modal h1` = { text: "", className: "[object Object]" } — the
+     "Edit/Delete recurring event" scope picker has no visible heading.
+   - js/app.js:2912, 2918, 2939, 2945, 2959 — custom-frequency modal h1
+     ("Custom recurrence") plus its "Repeat"/"Repeat on"/"Ends" labels, and
+     the weekday checkbox labels lose their inline-flex style (2945).
+   - js/app.js:3023, 3033, 3113 — calendar modal h1 ("Add/Edit/Delete
+     calendar") and "Color" label. Verified in-DOM: `#cal-modal h1` is ""
+     and its labels are [""].
+   - js/app.js:1896 — the calendar-options context-menu Edit button:
+     `.item-menu` buttons render as ["","Delete"] — Edit is blank (Delete
+     is fine because js/app.js:1898 passes cls and props correctly).
+   Functionality is intact (inputs carry their own aria-labels; all five
+   stress scenarios pass through these modals), but this is a wholesale
+   UX regression across the editor, recurring-choice, custom-frequency and
+   calendar modals, plus a hidden Edit entry point. Fix: add `null` as the
+   cls argument at all 14 sites (e.g. `el('h1', null, { text })`), or make
+   el() detect a plain-object second argument and treat it as props.
+2. [NIT] Environment/harness note, not an app bug: concurrent wave-7 stress
+   agents share the one worker store, and their wipes landed mid-run at
+   least 3 times during S1 (rows created seconds earlier vanished; a foreign
+   default-calendar cmeta appeared). S1 verdicts above are from guard-row-
+   detected clean runs only (retry loop); without that guard, scenario 1/3
+   would have produced false "events disappear after reload / sync loses
+   events" failures. Future multi-agent waves should serialize or namespace
+   their stores.
+
+REFUTED (stress-tested, no bug found):
+- "bulk creation storms the server" — REFUTED: 20 saves = 20 PUTs exactly,
+  zero extra requests, reload 4 ≤ 5 (S1-scenario 1).
+- "10 rapid edits race/duplicate writes or drop the final title" — REFUTED:
+  1 PUT per edit, ver 11, SUMMARY:R10 server-side after the 10th (S1-2).
+- "two-tab concurrent edits corrupt the row / diverge" — REFUTED: rebase
+  shape PUT+GET+PUT, both tabs converge to one title, single VEVENT, ver 3
+  (S1-3).
+- "recurring exception lifecycle mangles the master" — REFUTED:
+  RECURRENCE-ID exception + EXDATE + final delete-all all leave the payload
+  exactly RFC 5545-shaped, one master throughout (S1-4).
+- "rapid view/navigation/theme/resize switching throws" — REFUTED: zero
+  pageerror and zero console errors through 20 switches + 10 navs + today +
+  10 theme toggles + 6 resizes (S1-5).
+
+Store state at hand-off: wiped (0 rows). Scripts remain in /tmp/s1/ for
+re-runs (node /tmp/s1/scN.mjs; ./run-retry.sh wraps interference retries).

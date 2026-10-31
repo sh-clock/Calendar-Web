@@ -91,8 +91,15 @@ function safeSetItem(k, v) {
   try { localStorage.setItem(k, v); } catch { /* ignore */ }
 }
 
-/** Create an element with class/props/children (no innerHTML for data). */
+/** Create an element with class/props/children (no innerHTML for data).
+ * Wave-7 S1 fix: a plain-object SECOND argument is treated as props —
+ * call sites written as el('h1', { text: … }) previously put the props in
+ * the cls slot, producing class "[object Object]" and blank headings/labels. */
 function el(tag, cls, props = {}) {
+  if (cls && typeof cls === 'object' && !Array.isArray(cls)) {
+    props = cls;
+    cls = null;
+  }
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   for (const [k, v] of Object.entries(props)) {
@@ -333,7 +340,9 @@ async function unlock() {
         ? 'Authentication failed (silent 404): the provisioning code is not valid on this server.'
         : e && e.message === 'unlock_failed'
           ? 'Unlock failed: wrong password (or the server config does not match this deployment).'
-          : 'Login failed: ' + (e && e.message ? e.message : String(e)) + srvErr;
+          : e && e.message === 'bad_token'
+            ? 'The stored provisioning code is malformed — paste a valid 64-hex code below.'
+            : 'Login failed: ' + (e && e.message ? e.message : String(e)) + srvErr;
     $('#login-msg').textContent = msg;
   } finally {
     setBusy(false);
@@ -1228,6 +1237,7 @@ function moreChip(dayIdx, days, summary, events, eventsInRow, numberOfRows) {
   const more = summary[dayIdx].more;
   const n = (days && days.length) || 7; // row day count (7 in month/week)
   const chip = el('div', 'calendar-dayeventcell', {
+    role: 'listitem', // S2: list semantics parity with eventChip
     style:
       `--top-custom:${numberOfRows * DAY_EVENT_HEIGHT}px;` +
       `--left-custom:${(dayIdx / n) * 100}%;` +
@@ -3529,7 +3539,10 @@ function createUpMoreEvent(cb) {
 /* ---------------- UI wiring ---------------- */
 
 function refreshLoginUi() {
-  const has = !!localStorage.getItem(LS_TOKEN);
+  // S2: only a WELL-FORMED stored code counts as provisioned — a malformed
+  // value (garbage/typo) keeps the paste-row visible so recovery is obvious.
+  const raw = localStorage.getItem(LS_TOKEN);
+  const has = !!raw && /^[0-9a-f]{64}$/.test(raw);
   $('#setup-row').hidden = has;
   $('#lock-note').hidden = has;
   $('#server').value = serverUrl();
