@@ -139,7 +139,23 @@ function closeAllOverlays() {
 /* ---------------- formatting (user locale, like Proton) ---------------- */
 
 const locale = undefined; // browser default
-const fmtTime = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' });
+/* F-A5-7 (audit wave): the app-side time formatting honours the settings'
+ * hour12 preference (FullCalendar's own formats already do). Lazily rebuilt
+ * when the setting changes (see applySettings). */
+let fmtTimeCache = { key: null, fmt: new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }) };
+function fmtTime(d) {
+  const key = settings.hour12 === null ? 'd' : settings.hour12 ? '12' : '24';
+  if (fmtTimeCache.key !== key) {
+    fmtTimeCache = {
+      key,
+      fmt: new Intl.DateTimeFormat(locale, {
+        hour: 'numeric', minute: '2-digit',
+        ...(settings.hour12 === null ? {} : { hour12: settings.hour12 }),
+      }),
+    };
+  }
+  return fmtTimeCache.fmt.format(d);
+}
 const fmtDateLong = new Intl.DateTimeFormat(locale, {
   weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
 });
@@ -152,7 +168,7 @@ function wallToDate(dt) { // wall {date,time} -> Date carrying wall comps (displ
   if (dt.time === null) return new Date(dt.date + 'T00:00:00');
   return new Date(dt.date + 'T' + dt.time);
 }
-const showTime = (dt) => (dt.time === null ? '' : fmtTime.format(wallToDate(dt)));
+const showTime = (dt) => (dt.time === null ? '' : fmtTime(wallToDate(dt)));
 
 /** "Wed, Oct 28, 2026 · 10:00 – 11:00" / "All day" (Proton date header shape). */
 function eventDateHeader(ev) {
@@ -164,9 +180,9 @@ function eventDateHeader(ev) {
     return fmtDateMed.format(s) + ' – ' + fmtDayMonth.format(new Date(ev.spanLast + 'T00:00:00')) + ' · All day';
   }
   if (ev.start.date === ev.spanLast) {
-    return `${fmtDateMed.format(s)} · ${fmtTime.format(s)} – ${fmtTime.format(e)}`;
+    return `${fmtDateMed.format(s)} · ${fmtTime(s)} – ${fmtTime(e)}`;
   }
-  return `${fmtDateMed.format(s)}, ${fmtTime.format(s)} – ${fmtDayMonth.format(e)}, ${fmtTime.format(e)}`;
+  return `${fmtDateMed.format(s)}, ${fmtTime(s)} – ${fmtDayMonth.format(e)}, ${fmtTime(e)}`;
 }
 
 const WEEKDAY_LONG = (() => {
@@ -281,31 +297,40 @@ const SETTINGS_DEFAULTS = {
 let settings = { ...SETTINGS_DEFAULTS };
 
 function loadSettings() {
+  // F-A1-7/F-A5-6 (audit wave): every read is guarded — a throwing
+  // localStorage (quota/privacy) must never abort boot.
+  const ls = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+  };
   try {
-    const o = JSON.parse(localStorage.getItem(LS_SETTINGS) || 'null');
+    const o = JSON.parse(ls.get(LS_SETTINGS) || 'null');
     if (o && typeof o === 'object') {
       for (const k of SETTINGS_KEYS) if (o[k] !== undefined) settings[k] = o[k];
     }
   } catch { /* ignore */ }
-  // Legacy migration: v4.3 stored the theme under its own key.
-  if (!localStorage.getItem(LS_SETTINGS) && localStorage.getItem(LS_THEME)) {
-    const t = localStorage.getItem(LS_THEME);
+  // Legacy migration: v4.3 stored the theme under its own key — used ONLY
+  // when no v44 settings exist yet, then removed (F-A5-9).
+  if (!ls.get(LS_SETTINGS)) {
+    const t = ls.get(LS_THEME);
     if (t === 'light' || t === 'dark') settings.theme = t;
   }
-  // Legacy migration: v4.3 view name → FullCalendar view id.
-  try {
-    const old = localStorage.getItem('clock_poc_view_v43');
-    if (old && !localStorage.getItem(LS_VIEW)) {
-      const m = migrateView(old);
-      if (VIEWS.includes(m)) settings.view = m;
-    }
-  } catch { /* ignore */ }
+  ls.del(LS_THEME);
+  // Legacy migration: v4.3 view name → FullCalendar view id — only when
+  // neither v44 settings nor the FC view key exist, then removed.
+  const oldView = ls.get('clock_poc_view_v43');
+  if (oldView && !ls.get(LS_VIEW) && !(JSON.parse(ls.get(LS_SETTINGS) || 'null') || {}).view) {
+    const m = migrateView(oldView);
+    if (VIEWS.includes(m)) settings.view = m;
+  }
+  ls.del('clock_poc_view_v43');
   settings.customDays = Math.max(2, Math.min(14, Number(settings.customDays) || 5));
   if (!VIEWS.includes(settings.view)) settings.view = 'dayGridMonth';
   if (!['light', 'dark', 'system'].includes(settings.theme)) settings.theme = 'system';
   if (!['00:15:00', '00:30:00', '01:00:00'].includes(settings.slotDuration)) settings.slotDuration = '00:30:00';
   if (!['comfortable', 'compact'].includes(settings.density)) settings.density = 'comfortable';
   if (![0, 1, 6].includes(settings.firstDay)) settings.firstDay = 1;
+  if (typeof settings.accent !== 'string' || !/^#[0-9A-Fa-f]{6}$/.test(settings.accent)) settings.accent = SETTINGS_DEFAULTS.accent; // F-A5-4
 }
 
 function saveSettings() {
@@ -324,18 +349,59 @@ function applyTheme() {
   document.documentElement.dataset.theme = resolvedTheme();
 }
 
+/* Accent customisation: a dedicated <style> element carrying BOTH theme
+ * blocks (F-A3-3/F-A3-4/F-A5-3 — inline vars on <html> would always beat
+ * the [data-theme=dark] token block, killing the dark palette; a style
+ * element with equal-specificity :root + [data-theme=dark] rules keeps both
+ * themes correct). The default accent needs no injection — the static
+ * stylesheet already carries the Proton-verbatim values. */
+const ACCENT_STYLE_ID = 'accent-vars';
+function applyAccentVars() {
+  let tag = document.getElementById(ACCENT_STYLE_ID);
+  if (settings.accent === SETTINGS_DEFAULTS.accent) {
+    if (tag) tag.remove(); // static CSS is authoritative for the default
+    return;
+  }
+  const { h, s, l } = hexToHsl(settings.accent);
+  const step = (dl) => hslToHex(h, s, Math.min(1, Math.max(0, l + dl))).toUpperCase();
+  const light = [
+    '--primary:' + settings.accent.toUpperCase(),
+    '--interaction-norm:' + settings.accent.toUpperCase(),
+    '--interaction-norm-major-1:' + step(-0.05),
+    '--interaction-norm-major-2:' + step(-0.10),
+    '--interaction-norm-major-3:' + step(-0.15),
+    '--interaction-norm-minor-1:' + settings.accent.toUpperCase() + '2b',
+    '--interaction-norm-minor-2:' + settings.accent.toUpperCase() + '17',
+    '--focus-outline:' + settings.accent.toUpperCase(),
+  ].join(';');
+  // Dark theme: Proton lightens the interaction ramp (snow #6d4aff →
+  // lumo-dark majors #7c5cff/#8a6eff/#9d84ff); mirror that direction.
+  const dark = [
+    '--primary:' + step(0.06),
+    '--interaction-norm:' + settings.accent.toUpperCase(),
+    '--interaction-norm-major-1:' + step(0.03),
+    '--interaction-norm-major-2:' + step(0.06),
+    '--interaction-norm-major-3:' + step(0.10),
+    '--interaction-norm-minor-1:' + step(0.06) + '2b',
+    '--interaction-norm-minor-2:' + step(0.06) + '17',
+    '--focus-outline:' + settings.accent.toUpperCase(),
+  ].join(';');
+  if (!tag) {
+    tag = document.createElement('style');
+    tag.id = ACCENT_STYLE_ID;
+    document.head.appendChild(tag);
+  }
+  tag.textContent = ':root{' + light + '}[data-theme=dark]{' + dark + '}';
+}
+
 /** Apply the FULL settings state: DOM tokens + FullCalendar options.
- * `live` — rebuild the calendar options (resetOptions re-processes view
- * specs, so slotDuration/firstDay/formats/weekNumbers/duration all apply). */
+ * resetOptions re-processes view specs, so slotDuration/firstDay/formats/
+ * weekNumbers/duration all apply live. */
 function applySettings({ fc = true } = {}) {
   applyTheme();
   document.documentElement.dataset.density = settings.density;
-  const root = document.documentElement.style;
-  root.setProperty('--primary', settings.accent);
-  root.setProperty('--interaction-norm', settings.accent);
-  root.setProperty('--interaction-norm-minor-1', settings.accent + '2b');
-  root.setProperty('--interaction-norm-minor-2', settings.accent + '17');
-  root.setProperty('--focus-outline', settings.accent);
+  applyAccentVars();
+  fmtTimeCache = { key: null, fmt: new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }) }; // rebuilt per hour12 (F-A5-7)
   if (fc && fcCal) fcCal.resetOptions(buildFcOptions());
 }
 
@@ -1072,6 +1138,15 @@ function onViewDidMount(info) {
  * gotoDate/view switch) — refreshes the mini calendar (which shows
  * fc.getDate()'s month); viewDidMount alone misses same-view navigation. */
 function onDatesSet() {
+  // F-A1-8 (audit wave): navigating with the Today button (or any date
+  // change) also refreshes the day-rollover state instead of waiting for
+  // the 60 s interval.
+  const today = core.localToday();
+  if (state.api && today !== state.today) {
+    state.today = today;
+    renderAll();
+    return;
+  }
   renderMiniCalendar();
 }
 
@@ -1080,13 +1155,6 @@ function ensureCalendar() {
   if (fcCal) return;
   fcCal = new window.FullCalendar.Calendar($('#calendar'), buildFcOptions());
   fcCal.render();
-}
-
-/** Re-apply FullCalendar options after a settings change (resetOptions is
- * the documented way to change view-affecting options live; plain setOption
- * does NOT rebuild view specs like the custom view's duration). */
-function fcApplyOptions() {
-  if (fcCal) fcCal.resetOptions(buildFcOptions());
 }
 
 /* ---------------- FullCalendar → backbone handlers ---------------- */
@@ -1124,6 +1192,7 @@ function handleEventDrop(info) {
   if (toAllDay !== wasAllDay) {
     applyWithScope(ev, {
       title: 'Convert event',
+      verb: 'converted',
       run: (scope) => applyAllDayConversion(ev, scope, {
         toAllDay,
         day: toAllDay ? dropDay : localWallOf(info.event.start).date,
@@ -1136,6 +1205,7 @@ function handleEventDrop(info) {
 
   applyWithScope(ev, {
     title: 'Move recurring event',
+    verb: 'moved',
     run: (scope) => applyDayShift(ev, days, scope, minutes),
     revert: info.revert,
   });
@@ -1152,6 +1222,7 @@ function handleEventResize(info) {
   const { days, minutes } = fcDurationToParts(info.endDelta);
   applyWithScope(ev, {
     title: 'Resize recurring event',
+    verb: 'resized',
     run: (scope) => applyDurationChange(ev, days, minutes, scope),
     revert: info.revert,
   });
@@ -1159,12 +1230,12 @@ function handleEventResize(info) {
 
 /** Shared mutation wrapper: recurring scope choice → busy → run → revert on
  * failure; toasts mirror the backbone's move/resize UX. */
-function applyWithScope(ev, { title, run, revert }) {
+function applyWithScope(ev, { title, verb = 'updated', run, revert }) {
   const apply = async (scope) => {
     try {
       setBusy(true, 'Saving…');
       await run(scope);
-      toast('Event updated.', 'ok', 2000);
+      toast('Event ' + verb + '.', 'ok', 2000);
     } catch (e) {
       toast('Update failed: ' + (e && e.message ? e.message : String(e)), 'err', 7000);
       if (revert) revert();
@@ -1174,9 +1245,8 @@ function applyWithScope(ev, { title, run, revert }) {
   };
   if (ev.isRecurring || ev.isException) {
     openRecurringChoice(title, (choice) => {
-      if (choice === 'cancel') { if (revert) revert(); return; }
       apply(choice === 'exception' ? 'exception' : 'master');
-    });
+    }, () => { if (revert) revert(); });
   } else {
     apply('master');
   }
@@ -2456,6 +2526,16 @@ async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
           extra: [],
         };
     const curEnd = core.effectiveEnd(old);
+    // F-A1-4 (audit wave): converting a recurring MASTER flips the value
+    // type of the series, but its RECURRENCE-ID exceptions keep their old
+    // type — parseEvtPayload rejects the mismatch and the whole row turns
+    // corrupt (event destroyed). Block it loudly instead (the drag reverts).
+    if (p.master.rrule) {
+      // ANY conversion inside a recurring series breaks the value-type match
+      // between the master and its RECURRENCE-IDs (or would orphan the
+      // exception) — refuse both master- and exception-scope conversions.
+      throw new Error('convert_recurring: recurring events cannot be converted between timed and all-day — edit the event instead');
+    }
     let newStart;
     let newEnd;
     if (toAllDay) {
@@ -2466,9 +2546,13 @@ async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
       newEnd = { date: shiftDay(day, spanDays), time: null, tz: null };
     } else {
       // all-day → timed: drop slot wall time; end = start + old span days.
+      // F-A1-5: the wall time is BROWSER-local, so the component must carry
+      // the browser's IANA zone (not the all-day master's null) or it
+      // renders shifted by the UTC offset.
       const spanDays = Math.max(1, diffDays(curEnd.date, old.dtstart.date));
-      newStart = { date: day, time: (time || '09:00:00').slice(0, 8), tz: old.dtstart.tz };
-      newEnd = { date: shiftDay(day, spanDays), time: (time || '09:00:00').slice(0, 8), tz: old.dtstart.tz };
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      newStart = { date: day, time: (time || '09:00:00').slice(0, 8), tz };
+      newEnd = { date: shiftDay(day, spanDays), time: (time || '09:00:00').slice(0, 8), tz };
     }
     const upd = {
       ...old,
@@ -2478,6 +2562,14 @@ async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
       duration: null,
       transp: toAllDay ? 'TRANSPARENT' : null,
       sequence: (old.sequence === null || old.sequence === undefined ? 0 : old.sequence) + 1,
+      // F-A1-3/F-A1-6 (audit wave): the VALUE TYPE changes on conversion —
+      // the parsed component's kept params (VALUE=DATE / TZID) would survive
+      // the spread above and dtProp() prefers keptParams, emitting
+      // DTSTART;VALUE=DATE:<datetime> (unparseable → corrupt row). Fresh
+      // values must carry fresh params (dtProp's documented contract).
+      dtstartParams: [],
+      dtendParams: [],
+      dtstampParams: [],
     };
     if (isException && target.recId) {
       upd.recurrenceId = { date: target.recId.date, time: target.recId.time, tz: old.dtstart.tz };
@@ -2492,7 +2584,7 @@ async function applyAllDayConversion(ev, scope, { toAllDay, day, time }) {
 
 /* ---------------- recurring choice modal ---------------- */
 
-function openRecurringChoice(title, choose) {
+function openRecurringChoice(title, choose, onCancel) {
   const modal = $('#recur-modal');
   const backdrop = $('#recur-backdrop');
   const close = () => closeModalSurface(modal, backdrop);
@@ -2504,7 +2596,11 @@ function openRecurringChoice(title, choose) {
   const bOne = el('button', 'button button-outline', { type: 'button', text: 'This event' });
   bOne.addEventListener('click', () => { close(); choose('exception'); });
   const bCancel = el('button', 'button button-ghost', { type: 'button', text: 'Cancel' });
-  bCancel.addEventListener('click', () => { close(); choose('cancel'); });
+  // F-A1-1/F-A1-2 (audit wave): Cancel must NOT reach `choose` — the
+  // backbone callers (beginDelete/beginEdit) treat their argument as a
+  // SCOPE ('all'|'exception') and would execute destructive work for any
+  // other string. Drag/resize flows pass onCancel to revert the chip.
+  bCancel.addEventListener('click', () => { close(); if (onCancel) onCancel(); });
   btns.append(bAll, bOne, bCancel);
   box.appendChild(btns);
   modal.replaceChildren(box);
@@ -3002,6 +3098,12 @@ function openSettingsModal() {
   reset.addEventListener('click', () => {
     settings = { ...SETTINGS_DEFAULTS };
     saveSettings();
+    // F-A5-2 (audit wave): the persisted FC view key would otherwise
+    // override the reset view on the next boot — write the default (the
+    // changeView below re-persists it via viewDidMount anyway).
+    safeSetItem(LS_VIEW, SETTINGS_DEFAULTS.view);
+    state.view = settings.view;
+    if (fcCal && fcCal.view.type !== settings.view) fcCal.changeView(settings.view);
     applySettings();
     close();
     toast('Settings reset to defaults.', 'ok', 2000);

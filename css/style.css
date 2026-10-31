@@ -95,7 +95,6 @@ body {
 }
 button { font: inherit; color: inherit; }
 input, select, textarea { font: inherit; color: var(--text-norm); }
-.grow { flex: 1 1 auto; }
 .ic { width: 1em; height: 1em; }
 
 /* ---------- buttons (Proton Button atoms: primary / outline / ghost) ---------- */
@@ -238,7 +237,6 @@ main { height: calc(100% - var(--header-height)); }
 .clock-item.today .clock-date { color: var(--primary); }
 .clock-ev { font-size: 13px; padding: 1px 0; }
 .clock-ev.none { color: var(--text-hint); }
-.clock-ev.err { color: var(--signal-danger); }
 
 /* ---------- main area: the FullCalendar mount ----------
    FullCalendar renders its own toolbar + grid inside #calendar; it observes
@@ -414,7 +412,6 @@ html .fc {
   --fc-more-link-bg-color: var(--background-norm);
   --fc-non-business-color: var(--background-weak);
   --fc-event-selected-overlay-color: rgb(0 0 0 / 0.25);
-  --fc-event-resizer-dot-border-color: rgb(255 255 255 / 0.7);
   font-family: inherit;
 }
 
@@ -450,15 +447,29 @@ html .fc .fc-button-primary:disabled {
   color: var(--text-disabled);
   border-color: var(--border-weak);
 }
-/* The ACTIVE view button (fc-button-active) = Proton selected segment. */
-html .fc .fc-button-active {
+/* The ACTIVE view button (fc-button-active) = Proton selected segment.
+ * F-A3-1 (audit wave): FullCalendar's own rule
+ * .fc .fc-button-primary:not(:disabled).fc-button-active carries (0,4,0)
+ * specificity and is injected at runtime (AFTER this stylesheet), so it
+ * defeated the previous (0,2,1) override — the active button rendered in
+ * FullCalendar's default navy. The 5-class chains below win on specificity. */
+html .fc .fc-button.fc-button-primary.fc-button-active,
+html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active,
+html .fc .fc-button.fc-button-primary:not(:disabled):active.fc-button-active {
   background: var(--interaction-norm);
   color: var(--interaction-norm-contrast);
   border-color: transparent;
   font-weight: var(--font-weight-semibold);
 }
-html .fc .fc-button-active:hover { background: var(--interaction-norm-major-1); color: var(--interaction-norm-contrast); }
-html .fc .fc-button-active:focus, html .fc .fc-button-active:focus-visible {
+html .fc .fc-button.fc-button-primary.fc-button-active:hover,
+html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:hover {
+  background: var(--interaction-norm-major-1);
+  color: var(--interaction-norm-contrast);
+}
+html .fc .fc-button.fc-button-primary.fc-button-active:focus,
+html .fc .fc-button.fc-button-primary.fc-button-active:focus-visible,
+html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:focus,
+html .fc .fc-button.fc-button-primary:not(:disabled).fc-button-active:focus-visible {
   outline: var(--focus-ring-size) solid var(--focus-ring);
 }
 html .fc .fc-toolbar-title {
@@ -472,7 +483,7 @@ html .fc .fc-toolbar-chunk .fc-button + .fc-button { margin-left: 2px; }
 
 /* Day-grid cells: today's date number in the accent colour (Proton style),
    nav-link hover. */
-html .fc .fc-daygrid-day-number, html .fc .fc-daygrid-day.fc .fc-daygrid-day-number {
+html .fc .fc-daygrid-day-number {
   color: var(--text-norm);
   padding: 2px 4px;
   border-radius: var(--border-radius-sm);
@@ -599,8 +610,9 @@ html[data-density="compact"] .fc .fc-daygrid-day-number { padding: 1px 3px; }
 [data-theme="dark"] .toast.err { background: var(--signal-danger); color: var(--signal-danger-contrast); }
 [data-theme="dark"] .toast.warn { background: var(--signal-warning); color: #241a00; }
 
-/* FullCalendar dark overrides (same specificity shape as light, later in
-   source order → wins). */
+/* FullCalendar dark overrides — html[data-theme="dark"] .fc (0,2,1) beats
+   the light block's html .fc (0,1,1) on specificity (the runtime-injected
+   .fc rules are below both). */
 html[data-theme="dark"] .fc {
   --fc-border-color: var(--border-weak);
   --fc-page-bg-color: var(--background-norm);
@@ -611,7 +623,7 @@ html[data-theme="dark"] .fc {
   --fc-now-indicator-color: var(--primary);
   --fc-more-link-bg-color: var(--background-norm);
   --fc-non-business-color: rgb(0 0 0 / 0.2);
-  --fc-event-resizer-dot-border-color: rgb(0 0 0 / 0.55);
+  --fc-event-selected-overlay-color: rgb(255 255 255 / 0.18);
 }
 html[data-theme="dark"] .fc .fc-daygrid-day-number { color: var(--text-norm); }
 html[data-theme="dark"] .fc .fc-day-today .fc-daygrid-day-number { color: var(--primary); }

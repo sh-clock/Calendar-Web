@@ -7,19 +7,27 @@
   <meta name="description" content="End-to-end-encrypted calendar (Protocol v4.3, calendar scope) — Proof of Concept.">
   <script>
     // Theme boot (FOUC guard): decide light/dark BEFORE first paint.
+    // Precedence (F-A3-2/F-A5-1, audit wave): v44 settings theme (light/dark)
+    // > [no settings yet] legacy v4.3 theme key > OS preference. A settings
+    // value of 'system' ALWAYS follows the OS (the legacy key is only a
+    // pre-settings migration source, never an override).
     (function () {
       try {
         var t = null;
-        try { var s = JSON.parse(localStorage.getItem('clock_poc_settings_v44') || 'null'); if (s && s.theme) t = s.theme; } catch (e) {}
-        if (t !== 'light' && t !== 'dark') {
-          t = localStorage.getItem('clock_poc_theme'); // legacy v4.3 key
-          if (t !== 'light' && t !== 'dark') {
-            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-          } else if (t === null || t === undefined) {
-            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-          }
+        var raw = null;
+        try { raw = localStorage.getItem('clock_poc_settings_v44'); } catch (e) {}
+        var s = null;
+        try { s = raw ? JSON.parse(raw) : null; } catch (e) {}
+        if (s && (s.theme === 'light' || s.theme === 'dark')) {
+          t = s.theme;
+        } else if (!s || !s.theme) {
+          // No settings (or no theme field): legacy migration source.
+          var l = null;
+          try { l = localStorage.getItem('clock_poc_theme'); } catch (e) {}
+          if (l === 'light' || l === 'dark') t = l;
         }
-        if (t === 'system') {
+        // t === null here means 'system' or nothing known → follow the OS.
+        if (t === null) {
           t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
         document.documentElement.dataset.theme = t;

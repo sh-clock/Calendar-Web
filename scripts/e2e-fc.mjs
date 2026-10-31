@@ -224,19 +224,35 @@ ok('week-view drag = 1 PUT', puts(wdrag) === 1, JSON.stringify(wdrag.map(r => r.
 
 /* ============ 15. drag-create in week view (select) ============ */
 m = mark();
-const col2 = page.locator('.fc-timegrid-col[data-date]').nth(3);
-const c2x = (await col2.boundingBox()).x;
-const scr = await page.evaluate(() => {
-  const els = [...document.querySelectorAll('.fc-scroller')];
-  const b = els.reduce((a, e) => { const r = e.getBoundingClientRect(); return r.height > (a ? a.h : 0) ? { x: r.x, y: r.y, h: r.height } : a; }, null);
-  return b;
+// §14's drag moved 'E2E second cal event' TWO columns left — find a point
+// guaranteed NOT covered by any event (a select starting on an event is an
+// event-drag, never a create-select).
+const point = await page.evaluate(() => {
+  const scr = [...document.querySelectorAll('.fc-scroller')].reduce((a, e) => {
+    const r = e.getBoundingClientRect();
+    return r.height > (a ? a.h : 0) ? { x: r.x, y: r.y, h: r.height } : a;
+  }, null);
+  const cols = [...document.querySelectorAll('.fc-timegrid-col[data-date]')];
+  const evs = [...document.querySelectorAll('.fc-timegrid-event')].map(e => e.getBoundingClientRect());
+  for (const c of cols) {
+    const r = c.getBoundingClientRect();
+    const cx = r.x + Math.min(30, r.width / 2);
+    for (let fy = 0.25; fy <= 0.75; fy += 0.125) {
+      const cy = scr.y + scr.h * fy;
+      if (!evs.some(ev => cx >= ev.x - 2 && cx <= ev.x + ev.width + 2 && cy >= ev.y - 2 && cy <= ev.y + ev.height + 2)) {
+        return { x: Math.round(cx), y: Math.round(cy) };
+      }
+    }
+  }
+  return null;
 });
-const midY = R(scr.y + scr.h * 0.4); // a VISIBLE slot inside the scroller
-await page.mouse.move(R(c2x + 30), midY);
-await page.mouse.down();
-await page.mouse.move(R(c2x + 30), midY + 80, { steps: 12 });
-await page.mouse.up();
-await page.waitForTimeout(800);
+if (point) {
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down();
+  await page.mouse.move(point.x, point.y + 80, { steps: 12 });
+  await page.mouse.up();
+  await page.waitForTimeout(800);
+}
 const editorOpen = await page.locator('#editor-modal').isVisible();
 ok('drag-create in week view opens editor with times', editorOpen);
 if (editorOpen) {
@@ -436,7 +452,10 @@ async function decryptAll() {
     const env = await rr.json();
     try {
       const pt = await subtle.decrypt({ name: 'AES-GCM', iv: b64(env.nonce), additionalData: aad(r.id, env.ver) }, key, b64(env.ct));
-      out[r.id] = Buffer.from(pt).toString('utf8');
+      // The row envelope carries a JSON VALUE (crypto.js encryptRow
+      // JSON.stringifies; decryptRow JSON.parses) — mirror that here.
+      const v = JSON.parse(Buffer.from(pt).toString('utf8'));
+      out[r.id] = typeof v === 'string' ? v : JSON.stringify(v);
     } catch { out[r.id] = null; }
   }
   return out;
