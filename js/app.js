@@ -1026,6 +1026,7 @@ function buildFcOptions() {
 
     /* ---- callbacks (the ONLY glue to the backbone) ---- */
     viewDidMount: onViewDidMount,
+    datesSet: onDatesSet,
     eventClick: handleEventClick,
     eventDrop: handleEventDrop,
     eventResize: handleEventResize,
@@ -1064,6 +1065,13 @@ function onViewDidMount(info) {
     saveSettings();
     try { localStorage.setItem(LS_VIEW, v); } catch { /* ignore */ }
   }
+  renderMiniCalendar();
+}
+
+/** FullCalendar datesSet: fires on EVERY navigation (prev/next/today/
+ * gotoDate/view switch) — refreshes the mini calendar (which shows
+ * fc.getDate()'s month); viewDidMount alone misses same-view navigation. */
+function onDatesSet() {
   renderMiniCalendar();
 }
 
