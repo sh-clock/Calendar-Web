@@ -1079,6 +1079,93 @@ console.log('PHASE V43 — /rows:batch (protocol.md §9b, v4.3)');
   check('v43.15 phase rows cleaned', !(gEnd.rows || []).some((x) => x.id === idA || x.id === idB || x.id === idC), JSON.stringify(gEnd.rows));
 }
 
+/* ================================================================ */
+console.log('PHASE V43D — GET /rows conditional read (protocol.md §9d, v4.3)');
+/* ================================================================ */
+/* The §9d claim under test: the manifest carries an `etag` (mutation epoch);
+   a matching If-None-Match answers 304 with an empty body; ANY accepted
+   mutation (create / ver-advancing update / real delete) invalidates it;
+   idempotent no-op operations (re-delete of a missing row, rejected rebase
+   PUT) must NOT. Old-client shape (no header) must still get a plain 200. */
+
+{
+  const K = deriveClientKeys('password', MAT.saltHex, 100000, MAT.wrappedB64).kData;
+  const b64 = (u8) => Buffer.from(u8).toString('base64');
+  const mk = async (id, ver, note) => {
+    const enc = encryptRow(K, id, ver, { note });
+    return raw('PUT', '/rows/' + encodeURIComponent(id), {
+      token: MAT.authUiHex, body: { ver, nonce: b64(enc.nonce), ct: b64(enc.ct) },
+    });
+  };
+
+  const idA = 'evt:' + randomUUID() + ':' + randomUUID();
+
+  // d1: plain manifest carries an etag of the documented shape.
+  let r = await raw('GET', '/rows', { token: MAT.authUiHex });
+  let j = jparse(r.text);
+  check('v43d.1 manifest carries etag \"e<epoch>\"',
+    r.status === 200 && /^"e[0-9]+"$/.test(j?.etag || ''), r.text?.slice(0, 80));
+  const etag0 = j.etag;
+
+  // d2: matching If-None-Match -> 304, EMPTY body, ETag header set.
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag0 } });
+  check('v43d.2 If-None-Match match -> 304 empty body + ETag header',
+    r.status === 304 && r.text === '' && r.headers.get('etag') === etag0,
+    r.status + ':' + r.headers.get('etag') + ':' + r.text);
+
+  // d3: non-matching If-None-Match -> plain 200 full manifest.
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': '"e999999"' } });
+  j = jparse(r.text);
+  check('v43d.3 stale If-None-Match -> 200 manifest with rows',
+    r.status === 200 && Array.isArray(j?.rows), r.text?.slice(0, 60));
+
+  // d4: an accepted CREATE invalidates the etag.
+  await mk(idA, 1, 'a');
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag0 } });
+  j = jparse(r.text);
+  check('v43d.4 accepted create invalidates the etag (no 304)',
+    r.status === 200 && j.etag !== etag0 && j.rows.some((x) => x.id === idA && x.ver === 1), r.text?.slice(0, 80));
+  const etag1 = j.etag;
+
+  // d5: a rebase-rejected PUT (ver <= stored) must NOT bump the epoch.
+  await mk(idA, 1, 'same-ver-rebase'); // ver 1 <= stored 1 -> rejected-as-rebase
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag1 } });
+  check('v43d.5 rebase-rejected PUT leaves the etag valid (still 304)',
+    r.status === 304, r.status + ':' + r.text);
+
+  // d6: an accepted UPDATE (ver > stored) invalidates the etag.
+  await mk(idA, 2, 'b');
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag1 } });
+  j = jparse(r.text);
+  check('v43d.6 accepted update invalidates the etag',
+    r.status === 200 && j.rows.some((x) => x.id === idA && x.ver === 2), r.text?.slice(0, 80));
+  const etag2 = j.etag;
+
+  // d7: a REAL delete invalidates the etag.
+  await raw('DELETE', '/rows/' + encodeURIComponent(idA), { token: MAT.authUiHex });
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag2 } });
+  j = jparse(r.text);
+  check('v43d.7 real delete invalidates the etag',
+    r.status === 200 && !j.rows.some((x) => x.id === idA), r.text?.slice(0, 80));
+  const etag3 = j.etag;
+
+  // d8: an idempotent re-delete of the now-missing row must NOT bump the epoch.
+  await raw('DELETE', '/rows/' + encodeURIComponent(idA), { token: MAT.authUiHex });
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag3 } });
+  check('v43d.8 idempotent re-delete leaves the etag valid (still 304)',
+    r.status === 304, r.status + ':' + r.text);
+
+  // d9: the auth law is unchanged — conditional read without a token drops silently.
+  r = await raw('GET', '/rows', { headers: { 'if-none-match': etag3 } });
+  check('v43d.9 no token on conditional read -> silent empty 404',
+    r.status === 404 && r.text === '', r.status + ':' + r.text);
+
+  // d10: the CLOCK (read-only) class may use the conditional read.
+  r = await raw('GET', '/rows', { token: MAT.authClockHex, headers: { 'if-none-match': etag3 } });
+  check('v43d.10 CLOCK token conditional read -> 304',
+    r.status === 304, r.status + ':' + r.text);
+}
+
 if (MATERIAL_OUT) {
   const fs = await import('node:fs');
   fs.writeFileSync(

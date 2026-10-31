@@ -18,6 +18,10 @@
     })();
   </script>
   <link rel="stylesheet" href="css/style.css">
+  <!-- E5-1: the vendored rrule module (18.9 KB gz, 31% of JS) is statically
+       imported by calendar-core.js; modulepreload takes it off the critical
+       path and warms the HTTP cache before the module graph is parsed. -->
+  <link rel="modulepreload" href="js/vendor/rrule.mjs">
 </head>
 <body>
   <div id="syncbar" hidden><span id="syncmsg"></span></div>

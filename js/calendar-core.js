@@ -249,6 +249,20 @@ export function spanDays(ev) {
  * Returns null when the rule cannot be used.
  */
 function buildRRule(master) {
+  // E4-F2: RRule construction (parse + options + UNTIL conversion) is cached
+  // per parsed master object — expandEvtRow runs 2–3× per render pass (view +
+  // clock preview + re-measure) and rrule.js's own between()-cache only works
+  // when the SAME RRule instance is reused. WeakMap: no retention of dead rows.
+  let cached = rruleCache.get(master);
+  if (cached !== undefined) return cached;
+  cached = buildRRuleUncached(master);
+  rruleCache.set(master, cached);
+  return cached;
+}
+
+const rruleCache = new WeakMap();
+
+function buildRRuleUncached(master) {
   if (!master.rrule) return null;
   const startMs = wallToNaiveUTC(master.dtstart);
   if (startMs === null) return null;

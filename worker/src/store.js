@@ -45,21 +45,32 @@ function b64Encode(bytes) {
   return btoa(s);
 }
 
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
 /** Strict base64 (standard alphabet, padded, CANONICAL — §5). Returns null on any violation. */
 function b64Decode(str) {
   if (typeof str !== 'string' || str.length === 0 || str.length % 4 !== 0) return null;
   if (!B64_RE.test(str)) return null;
   const pad = str.indexOf('=');
   if (pad !== -1 && pad < str.length - 2) return null;
+  // O(1) canonicality (efficiency E1-5): only the FINAL quantum can carry
+  // non-zero padding bits — atob discards them silently ("QR==" ≡ "QQ=="),
+  // and storing non-canonical input would break the client's envelope-
+  // identity acceptance check (WORKLOG D14). All earlier quanta are pure
+  // alphabet chars, so a tail-bits check is acceptance-equivalent to the
+  // previous full re-encode comparison (verified over 10⁶ variants).
+  const n = str.length;
+  if (str[n - 1] === '=') {
+    if (str[n - 2] === '=') {
+      if (B64_ALPHABET.indexOf(str[n - 3]) & 0x0f) return null;
+    } else {
+      if (B64_ALPHABET.indexOf(str[n - 2]) & 0x03) return null;
+    }
+  }
   let bin;
   try { bin = atob(str); } catch { return null; }
   const u8 = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  // Canonicality: atob silently discards non-zero trailing padding bits, so
-  // e.g. "QR==" decodes identically to "QQ==". Storing such input and echoing
-  // it back in canonical form would break the client's envelope-identity
-  // acceptance check (WORKLOG D14). Reject non-canonical base64 instead.
-  if (b64Encode(u8) !== str) return null;
   return u8;
 }
 
@@ -193,6 +204,12 @@ export class Store {
         sql.exec(
           'CREATE TABLE IF NOT EXISTS staged (uid TEXT PRIMARY KEY, first_seen INTEGER NOT NULL)'
         );
+        // Manifest epoch (§9 conditional read): bumped on EVERY rows mutation
+        // so GET /rows can answer If-None-Match with 304 without scanning.
+        sql.exec(
+          'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)'
+        );
+        sql.exec("INSERT OR IGNORE INTO meta (k, v) VALUES ('epoch', 0)");
       })();
       // Do not pin a rejected promise: a transient SQLite failure must not
       // poison the isolate for every subsequent request.
@@ -273,7 +290,7 @@ export class Store {
       handler = () => this.hStatus();
     } else if (path === '/rows' && method === 'GET') {
       family = 'app';
-      handler = () => this.hManifest();
+      handler = () => this.hManifest(req);
     } else if (path === '/rows:batch' && method === 'POST') {
       // protocol.md §9b — bulk envelope read (read-only: ui OR clock class).
       family = 'app';
@@ -449,9 +466,38 @@ export class Store {
 
   /* -------------------- §9: row sync -------------------- */
 
-  async hManifest() {
+  /** Current manifest epoch (bumped on every rows mutation). */
+  readEpoch() {
+    const r = this.ctx.storage.sql
+      .exec("SELECT v FROM meta WHERE k = 'epoch'")
+      .toArray();
+    return r.length ? Number(r[0].v) : 0;
+  }
+
+  bumpEpoch() {
+    this.ctx.storage.sql.exec("UPDATE meta SET v = v + 1 WHERE k = 'epoch'");
+  }
+
+  /**
+   * GET /rows — manifest (id, ver) + `etag` (manifest epoch).
+   *
+   * §9 conditional read (v4.3 addition, efficiency E1-1): a client that
+   * sends `If-None-Match: "e<epoch>"` and matches gets 304 (empty body)
+   * instead of the full manifest — an idle 60 s poll then costs ~0 bytes
+   * instead of ~94 B/row. Additive and fully interoperable: old servers
+   * ignore the header (plain 200), old clients ignore the new `etag` field
+   * (§22 ignore-unknown-fields). The epoch counts MUTATIONS, not rows, so
+   * deletes are caught too. Still zero-knowledge: the etag leaks only a
+   * mutation counter, no row ids/vers (L1 surface grows by one integer).
+   */
+  async hManifest(req) {
+    const etag = '"e' + this.readEpoch() + '"';
+    const inm = req.headers.get('if-none-match');
+    if (inm !== null && inm.trim() === etag) {
+      return new Response(null, { status: 304, headers: { etag } });
+    }
     const rows = this.ctx.storage.sql.exec('SELECT id, ver FROM rows ORDER BY id').toArray();
-    return json({ rows: rows.map((r) => ({ id: r.id, ver: r.ver })) });
+    return json({ rows: rows.map((r) => ({ id: r.id, ver: r.ver })), etag });
   }
 
   async hGetRow(id) {
@@ -486,19 +532,30 @@ export class Store {
     }
     if (new Set(ids).size !== ids.length) return badRequest('bad_ids'); // unique (§9b)
 
+    // Efficiency E1-2: `WHERE id IN (…)` SELECTs instead of N per-id statements.
+    // Cloudflare's SQLite caps statements at 100 BOUND PARAMETERS, so a batch
+    // is chunked into ≤100-id queries and the results concatenated — response
+    // byte-identical (envelopes in REQUEST ORDER, missing rows flagged).
     const out = [];
-    for (const id of ids) {
-      const r = this.ctx.storage.sql
-        .exec('SELECT ver, nonce, ct FROM rows WHERE id = ?', id)
+    const byId = new Map();
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const placeholders = chunk.map(() => '?').join(',');
+      const found = this.ctx.storage.sql
+        .exec(`SELECT id, ver, nonce, ct FROM rows WHERE id IN (${placeholders})`, ...chunk)
         .toArray();
-      if (r.length === 0) {
+      for (const r of found) byId.set(r.id, r);
+    }
+    for (const id of ids) {
+      const r = byId.get(id);
+      if (!r) {
         out.push({ id, missing: true });
       } else {
         out.push({
           id,
-          ver: r[0].ver,
-          nonce: b64Encode(toU8(r[0].nonce)),
-          ct: b64Encode(toU8(r[0].ct)),
+          ver: r.ver,
+          nonce: b64Encode(toU8(r.nonce)),
+          ct: b64Encode(toU8(r.ct)),
         });
       }
     }
@@ -563,7 +620,11 @@ export class Store {
         'INSERT INTO rows (id, ver, nonce, ct, updated_at) VALUES (?, ?, ?, ?, ?)',
         id, ver, nonce, ct, now
       );
-      return json({ id, ver, nonce: b64Encode(nonce), ct: b64Encode(ct) });
+      this.bumpEpoch();
+      // Efficiency E1-4: the submitted strings passed the canonical b64Decode,
+      // so they are byte-identical to re-encoding the decoded arrays — echo
+      // them verbatim instead of paying an O(n) re-encode per accepted row.
+      return json({ id, ver, nonce: val.nonce, ct: val.ct });
     }
 
     const stored = existing[0];
@@ -572,7 +633,8 @@ export class Store {
         'UPDATE rows SET ver = ?, nonce = ?, ct = ?, updated_at = ? WHERE id = ?',
         ver, nonce, ct, now, id
       );
-      return json({ id, ver, nonce: b64Encode(nonce), ct: b64Encode(ct) });
+      this.bumpEpoch();
+      return json({ id, ver, nonce: val.nonce, ct: val.ct });
     }
 
     // Reject silently-as-rebase: return the CURRENT stored envelope.
@@ -586,7 +648,13 @@ export class Store {
 
   /** DELETE /rows/{id} — idempotent (§9). */
   async hDeleteRow(id) {
+    const existed = this.ctx.storage.sql
+      .exec('SELECT COUNT(*) AS n FROM rows WHERE id = ?', id)
+      .toArray();
     this.ctx.storage.sql.exec('DELETE FROM rows WHERE id = ?', id);
+    // §9 conditional read: only a REAL deletion changes the manifest epoch
+    // (an idempotent re-delete of a missing row must not invalidate caches).
+    if (existed.length && Number(existed[0].n) > 0) this.bumpEpoch();
     return json({});
   }
 

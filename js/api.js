@@ -25,8 +25,8 @@ export class Api {
     this.token = tokenHex;
   }
 
-  async #req(method, path, body) {
-    const headers = { authorization: 'Bearer ' + this.token };
+  async #req(method, path, body, extraHeaders) {
+    const headers = { authorization: 'Bearer ' + this.token, ...(extraHeaders || {}) };
     if (body !== undefined) headers['content-type'] = 'application/json';
     let res;
     try {
@@ -45,6 +45,11 @@ export class Api {
       }
     } catch (e) {
       throw new ApiError('network', 0, null, String(e));
+    }
+    // §9 conditional read (v4.3): an answered 304 for OUR If-None-Match is a
+    // valid, non-error outcome — "manifest unchanged", not an HTTP failure.
+    if (res.status === 304 && extraHeaders && extraHeaders['if-none-match']) {
+      return { notModified: true, etag: res.headers.get('etag') || extraHeaders['if-none-match'] };
     }
     const text = await res.text();
     let parsed = null;
@@ -81,9 +86,14 @@ export class Api {
     return this.#req('GET', '/status');
   }
 
-  /** §9 — manifest, excludes the config row. */
-  getManifest() {
-    return this.#req('GET', '/rows');
+  /**
+   * §9 manifest, excludes the config row. With [etag] (from a previous
+   * response), sends If-None-Match: an unchanged store answers 304 and this
+   * returns {notModified: true, etag} — an idle sync then transfers ~0 bytes
+   * (v4.3 conditional read; servers without it answer a plain 200).
+   */
+  getManifest(etag) {
+    return this.#req('GET', '/rows', undefined, etag ? { 'if-none-match': etag } : undefined);
   }
 
   /**

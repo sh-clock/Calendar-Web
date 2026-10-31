@@ -58,7 +58,7 @@ const state = {
   rowKey: null,
   cals: new Map(),      // uuid -> { ver, meta }   (cmeta rows)
   evt: new Map(),       // rowId -> { ver, parsed } (evt rows)
-  corrupt: new Map(),   // rowId -> reason (undecryptable/unparseable rows)
+  corrupt: new Map(),   // rowId -> { reason, ver } (undecryptable/unparseable rows)
   today: null,
   viewYM: null,
   selectedDate: null,
@@ -68,6 +68,7 @@ const state = {
   busy: false,
   batchOk: true,        // false when the server predates v4.3 (§5.1c fallback)
   syncing: false,       // one background sync at a time (§5.3)
+  manifestEtag: null,   // §9 conditional read: last manifest etag (null = full fetch)
   navDay: null,         // sticky day-of-month for month/year navigation
   dirty: new Map(),       // row id → mutation generation (A3 race protection)
   deletedLocally: new Map(), // row id → generation (A3: no resurrect)
@@ -315,21 +316,28 @@ async function unlock() {
     state.selectedDate = state.selectedDate || state.today;
     // v4.3 §5.4 — SOFT version gate: a mismatch degrades features (per-row
     // GETs instead of §9b batch) but NEVER locks the user out of their data.
+    // E2-2: the gate runs CONCURRENTLY with the first sync — the batch path is
+    // optimistic, and a v4.2 server degrades mid-sync (fetchRowsIntoState
+    // catches the batch silent-drop and falls back to per-row GETs), so the
+    // first paint does not wait for the extra round-trip.
     state.batchOk = true;
-    try {
-      const ver = await state.api.getVersion();
-      $('#proto-badge').textContent = 'protocol ' + ver.proto;
-      if (ver.proto !== '4.3') {
+    const versionGate = (async () => {
+      try {
+        const ver = await state.api.getVersion();
+        $('#proto-badge').textContent = 'protocol ' + ver.proto;
+        if (ver.proto !== '4.3') {
+          state.batchOk = false;
+          toast('Server reports protocol ' + ver.proto + ' (this client targets 4.3). ' +
+            'Sync falls back to per-row reads. Deploy the updated worker for batch sync.', 'warn', 9000);
+        }
+      } catch {
+        $('#proto-badge').textContent = 'protocol ?';
+        toast('Could not read /version — continuing with per-row reads.', 'warn', 7000);
         state.batchOk = false;
-        toast('Server reports protocol ' + ver.proto + ' (this client targets 4.3). ' +
-          'Sync falls back to per-row reads. Deploy the updated worker for batch sync.', 'warn', 9000);
       }
-    } catch {
-      $('#proto-badge').textContent = 'protocol ?';
-      toast('Could not read /version — continuing with per-row reads.', 'warn', 7000);
-      state.batchOk = false;
-    }
-    await syncAll();
+    })();
+    await syncAll(true);
+    await versionGate;
     $('#password').value = '';
     showApp();
   } catch (e) {
@@ -366,6 +374,22 @@ function lock() {
   state.evt.clear();
   state.corrupt.clear();
   state.today = null;
+  // §9 conditional read: drop the manifest etag on lock — a fresh unlock
+  // MUST do a full manifest fetch (a 304 against a cleared state would
+  // render an empty calendar).
+  state.manifestEtag = null;
+  // E5-5: purge module-scope references to decrypted data so plaintext event
+  // titles/descriptions do not survive Lock in the JS heap: the rendered
+  // time-grid model and any half-open editor target.
+  timeGridModel.days = [];
+  timeGridModel.timeEvents = [];
+  timeGridModel.perDay = new Map();
+  timeGridModel.gridEl = null;
+  timeGridModel.renderedSig = null;
+  editor.mode = null;
+  editor.scope = null;
+  editor.target = null;
+  editor.custom = null;
   $('#password').value = '';
   $('#app').hidden = true;
   $('#login').hidden = false;
@@ -422,7 +446,7 @@ async function ingestRow(id, ver, nonce, ct) {
   try {
     payload = await decryptRow(state.rowKey, id, ver, nonce, ct);
   } catch {
-    state.corrupt.set(id, 'decrypt_failed');
+    state.corrupt.set(id, { reason: 'decrypt_failed', ver });
     state.evt.delete(id);
     if (cu) state.cals.delete(cu);
     return;
@@ -430,7 +454,7 @@ async function ingestRow(id, ver, nonce, ct) {
   if (core.parseEvtId(id)) {
     const parsed = core.parseEvtPayload(payload);
     if (!parsed) {
-      state.corrupt.set(id, 'bad_payload');
+      state.corrupt.set(id, { reason: 'bad_payload', ver });
       state.evt.delete(id);
     } else {
       state.evt.set(id, { ver, parsed });
@@ -441,7 +465,7 @@ async function ingestRow(id, ver, nonce, ct) {
     try { meta = JSON.parse(payload); } catch { /* corrupt */ }
     const v = core.validateCalendarMeta(meta);
     if (!cu || !v) {
-      state.corrupt.set(id, 'bad_payload');
+      state.corrupt.set(id, { reason: 'bad_payload', ver });
       if (cu) state.cals.delete(cu);
     } else {
       state.cals.set(cu, { ver, meta: v });
@@ -510,7 +534,20 @@ async function fetchRowsIntoState(ids, syncGen) {
 }
 
 /**
- * v4.3 §5.1 sync — READ-ONLY, failure-tolerant, always renders.
+ * Cheap fingerprint of the sync-relevant state (E3-1/E2-5): which rows exist,
+ * at which vers, and which are flagged corrupt. Two equal shapes ⇒ a sync
+ * changed nothing ⇒ no renderAll needed. O(rows) string build, ~1 ms at 300 rows.
+ */
+function syncStateShape() {
+  const parts = [];
+  for (const [id, r] of state.evt) parts.push(id + '>' + r.ver);
+  for (const [u, c] of state.cals) parts.push('c:' + u + '>' + c.ver);
+  for (const id of state.corrupt.keys()) parts.push('x:' + id);
+  return parts.join('|');
+}
+
+/**
+ * v4.3 §5.1 sync — READ-ONLY, failure-tolerant, renders when something changed.
  * 1 request when nothing changed; 2 when anything did. Never writes rows;
  * never lets one bad row (corrupt/unparseable) abort the others.
  * Wave-7 A3/A6/A7: races with mutations are defused via the monotonic-ver
@@ -518,91 +555,102 @@ async function fetchRowsIntoState(ids, syncGen) {
  * MANIFEST (not local state) has no evt/cmeta rows; a lock() during an
  * in-flight sync aborts it silently instead of throwing on null state.
  */
-async function syncAll() {
+async function syncAll(forceRender = false) {
   if (!state.api || state.syncing) return;
   state.syncing = true;
   const api = state.api; // captured: detect lock() during this sync (A7)
   const syncGen = state.mutGen; // A3: mutations AFTER this are newer than the snapshot
   const errors = [];
+  // E3-1/E2-5: change signal — a sync that changes NOTHING (idle autosync)
+  // must not pay a full renderAll. Snapshot the sync-relevant state shape.
+  const before = syncStateShape();
   try {
-    const manifest = await api.getManifest();
+    const manifest = await api.getManifest(state.manifestEtag);
     if (state.api !== api) return; // locked while awaiting — abort silently
-    const rows = manifest.rows || [];
-    const seen = new Set();
-    const toFetch = [];
-    let evtOrCmetaOnServer = 0;
+    if (!manifest.notModified) {
+      state.manifestEtag = manifest.etag || null;
+      const rows = manifest.rows || [];
+      const seen = new Set();
+      const toFetch = [];
+      let evtOrCmetaOnServer = 0;
 
-    for (const r of rows) {
-      const id = r.id;
-      // `cal:` day buckets are DEPRECATED in v4.3 (protocol.md §13c):
-      // never read, never written, ignored entirely.
-      if (core.parseEvtId(id)) {
-        seen.add(id);
-        evtOrCmetaOnServer++;
-        const local = state.evt.get(id);
-        if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
-      } else if (core.parseCmetaId(id)) {
-        seen.add(id);
-        evtOrCmetaOnServer++;
-        const uuid = core.parseCmetaId(id);
-        const local = state.cals.get(uuid);
-        if (!local || local.ver !== r.ver || state.corrupt.has(id)) toFetch.push(id);
+      for (const r of rows) {
+        const id = r.id;
+        // `cal:` day buckets are DEPRECATED in v4.3 (protocol.md §13c):
+        // never read, never written, ignored entirely.
+        if (core.parseEvtId(id)) {
+          seen.add(id);
+          evtOrCmetaOnServer++;
+          const local = state.evt.get(id);
+          // E2-3: a corrupt row is retried only when its ver CHANGED (a fixed
+          // server row) — not on every idle poll forever.
+          const bad = state.corrupt.get(id);
+          if (bad ? bad.ver !== r.ver : (!local || local.ver !== r.ver)) toFetch.push(id);
+        } else if (core.parseCmetaId(id)) {
+          seen.add(id);
+          evtOrCmetaOnServer++;
+          const uuid = core.parseCmetaId(id);
+          const local = state.cals.get(uuid);
+          const bad = state.corrupt.get(id);
+          if (bad ? bad.ver !== r.ver : (!local || local.ver !== r.ver)) toFetch.push(id);
+        }
       }
-    }
 
-    if (toFetch.length > 0) {
-      // ≤256 ids per call (protocol.md §9b); chunk larger sets.
-      for (let i = 0; i < toFetch.length; i += 256) {
-        await fetchRowsIntoState(toFetch.slice(i, i + 256), syncGen);
-        if (state.api !== api) return; // locked mid-sync — abort silently
+      if (toFetch.length > 0) {
+        // ≤256 ids per call (protocol.md §9b); chunk larger sets.
+        for (let i = 0; i < toFetch.length; i += 256) {
+          await fetchRowsIntoState(toFetch.slice(i, i + 256), syncGen);
+          if (state.api !== api) return; // locked mid-sync — abort silently
+        }
       }
-    }
 
-    // Locally-known rows absent from the manifest were deleted elsewhere.
-    // A3: rows mutated AFTER the manifest request was issued (dirty gen >
-    // syncGen) may legitimately be absent — keep ONLY those. (A session-long
-    // protection was a bug: it masked genuine deletions for the whole
-    // session — wave-7 A9 regression caught it.)
-    for (const id of [...state.evt.keys()]) {
-      const dg = state.dirty.get(id);
-      if (!seen.has(id) && !(dg !== undefined && dg > syncGen)) state.evt.delete(id);
-    }
-    for (const [uuid] of state.cals) {
-      const cid = core.cmetaId(uuid);
-      const dg = state.dirty.get(cid);
-      if (!seen.has(cid) && !(dg !== undefined && dg > syncGen)) state.cals.delete(uuid);
-    }
-    for (const id of [...state.corrupt.keys()]) if (!seen.has(id)) state.corrupt.delete(id);
-    // Dirty rows the manifest now confirms are no longer dirty.
-    for (const [id] of [...state.dirty.entries()]) if (seen.has(id)) state.dirty.delete(id);
-    // Locally-deleted rows the manifest no longer lists are confirmed.
-    for (const id of [...state.deletedLocally.keys()]) if (!seen.has(id)) state.deletedLocally.delete(id);
+      // Locally-known rows absent from the manifest were deleted elsewhere.
+      // A3: rows mutated AFTER the manifest request was issued (dirty gen >
+      // syncGen) may legitimately be absent — keep ONLY those. (A session-long
+      // protection was a bug: it masked genuine deletions for the whole
+      // session — wave-7 A9 regression caught it.)
+      for (const id of [...state.evt.keys()]) {
+        const dg = state.dirty.get(id);
+        if (!seen.has(id) && !(dg !== undefined && dg > syncGen)) state.evt.delete(id);
+      }
+      for (const [uuid] of state.cals) {
+        const cid = core.cmetaId(uuid);
+        const dg = state.dirty.get(cid);
+        if (!seen.has(cid) && !(dg !== undefined && dg > syncGen)) state.cals.delete(uuid);
+      }
+      for (const id of [...state.corrupt.keys()]) if (!seen.has(id)) state.corrupt.delete(id);
+      // Dirty rows the manifest now confirms are no longer dirty.
+      for (const [id] of [...state.dirty.entries()]) if (seen.has(id)) state.dirty.delete(id);
+      // Locally-deleted rows the manifest no longer lists are confirmed.
+      for (const id of [...state.deletedLocally.keys()]) if (!seen.has(id)) state.deletedLocally.delete(id);
 
-    /* ---- calendar visibility: unchecking persists; new calendars visible ---- */
-    const stored = loadCalVis();
-    for (const uuid of state.cals.keys()) {
-      if (!stored || !stored.has(uuid)) calVis.set(uuid, true);
-    }
-    for (const uuid of [...calVis.keys()]) {
-      if (!state.cals.has(uuid)) calVis.delete(uuid);
-    }
-    syncCalVisible();
-
-    /* ---- default calendar bootstrap (Proton DEFAULT_CALENDAR).
-     * A6: gated on the MANIFEST, not local state — an all-corrupt store or a
-     * v4.2 leftover with only `cal:` bucket rows must NOT trigger a write. */
-    if (evtOrCmetaOnServer === 0) {
-      const uuid = crypto.randomUUID();
-      const meta = core.newCalendarMeta('My calendar', core.PALETTE[0]);
-      const res = await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), {
-        allowCreate: true, local: { ver: 0, payload: null },
-      });
-      if (state.api !== api) return; // locked — abort silently
-      applyRowLocally(core.cmetaId(uuid), res.ver, res.text); // marks dirty
-      calVis.set(uuid, true);
-      saveCalVis();
+      /* ---- calendar visibility: unchecking persists; new calendars visible ---- */
+      const stored = loadCalVis();
+      for (const uuid of state.cals.keys()) {
+        if (!stored || !stored.has(uuid)) calVis.set(uuid, true);
+      }
+      for (const uuid of [...calVis.keys()]) {
+        if (!state.cals.has(uuid)) calVis.delete(uuid);
+      }
       syncCalVisible();
-    }
+
+      /* ---- default calendar bootstrap (Proton DEFAULT_CALENDAR).
+       * A6: gated on the MANIFEST, not local state — an all-corrupt store or a
+       * v4.2 leftover with only `cal:` bucket rows must NOT trigger a write. */
+      if (evtOrCmetaOnServer === 0) {
+        const uuid = crypto.randomUUID();
+        const meta = core.newCalendarMeta('My calendar', core.PALETTE[0]);
+        const res = await putRowRMW(core.cmetaId(uuid), () => JSON.stringify(meta), {
+          allowCreate: true, local: { ver: 0, payload: null },
+        });
+        if (state.api !== api) return; // locked — abort silently
+        applyRowLocally(core.cmetaId(uuid), res.ver, res.text); // marks dirty
+        calVis.set(uuid, true);
+        saveCalVis();
+        syncCalVisible();
+      }
+    } // §9 304: NOTHING changed server-side — rows cannot have appeared,
+      // changed or vanished, so the whole manifest body is a no-op.
   } catch (e) {
     if (state.api === api) errors.push(e); // a locked session swallows it
   } finally {
@@ -611,10 +659,12 @@ async function syncAll() {
 
   if (state.api !== api) return; // locked — do not render/toast on dead state
 
-  // §5.1d: render ALWAYS runs after a sync, with whatever succeeded.
-  // A13: a render bug must not reject the sync (unlock shows "Login failed").
+  // §5.1d: render after a sync when something actually CHANGED (or when the
+  // caller needs a guaranteed render, e.g. first unlock). A13: a render bug
+  // must not reject the sync (unlock shows "Login failed").
+  const changed = syncStateShape() !== before || errors.length > 0;
   try {
-    renderAll();
+    if (changed || forceRender) renderAll();
   } catch (e) {
     console.error('render error after sync: ' + (e && e.message ? e.message : String(e)));
   }
@@ -3139,13 +3189,27 @@ function confirmDeleteCalendar(uuid) {
         .filter((id) => (core.parseEvtId(id) || {}).cal === uuid);
       const corruptRowIds = [...state.corrupt.keys()]
         .filter((id) => (core.parseEvtId(id) || {}).cal === uuid);
-      for (const id of [...new Set([...calRowIds, ...corruptRowIds])]) {
-        await state.api.deleteRow(id);
-        state.evt.delete(id);
-        state.corrupt.delete(id);
-        state.dirty.delete(id);
-        state.deletedLocally.set(id, ++state.mutGen); // A3
-      }
+      const allRowIds = [...new Set([...calRowIds, ...corruptRowIds])];
+      // E2-1: the event-row DELETEs run in PARALLEL (N+1 sequential round-trips
+      // took 15–30 s for a 100-event calendar). The cmeta row is deleted LAST
+      // and ONLY when every event delete succeeded — a partial failure then
+      // leaves a smaller but fully usable calendar instead of orphaning rows
+      // invisibly under a vanished calendar (other tabs would drop the
+      // calendar from their sidebar while its events survive server-side).
+      const results = await Promise.allSettled(allRowIds.map((id) => state.api.deleteRow(id)));
+      const failed = [];
+      results.forEach((r, i) => {
+        const id = allRowIds[i];
+        if (r.status === 'fulfilled') {
+          state.evt.delete(id);
+          state.corrupt.delete(id);
+          state.dirty.delete(id);
+          state.deletedLocally.set(id, ++state.mutGen); // A3
+        } else {
+          failed.push(r.reason);
+        }
+      });
+      if (failed.length > 0) throw failed[0];
       await state.api.deleteRow(core.cmetaId(uuid));
       state.cals.delete(uuid);
       state.corrupt.delete(core.cmetaId(uuid));
@@ -3629,14 +3693,17 @@ function bind() {
     else if (e.key === 'ArrowRight') { e.preventDefault(); navView(1); }
   });
 
+  // E5-2/E3-4: coalesce resize storms to ONE renderAll per frame (window
+  // drags fired up to 120 full re-renders/sec before). B4 preserves the
+  // time-grid scroll position INSIDE renderAll, so no manual restore here
+  // (the old restore wrote to the detached pre-render node — a no-op).
+  let resizeRaf = 0;
   window.addEventListener('resize', () => {
-    if (!$('#app').hidden) {
-      // Only the grids need re-layout; keep the user's scroll position.
-      const scroll = document.querySelector('.calendar-time-grid');
-      const top = scroll ? scroll.scrollTop : null;
+    if ($('#app').hidden || resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = 0;
       renderAll();
-      if (scroll && top !== null) scroll.scrollTop = top;
-    }
+    });
   });
 
   $('#btn-paste-setup').addEventListener('click', () => {

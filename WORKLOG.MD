@@ -2026,3 +2026,158 @@ rate limits; Aliyun mirrors flaky 502) — CI is the test gate (was GREEN on
 da20f6e75; this push re-runs it). davx5 credential mapping for the user:
 login with URL = server, username = 64-hex provisioning code, password =
 calendar password.
+
+## DAVX AUDIT WAVE 1 (agents A1/A2/A3, 2026-10-31) — DISPOSITIONS
+
+Reports: /home/z/my-project/audit-d/davx-audit-{a1,a2,a3}.md. All findings
+verified against CI logs / real sources before acting (Commandment 6).
+
+CONFIRMED + FIXED (push after this entry):
+- A1-1 [BLOCKER] cbc508f2d did not compile: RowStoreApi member-EXTENSION
+  functions called as `api.bodyAsJson(response)` (illegal) + dropped
+  io.ktor.client.request.{url,setBody} imports in the refactor. CI run
+  41178330922 failed all 3 jobs. FIXED: bodyAsJson/bodyAsTextSafe are plain
+  member functions; imports restored in both files.
+- A1-4/A2-1 [MAJOR] URLEncoder form-encoding ('+'↔space) vs the wire's
+  encodeURIComponent/decodeURIComponent: UIDs with '+'/' ' addressed
+  DIFFERENT rows. FIXED: RowStoreUrls.percentEncode/percentDecode
+  (encodeURIComponent parity, byte-exact); all /rows/{id} paths and
+  fileNameOf use it; MemberState.fileName too. Round-trip test added.
+- A1-2/A3-NIT [MAJOR] open() kept the provisioning code as Bearer after
+  derivation (web client switches to the DERIVED AUTH_UI, app.js:311).
+  FIXED: RowStoreAccount rebuilds its api with keys.authUiHex after derive.
+- A1-6/A2-2 [MAJOR] catch(Exception) swallowed CancellationException.
+  FIXED: rethrow CancellationException (and IOException — A2-3: network
+  errors must stay IOExceptions so SyncExceptionHandler treats them as
+  soft/retry, not hard errors).
+- A2-4/A2-10/A3-M2 [MAJOR] session-open auth failures bypassed
+  SyncExceptionHandler (no notification, no authenticationFailed).
+  FIXED: RowStoreSyncSession.open maps silent-drop/wrong-password to
+  RowStoreAuthenticationException; CalendarSyncer sets
+  syncResult.authenticationFailed and skips; RefreshCollectionsWorker
+  catches it → notifyAuthenticationFailed (same as WebDAV 401 path).
+- A3-1 [MAJOR] corrupt cmeta row ⇒ calendar silently DELETED locally.
+  FIXED: listCalendars returns Calendars(calendars, corruptRowIds); the
+  refresher keeps last-known-good entries for corrupt rows (web client
+  parity).
+- A3-2 [MAJOR] rowstore_server marker = silent single point of failure
+  (unreadable → WebDAV fallback → collections deleted). FIXED: URL-shape
+  fallback (all collections = exact {server}/clock/{uuid-v4}/ → row-store)
+  + warning log when the marker is missing but shape matches.
+- A1-3/A3-3 [MAJOR] hard §9b-batch dependency (v4.2 workers hard-fail).
+  FIXED: batch→per-row-GET fallback in BOTH RowStoreAccount.listCalendars
+  and RowStoreCalDavCollection.multiget (§5.1c degrade, web client parity);
+  detector logs a proto!=4.3 warning instead of failing (soft gate §5.4).
+- A1-5 [MAJOR] no cross-language envelope KAT. FIXED: crypto-parity.mjs
+  vectors ported (derivation, rowAad ASCII+unicode, row-AEAD decrypt of the
+  JS-produced ciphertext).
+- A2-6 [MINOR] davx5 UIDs violating the row grammar (':' or >200 chars)
+  would corrupt the store (invisible events in the web client). FIXED:
+  validateUid before create/update (DavException, surfaces as sync error).
+- A2-9 [MINOR] 64 KiB cap unchecked client-side → cryptic 400 loop. FIXED:
+  validatePayloadSize (payload+16B ≤ 64 KiB).
+- A2-7 [MINOR] one undecryptable row aborted the whole sync. FIXED:
+  multiget skips corrupt rows with a log (retried next sync, web client
+  parity).
+- A1-7 [MINOR] any 404-with-body → NotFoundException (foreign 404 pages
+  misclassified). FIXED: only OUR {"error":...} JSON bodies map to
+  NotFoundException; test added.
+- A1-12 [MINOR] /config params unvalidated (hostile server → 2e9 PBKDF2
+  iters). FIXED: salt hex32 + iters 1..10M checks (js/crypto.js parity).
+- A1-9 [MINOR] tautological KAT assertion in
+  RowStoreCalDavCollectionTest. FIXED (cleaned).
+
+ACCEPTED (documented, not fixed):
+- A1-13: N calendars ⇒ N manifest GETs per sync — EXACTLY upstream CalDAV
+  parity (one REPORT per collection); not a regression.
+- A2-5: updateMember(ifETag=null) → DavException — unreachable in the
+  SyncManager flow (eTags always set for updates).
+- A2-8: deleteMember ignores ifETag — documented protocol semantic loss
+  (protocol.md §9, DELETE is idempotent, no If-Match on the wire).
+- A1-11 (part): UIDs containing '/' cannot round-trip through davx5's
+  href-based multiget (web client can create them; davx5 skips those rows).
+  Documented; fixing needs a row-id grammar change.
+- A3-M4: suggested account name = the hex64 token (user edits it on the
+  AccountDetails page — cosmetic).
+- A3-M5: no calendar CREATION from davx5 (MKCALENDAR-analog not wired;
+  calendars are created in the web UI). Out of scope for the fork sync.
+
+Test evidence (this push): :rowstore suite = 15 original + 12 new
+(percent-codec, cross-language KATs, corrupt-keep, v4.2 fallback ×2,
+corrupt-row skip, UID grammar, 64 KiB cap, foreign-404, config validation,
+open/derive KATs). CI (rowstore-ci.yml) is the execution gate.
+
+## EFFICIENCY WAVE (agents E1–E6 dispositions + implementation, 2026-10-31)
+
+User directive: 6+ parallel agents to identify efficiency gains in protocol +
+app. Reports: /home/z/my-project/audit-d/eff-E{1..6}-findings.md. All
+implemented findings were verified against the code before acting; the
+O(1) base64 canonicality check was additionally property-tested by me over
+116,384 inputs (0 mismatches vs the old full re-encode).
+
+### IMPLEMENTED (all verified)
+- [E1-1/E2-7/E6-1, MAJOR→DONE] §9d conditional manifest read (protocol.md §9d,
+  additive v4.3): DO keeps a mutation `epoch` (meta table); GET /rows returns
+  `etag:"e<n>"` and answers matching If-None-Match with 304 (empty). Bumped on
+  accepted INSERT/UPDATE/real DELETE; NOT on rebase-rejects or idempotent
+  re-deletes. Idle autosync: full manifest every 60 s → ~0 bytes. Client sends
+  the stored etag (cleared on lock — a 304 against cleared state would render
+  an empty calendar). 10 new api-suite tests (v43d.1-10) + browser probe.
+  LIVE VERIFIED on production (304/200/CORS).
+- [E1-2/E6-4, MAJOR→DONE] §9b batch: N per-id SELECTs → `WHERE id IN (…)`
+  chunked at 100 (Cloudflare SQLite caps bound parameters at 100 — found by
+  test v43.11 failing with 256 placeholders, then fixed). Response
+  byte-identical (request order preserved; existing v43.1-15 pin it).
+- [E1-4, MINOR→DONE] PUT accept path echoes the SUBMITTED canonical b64
+  strings instead of re-encoding the decoded arrays (byte-identical, proven
+  by b64Decode's canonicality rejection).
+- [E1-5/E2-4, MINOR→DONE] base64 canonicality O(n) re-encode → O(1) trailing-
+  padding-bits check, in BOTH worker b64Decode and js/crypto.js b64ToBytes.
+  Property test: 116,384 inputs, 0 acceptance mismatches. crypto-parity
+  38/38 still green.
+- [E2-1/E6-2, MAJOR→DONE] calendar delete: N+1 SEQUENTIAL DELETEs →
+  Promise.allSettled parallel + cmeta LAST and only when every event delete
+  succeeded (partial failure leaves a smaller usable calendar instead of
+  orphaned invisible rows).
+- [E2-2/E6-5, MINOR→DONE] unlock waterfall: /version version gate runs
+  CONCURRENTLY with the first sync (safe: a v4.2 server degrades mid-sync
+  via the existing batch→per-row fallback).
+- [E2-3, MINOR→DONE] corrupt rows: retried only when their ver CHANGES, not
+  on every idle poll forever (corrupt map values now {reason, ver}).
+- [E3-1/E2-5/E5-4, MAJOR→DONE] unchanged syncs no longer re-render: syncAll
+  fingerprints the state shape (rows/vers/corrupt) and skips renderAll when
+  nothing changed (unlock forces a render). Browser-verified: marker DOM node
+  survives an unchanged sync.
+- [E3-4/E5-2, MAJOR→DONE] resize storms rAF-coalesced to ONE renderAll per
+  frame; the dead scroll-restore write (detached node — B4 already covers
+  scroll inside renderAll) removed.
+- [E4-F2, MAJOR→DONE] RRule objects cached per parsed master (WeakMap) —
+  expansion passes (view + clock preview + re-measure) reuse one instance,
+  engaging rrule.js's own between() cache (measured 670× on warm paths).
+- [E5-1, MAJOR→DONE] index.html modulepreloads the vendored rrule.mjs
+  (18.9 KB gz, 31% of JS) off the critical path.
+- [E5-5, MAJOR→DONE] lock() purges module-scope decrypted data (time-grid
+  model + editor target) — plaintext no longer survives Lock in the JS heap.
+- [E6-2/CORS BUG (found by E2E, NEW)] Access-Control-Allow-Headers did not
+  include If-Match/If-None-Match — the browser BLOCKED the new conditional
+  GET cross-origin (and would have blocked any future cross-origin §9c use).
+  FIXED in worker/src/index.js; E2E re-run 40/40 after the fix.
+
+### ACCEPTED (not implemented; reasons recorded)
+- ETag/304 for /config+/version merges, binary bodies, compact manifest
+  encoding, batch-DELETE endpoint, WebSocket push: rejected in the agent
+  reports (protocol risk vs. gain; C4-style size cap fine at PoC scale).
+- E3-2/E3-3/E3-5 (DnD rAF throttle, month-model mousedown cache, incremental
+  saves rendering): deferred — larger refactors; the no-op render skip covers
+  the dominant idle cost. Recorded for the next wave.
+- E1-3 (per-request gate overhead cache): deferred; §4 timing side-channel
+  considerations noted by E1.
+
+### TEST EVIDENCE (this wave)
+- core-unit 176/176; crypto-parity 38/38; api-suite 163/163 (incl. 10 new
+  §9d tests); E2E v43 40/40 (0 console errors, 0 page errors) AFTER the CORS
+  fix; probe-304 8/8 (1 request per unchanged sync, no re-render, 304
+  invalidation on out-of-band change, return to 304).
+- Worker DEPLOYED to production (version 0af7ea3f, §9d live). Live checks:
+  etag present, 304 on match, 200 on stale, CORS allows conditional headers,
+  pre-existing rows intact (additive migration, epoch starts at 0).

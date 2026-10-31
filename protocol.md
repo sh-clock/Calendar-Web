@@ -98,6 +98,28 @@ A v4.2 worker returns the silent-drop empty 404 for this route; v4.3
 clients fall back to per-row `GET /rows/{id}` (see §5.1c and §8 for the
 browser-vs-non-browser nuance).
 
+### §9d `GET /rows` conditional read (v4.3 addition, efficiency)
+
+`GET /rows` now returns an `etag` field alongside the manifest:
+`{"rows":[{id,ver}…], "etag":"e<epoch>"}`, and answers
+`If-None-Match: "e<epoch>"` with **304** (empty body, `ETag` header set)
+when nothing has mutated since.
+
+- The **epoch** is a server-side mutation counter: +1 for every accepted
+  row INSERT, accepted UPDATE and REAL delete (an idempotent re-delete of
+  a missing row does not bump it). Row reads never bump it.
+- Additive and interoperable in both directions: clients that send no
+  `If-None-Match` always get a plain 200; servers without the extension
+  ignore the header and answer a plain 200 (old clients ignore the new
+  `etag` field per §22 ignore-unknown-fields). A v4.3 client MUST treat
+  304 as "manifest unchanged" and keep its local state.
+- Motivation: an idle 60 s autosync re-downloaded the full manifest
+  (~94 B/row — ~4.6 MB over an 8-hour day at 100 rows). With the
+  conditional read an unchanged poll costs one request with ~0 bytes.
+- Threat model (§1) unchanged: the etag leaks only a mutation COUNTER —
+  no row ids, no vers, no payload-derived data. The server still
+  compares only clear integers.
+
 ### §9c PUT conditional mode (NEW in v4.3.1 — DAV compatibility)
 
 Clients MAY send standard HTTP conditional headers with `PUT /rows/{id}`:

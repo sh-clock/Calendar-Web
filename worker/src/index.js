@@ -21,8 +21,11 @@ function corsHeaders(origin) {
   return {
     'access-control-allow-origin': origin,
     // v4.3 §9b: POST is needed for /rows:batch (browser preflight must pass).
+    // v4.3 §9c/§9d: conditional headers (If-Match/If-None-Match) are part of
+    // the protocol surface — the browser preflight must allow them, and the
+    // front door forwards them to the DO.
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'access-control-allow-headers': 'Authorization, Content-Type',
+    'access-control-allow-headers': 'Authorization, Content-Type, If-Match, If-None-Match',
     'access-control-max-age': '86400',
     vary: 'Origin',
   };
