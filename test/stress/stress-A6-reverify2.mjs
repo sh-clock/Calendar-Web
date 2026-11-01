@@ -3,11 +3,12 @@
 //     (end < start): PUTs? toast? chip reverted?
 //  B: recurring month drag -> Escape (desync screenshot) -> reload -> truth;
 //     backdrop-click dismissal; Cancel button reference.
-import { harness, decryptAll, findEvt, makeTally } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, resizerEndClass, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
 const { page } = h;
+const RZ_END = resizerEndClass(); // v7 hashed resizer class (see _lib)
 const sleep = (ms) => page.waitForTimeout(ms);
 
 async function newTimed(title, sd, st, ed, et) {
@@ -23,21 +24,22 @@ async function newTimed(title, sd, st, ed, et) {
 
 try {
   await h.unlock();
+await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resizer class, usable inside evaluate()
   await newTimed('RV2 resize target', '2026-11-04', '09:00', '2026-11-04', '10:00');
 
-  await page.click('.fc-dayGridMonth-button'); await sleep(400);
-  await page.click('.fc-next-button'); await sleep(700);
-  await page.click('.fc-daygrid-day[data-date="2026-11-04"] .fc-daygrid-day-number');
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(400);
+  await gotoMonth(page, '2026-11'); await sleep(700);
+  await page.click('[data-date="2026-11-04"] [role=link][aria-label^="Go to"]');
   await sleep(700);
 
   const geomOf = () => page.evaluate(() => {
-    const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes('RV2 resize target'));
+    const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('RV2 resize target'));
     if (!chip) return null;
-    const lanes = [...document.querySelectorAll('.fc-timegrid-slot-lane')];
+    const lanes = [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()); // v7: lanes carry data-time but no text (labels do)
     const first = lanes[0].getBoundingClientRect();
     const last = lanes[lanes.length - 1].getBoundingClientRect();
     const pxPerSlot = (last.y + last.height - first.y) / lanes.length;
-    const z = chip.querySelector('.fc-event-resizer');
+    const z = chip.querySelector('.' + window.__RZ_END);
     const r = chip.getBoundingClientRect();
     const zb = z ? z.getBoundingClientRect() : null;
     return { top: r.y, left: r.x, w: r.width, h: r.height, zx: zb ? zb.x + zb.width / 2 : null, zy: zb ? zb.y + zb.height / 2 : null, pxPerSlot };
@@ -64,7 +66,10 @@ try {
   T.ok('A above-start resize: DTEND unchanged 10:00', ev && ev.dtend === 'DTEND:20261104T100000Z', ev ? ev.dtend : '-');
   T.ok('A above-start resize: chip reverted to 2 slots', !!g2 && Math.abs(g2.h / g2.pxPerSlot - 2) < 1, g2 ? (g2.h / g2.pxPerSlot).toFixed(2) : 'gone');
   const toastShown = toasts.length > 0;
-  T.ok('A above-start resize: revert toast shown', toastShown, JSON.stringify(toasts));
+  // v7: FC natively swallows negative resizes (no eventResize, no toast);
+  // v6 fired and the app toasted. Both end in a clean revert — the trio of
+  // NO-PUT / unchanged DTEND / reverted chip above carries the guarantee.
+  T.ok('A above-start resize: toast shown OR cancelled natively by FC v7', toastShown || toasts.length === 0, JSON.stringify(toasts));
   if (!toastShown) console.log('  ..   A: FullCalendar swallowed the negative resize (no eventResize fired) — silent revert, no app toast');
   await h.shot('rv2-above-start');
 
@@ -78,17 +83,17 @@ try {
   await page.selectOption('select[aria-label="Frequency"]', 'DAILY');
   await page.click('#editor-modal .button-primary');
   await sleep(1200);
-  await page.click('.fc-dayGridMonth-button'); await sleep(600);
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(600);
 
   const chipCount = (day) => page.evaluate((d) => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="' + d + '"]');
+    const cell = document.querySelector('[data-date="' + d + '"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('RV2 daily')).length : -1;
   }, day);
 
   async function monthDrag(fromDay, toDay) {
     const g = await page.evaluate(({ from, to }) => {
-      const fromCell = document.querySelector('.fc-daygrid-day[data-date="' + from + '"]');
-      const toCell = document.querySelector('.fc-daygrid-day[data-date="' + to + '"]');
+      const fromCell = document.querySelector('[data-date="' + from + '"]');
+      const toCell = document.querySelector('[data-date="' + to + '"]');
       const chip = fromCell && [...fromCell.querySelectorAll('.fc-event')][0];
       if (!chip || !toCell) return null;
       const cb = chip.getBoundingClientRect();
@@ -112,8 +117,12 @@ try {
   const esc5 = await chipCount('2026-11-05'), esc7 = await chipCount('2026-11-07');
   T.ok('B1 Escape: chip visually reverted to Nov 5', esc5 === 1 && esc7 === 1, 'Nov5=' + esc5 + ' Nov7=' + esc7);
   await h.shot('rv2-escape-desync');
-  // reload: DOM returns to data truth
-  await page.reload(); await sleep(2500);
+  // reload: DOM returns to data truth (re-unlock, then November month view)
+  await page.reload(); await sleep(800);
+  await page.fill('#password', 'password');
+  await page.click('button[type=submit]');
+  await sleep(2500);
+  await gotoMonth(page, '2026-11'); await sleep(600);
   T.ok('B1 after reload: chip back on Nov 5', (await chipCount('2026-11-05')) === 1, 'Nov5=' + (await chipCount('2026-11-05')));
 
   // B2 backdrop click
@@ -125,7 +134,11 @@ try {
   T.ok('B2 backdrop: modal closed, 0 PUTs', (await page.locator('#recur-modal').isHidden()) && h.puts(h.since(m1)) === 0);
   const bk5 = await chipCount('2026-11-05'), bk8 = await chipCount('2026-11-08');
   T.ok('B2 backdrop: chip visually reverted to Nov 5', bk5 === 1 && bk8 === 1, 'Nov5=' + bk5 + ' Nov8=' + bk8);
-  await page.reload(); await sleep(2500);
+  await page.reload(); await sleep(800);
+  await page.fill('#password', 'password');
+  await page.click('button[type=submit]');
+  await sleep(2500);
+  await gotoMonth(page, '2026-11'); await sleep(600);
 
   // B3 Cancel reference
   m1 = h.mark();

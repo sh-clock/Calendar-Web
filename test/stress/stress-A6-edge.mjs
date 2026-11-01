@@ -1,13 +1,19 @@
 // stress-edge.mjs — edge-time events + custom RRULE round-trip verification
 // (agent A6 group 1+2, executed by the orchestrator after agent timeouts).
+// MIGRATED to FullCalendar v7 DOM (E2E-MIG-B): toolbar buttons by aria-label,
+// agenda rows via .fc-event (v6 .fc-event is gone), 8081/8788/material-2.
 import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.mjs';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { gotoMonth } from './_lib.mjs';
 
-const mat = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8'));
+const mat = JSON.parse(readFileSync('/tmp/local-material-2.json', 'utf8'));
 const AUTH_UI = mat.auth_ui_hex;
 const K_DATA = Uint8Array.from(Buffer.from(mat.k_data_hex, 'hex'));
-const SERVER = 'http://127.0.0.1:8787';
+const SERVER = 'http://127.0.0.1:8788';
+const BASE = 'http://127.0.0.1:8081';
+// --disable-web-security: the worker CORS allowlist does not cover :8081
+// (harness-only; see _lib.mjs header). Requests/responses pass through verbatim.
 let pass = 0, fail = 0;
 const ok = (n, c, d) => { if (c) { pass++; console.log('  ok  ' + n); } else { fail++; console.log('  FAIL ' + n + (d ? ' — ' + d : '')); } };
 
@@ -31,12 +37,12 @@ async function decryptAll() {
   return out;
 }
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ args: ['--disable-web-security'] });
 const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
 const errs = [];
 page.on('pageerror', (e) => errs.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errs.push('[console] ' + m.text()); });
-await page.goto('http://127.0.0.1:8080/?server=' + SERVER + '&setup=' + AUTH_UI);
+await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');
@@ -127,18 +133,25 @@ ok('custom RRULE serialized (INTERVAL=2, BYDAY=TU,TH, COUNT=10)',
   r ? (r.match(/RRULE:[^\r\n]+/) || ['none'])[0] : 'missing');
 
 /* 7. renders: week view shows the custom occurrences + overnight events */
-await page.click('.fc-timeGridWeek-button');
+// Deterministic week: navigate to the events' week (they live on Nov 4-8) —
+// month view -> Nov -> day-number navLink of Nov 5 (-> day view) -> Week view.
+await page.click('#calendar button[aria-label="Month view"]');
+await page.waitForTimeout(500);
+await gotoMonth(page, '2026-11');
+await page.click('[data-date="2026-11-05"] [role=link][aria-label^="Go to"]');
+await page.waitForTimeout(600);
+await page.click('#calendar button[aria-label="Week view"]');
 await page.waitForTimeout(900);
 const wtexts = await page.evaluate(() => [...document.querySelectorAll('.fc-event')].map(e => e.textContent.trim()));
 ok('week view renders edge events', wtexts.filter(t => t.includes('EDGE')).length >= 3, JSON.stringify(wtexts.slice(0, 6)));
-/* 8. agenda view lists them all */
-await page.click('.fc-listYear-button');
+/* 8. agenda view lists them all (v7: list rows carry the app's .fc-event class) */
+await page.click('#calendar button[aria-label="Agenda view"]');
 await page.waitForTimeout(700);
-const ltexts = await page.evaluate(() => [...document.querySelectorAll('.fc-list-event')].map(e => e.textContent.trim()));
+const ltexts = await page.evaluate(() => [...document.querySelectorAll('.fc-event')].map(e => e.textContent.trim()));
 ok('agenda renders all 6 edge events', ltexts.filter(t => t.includes('EDGE')).length >= 6, 'count=' + ltexts.filter(t => t.includes('EDGE')).length);
 
 /* 9. month view: 5-day all-day spans five cells */
-await page.click('.fc-dayGridMonth-button');
+await page.click('#calendar button[aria-label="Month view"]');
 await page.waitForTimeout(600);
 const chip = page.locator('.fc-event', { hasText: 'EDGE all5' });
 const cnt = await chip.count();

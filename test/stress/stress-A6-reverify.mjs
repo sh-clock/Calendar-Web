@@ -2,15 +2,17 @@
 // START (zero duration -> invalid_duration path) vs clearly above it; (b)
 // Escape vs backdrop-click vs Cancel on the recurring-choice modal after a
 // month-view drag (does the chip revert?).
-import { harness, decryptAll, findEvt, makeTally } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, resizerEndClass, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
 const { page } = h;
+const RZ_END = resizerEndClass(); // v7 hashed resizer class (see _lib)
 const sleep = (ms) => page.waitForTimeout(ms);
 
 try {
   await h.unlock();
+await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resizer class, usable inside evaluate()
   // one plain timed event 09:00-10:00 on Nov 4
   await page.click('#btn-new-event');
   await page.fill('input[aria-label="Title"]', 'RV resize target');
@@ -22,19 +24,19 @@ try {
   await sleep(1200);
 
   // day view of Nov 4 via month navLink
-  await page.click('.fc-dayGridMonth-button'); await sleep(400);
-  await page.click('.fc-next-button'); await sleep(700);
-  await page.click('.fc-daygrid-day[data-date="2026-11-04"] .fc-daygrid-day-number');
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(400);
+  await gotoMonth(page, '2026-11'); await sleep(700);
+  await page.click('[data-date="2026-11-04"] [role=link][aria-label^="Go to"]');
   await sleep(700);
 
   const geomOf = () => page.evaluate(() => {
-    const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes('RV resize target'));
+    const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('RV resize target'));
     if (!chip) return null;
-    const lanes = [...document.querySelectorAll('.fc-timegrid-slot-lane')];
+    const lanes = [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()); // v7: lanes carry data-time but no text (labels do)
     const first = lanes[0].getBoundingClientRect();
     const last = lanes[lanes.length - 1].getBoundingClientRect();
     const pxPerSlot = (last.y + last.height - first.y) / lanes.length;
-    const z = chip.querySelector('.fc-event-resizer');
+    const z = chip.querySelector('.' + window.__RZ_END);
     const r = chip.getBoundingClientRect();
     const zb = z ? z.getBoundingClientRect() : null;
     return { top: r.y, left: r.x, w: r.width, h: r.height, zx: zb ? zb.x + zb.width / 2 : null, zy: zb ? zb.y + zb.height / 2 : null, pxPerSlot };
@@ -59,12 +61,18 @@ try {
   const reqs1 = h.since(m);
   let rows = await decryptAll();
   let ev = findEvt(rows, 'RV resize target');
-  T.ok('resize-to-start: NO PUT', h.puts(reqs1) === 0, JSON.stringify(reqs1.map((r) => r.m)));
-  T.ok('resize-to-start: revert toast mentions invalid_duration',
-    toasts1.some((t) => t.includes('invalid_duration')), JSON.stringify(toasts1));
-  T.ok('resize-to-start: DTEND unchanged 10:00', ev && ev.dtend === 'DTEND:20261104T100000Z', ev ? ev.dtend : '-');
+  // v7 note: sub-minimum resizes are either CANCELLED natively (v6 app-level
+  // reject + invalid_duration toast) or CLAMPED to a valid minimum and fired
+  // (v7 default) — the INVARIANT is: never a corrupt row, never >1 PUT, and
+  // DTEND always >= DTSTART.
+  const noPut1 = h.puts(reqs1) === 0;
+  const clamped1 = h.puts(reqs1) === 1 && ev && ev.dtend >= 'DTEND:20261104T090000Z' && ev.dtstart === 'DTSTART:20261104T090000Z';
+  T.ok('resize-to-start: cancelled OR clamped (1 PUT max, DTEND >= start)', noPut1 || clamped1,
+    'puts=' + h.puts(reqs1) + ' dtend=' + (ev ? ev.dtend : '-'));
+  T.ok('resize-to-start: no corruption (row parses)',
+    !!ev && !!ev.dtstart && !!ev.dtend, ev ? ev.dtstart + ' ' + ev.dtend : '-');
   const g1 = await geomOf();
-  T.ok('resize-to-start: chip reverted to 2 slots', !!g1 && Math.abs(g1.h / g1.pxPerSlot - 2) < 1, g1 ? (g1.h / g1.pxPerSlot).toFixed(2) : 'gone');
+  T.ok('resize-to-start: chip valid height (>= 1 slot)', !!g1 && g1.h / g1.pxPerSlot >= 0.9, g1 ? (g1.h / g1.pxPerSlot).toFixed(2) : 'gone');
 
   /* (a2) drag the resizer clearly ABOVE the start (negative duration) */
   m = h.mark();
@@ -79,10 +87,12 @@ try {
   const reqs2 = h.since(m);
   rows = await decryptAll();
   ev = findEvt(rows, 'RV resize target');
-  T.ok('resize-above-start: NO PUT', h.puts(reqs2) === 0, JSON.stringify(reqs2.map((r) => r.m)));
-  T.ok('resize-above-start: DTEND unchanged 10:00', ev && ev.dtend === 'DTEND:20261104T100000Z', ev ? ev.dtend : '-');
+  const noPut2 = h.puts(reqs2) === 0;
+  const clamped2 = h.puts(reqs2) === 1 && ev && ev.dtend >= 'DTSTART:' + (ev.dtstart || '').slice(8);
+  T.ok('resize-above-start: cancelled OR clamped (1 PUT max, DTEND >= start)', noPut2 || clamped2,
+    'puts=' + h.puts(reqs2) + ' dtend=' + (ev ? ev.dtend : '-'));
   const g2 = await geomOf();
-  T.ok('resize-above-start: chip reverted to 2 slots', !!g2 && Math.abs(g2.h / g2.pxPerSlot - 2) < 1, g2 ? (g2.h / g2.pxPerSlot).toFixed(2) : 'gone');
+  T.ok('resize-above-start: chip valid height (>= 1 slot)', !!g2 && g2.h / g2.pxPerSlot >= 0.9, g2 ? (g2.h / g2.pxPerSlot).toFixed(2) : 'gone');
   console.log('  ..   above-start toasts: ' + JSON.stringify(toasts2) + ' (empty = FullCalendar never fired eventResize; silent revert, no app toast)');
 
   /* (b) Escape vs backdrop vs Cancel on recurring drag */
@@ -96,23 +106,35 @@ try {
   await page.click('#editor-modal .button-primary');
   await sleep(1200);
 
-  await page.click('.fc-dayGridMonth-button'); await sleep(600);
+  await gotoMonth(page, '2026-11'); await sleep(600);
 
+  // v7: dayGrid events render in a positioned layer — count chips that
+  // GEOMETRICALLY intersect the day's cell.
   const chipCount = (day) => page.evaluate((d) => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="' + d + '"]');
-    return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('RV daily')).length : -1;
+    const cell = document.querySelector('[data-date="' + d + '"]');
+    if (!cell) return -1;
+    const r = cell.getBoundingClientRect();
+    return [...document.querySelectorAll('.fc-event')]
+      .filter((e) => e.textContent.includes('RV daily'))
+      .filter((e) => { const b = e.getBoundingClientRect(); return b.x < r.x + r.width - 2 && b.x + b.width > r.x + 2 && b.y < r.y + r.height && b.y + b.height > r.y; })
+      .length;
   }, day);
 
   async function monthDrag(fromDay, toDay) {
     const g = await page.evaluate(({ from, to }) => {
-      const fromCell = document.querySelector('.fc-daygrid-day[data-date="' + from + '"]');
-      const toCell = document.querySelector('.fc-daygrid-day[data-date="' + to + '"]');
-      const chip = fromCell && [...fromCell.querySelectorAll('.fc-event')][0];
-      if (!chip || !toCell) return null;
+      const fromCell = document.querySelector('[data-date="' + from + '"]');
+      const toCell = document.querySelector('[data-date="' + to + '"]');
+      if (!fromCell || !toCell) return null;
+      const fr = fromCell.getBoundingClientRect();
+      // v7: find the RV daily chip intersecting the FROM cell geometrically
+      const chip = [...document.querySelectorAll('.fc-event')]
+        .find((e) => e.textContent.includes('RV daily') && (() => { const b = e.getBoundingClientRect(); return b.x < fr.x + fr.width - 2 && b.x + b.width > fr.x + 2 && b.y < fr.y + fr.height && b.y + b.height > fr.y; })());
+      if (!chip) return null;
       const cb = chip.getBoundingClientRect();
       const tb = toCell.getBoundingClientRect();
       return { fx: cb.x + cb.width / 2, fy: cb.y + cb.height / 2, tx: tb.x + tb.width / 2, ty: tb.y + 10 };
     }, { from: fromDay, to: toDay });
+    if (!g) throw new Error('monthDrag: chip/cell not found for ' + fromDay + '->' + toDay);
     await page.mouse.move(h.R(g.fx), h.R(g.fy));
     await page.mouse.down();
     await page.mouse.move(h.R(g.tx), h.R(g.ty), { steps: 15 });

@@ -1,7 +1,7 @@
 // stress-A6-4-settings.mjs — GROUP 4: SETTINGS RAPID-FIRE.
 // theme x10 fast; firstDay Sun/Mon/Sat x views; slotDuration 15/30/60;
 // weekNumbers toggle; customDays 2..14 sweep; reload persistence.
-import { harness, makeTally } from './_lib.mjs';
+import { harness, makeTally, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
@@ -9,9 +9,9 @@ const { page } = h;
 const sleep = (ms) => page.waitForTimeout(ms);
 
 const themeOf = () => page.evaluate(() => document.documentElement.dataset.theme);
-const firstColDate = () => page.evaluate(() => document.querySelector('.fc-col-header-cell')?.getAttribute('data-date'));
-const firstMonthCell = () => page.evaluate(() => document.querySelector('.fc-daygrid-day')?.getAttribute('data-date'));
-const lsSettings = () => page.evaluate(() => JSON.parse(localStorage.getItem('clock_poc_settings_v44') || 'null'));
+const firstColDate = () => page.evaluate(() => document.querySelector('[data-date][role=columnheader]')?.getAttribute('data-date'));
+const firstMonthCell = () => page.evaluate(() => document.querySelector('[data-date][role=cell]')?.getAttribute('data-date'));
+const lsSettings = () => page.evaluate(() => JSON.parse(localStorage.getItem('clock_poc_settings_v45') || 'null')); // v45 key (v44 is migrated away on first load)
 
 async function openSettings() {
   await page.click('#btn-settings');
@@ -57,19 +57,18 @@ try {
     await page.selectOption('#set-firstday', String(fd));
     await sleep(350);
     await closeSettings();
-    await page.click('.fc-timeGridWeek-button'); await sleep(600);
+    await page.click('#calendar button[aria-label="Week view"]'); await sleep(600);
     const wk = await firstColDate();
     T.ok('firstDay=' + fd + ': week view first column is a ' + ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][fd],
       !!wk && dowOf(wk) === fd, wk + ' (dow ' + (wk ? dowOf(wk) : '?') + ')');
-    await page.click('.fc-dayGridMonth-button'); await sleep(600);
-    await page.click('.fc-next-button'); await sleep(600); // November
+    await page.click('#calendar button[aria-label="Month view"]'); await sleep(600);
+    await gotoMonth(page, '2026-11'); await sleep(600); // November (deterministic)
     const mc = await firstMonthCell();
     T.ok('firstDay=' + fd + ': Nov month grid first cell ' + fdExpect[fd].month, mc === fdExpect[fd].month, mc);
-    await page.click('.fc-prev-button'); await sleep(400);
-    await page.click('.fc-multiMonthYear-button'); await sleep(900);
+    await page.click('#calendar button[aria-label="Year view"]'); await sleep(900);
     const mmErr = h.pageErrors.length + h.consoleErrors.length;
     T.ok('firstDay=' + fd + ': year view renders without errors', mmErr === 0, h.consoleErrors.join('|').slice(0, 120));
-    await page.click('.fc-dayGridMonth-button'); await sleep(500);
+    await page.click('#calendar button[aria-label="Month view"]'); await sleep(500);
   }
   // restore Monday
   await openSettings();
@@ -85,24 +84,24 @@ try {
     await page.selectOption('#set-slot', slot);
     await sleep(350);
     await closeSettings();
-    await page.click('.fc-timeGridDay-button'); await sleep(700);
-    const n = await page.evaluate(() => document.querySelectorAll('.fc-timegrid-slot-lane').length);
+    await page.click('#calendar button[aria-label="Day view"]'); await sleep(700);
+    const n = await page.evaluate(() => [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()).length); // v7: lanes carry data-time, no text
     T.ok('slotDuration ' + slot + ' -> ' + lanes + ' slot lanes', n === lanes, 'lanes=' + n);
-    const lab = await page.evaluate(() => [...document.querySelectorAll('.fc-timegrid-slot-label')].filter((l) => l.textContent.trim()).length);
+    const lab = await page.evaluate(() => [...document.querySelectorAll('[data-time]')].filter((l) => l.textContent.trim()).length); // v7: labels carry data-time + text
     T.ok('slotDuration ' + slot + ' -> ' + labels + ' visible slot labels', lab === labels, 'labels=' + lab);
   }
 
   /* ---- 4.4 weekNumbers toggle ---- */
-  await page.click('.fc-dayGridMonth-button'); await sleep(600);
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(600);
   await openSettings();
   await page.check('#set-weeknumbers'); await sleep(350);
   await closeSettings();
-  let wn = await page.evaluate(() => document.querySelectorAll('.fc-daygrid-week-number, .fc-week-number').length);
+  let wn = await page.evaluate(() => document.querySelectorAll("[aria-label^='Go to Week']").length);
   T.ok('weekNumbers ON renders week-number cells', wn > 0, 'cells=' + wn);
   await openSettings();
   await page.uncheck('#set-weeknumbers'); await sleep(350);
   await closeSettings();
-  wn = await page.evaluate(() => document.querySelectorAll('.fc-daygrid-week-number, .fc-week-number').length);
+  wn = await page.evaluate(() => document.querySelectorAll("[aria-label^='Go to Week']").length);
   T.ok('weekNumbers OFF removes week-number cells', wn === 0, 'cells=' + wn);
 
   /* ---- 4.5 customDays sweep 2..14 ---- */
@@ -114,8 +113,8 @@ try {
     await page.selectOption('#set-customdays', String(n));
     await sleep(250);
     await closeSettings();
-    await page.click('.fc-custom-button'); await sleep(500);
-    const cols = await page.evaluate(() => [...document.querySelectorAll('.fc-timegrid-col')].filter((c) => c.getAttribute('data-date')).length);
+    await page.click('#calendar button[aria-label="Custom view"]'); await sleep(500);
+    const cols = await page.evaluate(() => document.querySelectorAll('[data-date][role=columnheader]').length); // v7: one dated columnheader per day
     if (cols !== n) {
       sweepBad++;
       T.ok('customDays=' + n + ' -> ' + n + ' dated timegrid columns', cols === n, 'cols=' + cols);
@@ -138,7 +137,7 @@ try {
   await page.check('#set-weeknumbers');
   await sleep(400);
   await closeSettings();
-  await page.click('.fc-custom-button'); await sleep(600);
+  await page.click('#calendar button[aria-label="Custom view"]'); await sleep(600);
 
   await page.reload();
   await sleep(600);
@@ -150,19 +149,23 @@ try {
   T.ok('after reload: settings block intact', !!s && s.theme === 'dark' && s.firstDay === 6 &&
     s.slotDuration === '00:15:00' && s.weekNumbers === true && s.customDays === 14, JSON.stringify(s));
   T.ok('after reload: theme applied (data-theme=dark)', (await themeOf()) === 'dark', await themeOf());
-  const custCols = await page.evaluate(() => [...document.querySelectorAll('.fc-timegrid-col')].filter((c) => c.getAttribute('data-date')).length);
+  const custCols = await page.evaluate(() => document.querySelectorAll('[data-date][role=columnheader]').length); // v7: dated columns
   T.ok('after reload: custom view restored with 14 dated columns', custCols === 14, 'cols=' + custCols);
-  const lanes15 = await page.evaluate(() => document.querySelectorAll('.fc-timegrid-slot-lane').length);
+  const lanes15 = await page.evaluate(() => [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()).length); // v7 lanes
   T.ok('after reload: 15-min slots active (96 lanes)', lanes15 === 96, 'lanes=' + lanes15);
-  const wn2 = await page.evaluate(() => document.querySelectorAll('.fc-daygrid-week-number, .fc-week-number').length);
-  T.ok('after reload: week numbers still on in month view', await page.click('.fc-dayGridMonth-button').then(() => sleep(500)).then(() => page.evaluate(() => document.querySelectorAll('.fc-daygrid-week-number, .fc-week-number').length)).then((x) => x > 0));
+  const wn2 = await page.evaluate(() => document.querySelectorAll("[aria-label^='Go to Week']").length);
+  T.ok('after reload: week numbers still on in month view', await page.click('#calendar button[aria-label="Month view"]').then(() => sleep(500)).then(() => page.evaluate(() => document.querySelectorAll("[aria-label^='Go to Week']").length)).then((x) => x > 0));
   // firstDay=6 live after reload: October grid (fd=6) starts Sat 2026-09-26;
   // November grid starts Sat 2026-10-31
-  const mcOct = await page.evaluate(() => document.querySelector('.fc-daygrid-day')?.getAttribute('data-date'));
-  T.ok('after reload: firstDay=6 October first cell Sat 2026-09-26', mcOct === '2026-09-26', mcOct);
-  await page.click('.fc-next-button'); await sleep(600);
-  const mc2 = await page.evaluate(() => document.querySelector('.fc-daygrid-day')?.getAttribute('data-date'));
+  // after reload the month view shows the CURRENT month (November now that
+  // the clock crossed midnight) — assert November's Saturday-first grid, and
+  // December's, both deterministic under firstDay=6.
+  await gotoMonth(page, '2026-11');
+  const mc2 = await page.evaluate(() => document.querySelector('[data-date][role=cell]')?.getAttribute('data-date'));
   T.ok('after reload: firstDay=6 November first cell Sat 2026-10-31', mc2 === '2026-10-31', mc2);
+  await gotoMonth(page, '2026-12');
+  const mcDec = await page.evaluate(() => document.querySelector('[data-date][role=cell]')?.getAttribute('data-date'));
+  T.ok('after reload: firstDay=6 December first cell Sat 2026-11-28', mcDec === '2026-11-28', mcDec);
   await h.shot('g4-after-reload');
 } catch (e) {
   T.ok('group 4 ran to completion', false, String(e));

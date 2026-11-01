@@ -3,7 +3,7 @@
 // (B) JSON-wrapped payload that decrypts+parses but is NOT a VCALENDAR (bad_payload)
 // Reload -> corrupt toast + sidebar note, app functional; healthy event in the
 // SAME calendar still works; delete the calendar -> corrupt rows deleted server-side.
-import { harness, decryptAll, findEvt, makeTally, putRawRow, getRawRow, MAT, SERVER } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, putRawRow, getRawRow, MAT, SERVER, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
@@ -87,8 +87,8 @@ try {
   T.ok('no console errors after ingesting corrupt rows', h.consoleErrors.length === 0, h.consoleErrors.join('|').slice(0, 200));
 
   // app functional: healthy event of the SAME calendar renders + a new save works
-  await page.click('.fc-dayGridMonth-button'); await sleep(500);
-  await page.click('.fc-next-button'); await sleep(700); // November
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(500);
+  await gotoMonth(page, '2026-11'); await sleep(600); // November (deterministic)
   const healthy = await page.locator('.fc-event', { hasText: 'A6 healthy evt' }).count();
   T.ok('healthy event of the corrupt calendar still renders', healthy === 1, 'chips=' + healthy);
 

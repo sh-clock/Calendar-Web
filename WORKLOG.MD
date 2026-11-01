@@ -2504,3 +2504,72 @@ tasks + tests → P4 app.js (v7 adapter, themes, tasks, cache) → P5
 index.html/style.css → P6 test migration + new suites, ALL green → P7
 visual audit (all views × 7 themes × light/dark) → P8 3+ parallel
 critical audit agents → P9 docs/CI/push/deploy.
+
+## SESSION 2026-11-01 (b) — CRASH RECOVERY: baseline restored, dropdown fixed
+
+### State on resume
+- Sandbox processes were recycled (crash); repos + WIP commit 9831035 intact.
+- Rebuilt the test stack as a SELF-CONTAINED wrapper `scripts/with-stack.sh`
+  (starts wrangler 8787 + 8788 + static 8080/8081, bootstraps BOTH universes
+  via api-suite, runs the wrapped command, tears down; --fresh wipes state;
+  --no-bootstrap for self-managing suites). `scripts/static-server.mjs` =
+  tiny no-store static server (python http.server lacked CORS headers).
+  NOTE: two wrangler dev instances must be STAGGERED (they race for
+  workerd's direct:1:default control socket → "Address already in use").
+
+### Baseline verified (all green, zero page/console errors)
+core-unit 176/176 · core-tasks 62/62 · crypto-parity 38/38 · api-suite
+163/163 · e2e-fc 50/50 · e2e-fc-fixes 25/25 · smoke-v7 43/43 ·
+stress-A6-1 46/46 · A6-2 41/41 · A6-3 38/38 · A6-4 31/31 · A6-5 27/27 ·
+A6-6 38/38 · reverify 13/13 · reverify2 12/12 · reverify3 10/10 ·
+A6-edge 10/10 · A6-dnd 15/15.
+
+### Fixes this batch
+1. **e2e-fc §16 resize (test-geometry, not app)**: after §14's +2h downward
+   drag the chip sat at the grid's bottom edge; the +60px resize drag ended
+   below the last hit → FC silently reverts → 0 PUTs. Fix: center the chip
+   vertically inside the timegrid scroller (scrollTop surgery) before the
+   gesture; resizer rect re-read afterwards. Same species as the recorded
+   v6 test-geometry lessons.
+2. **Stress-suite isolation (harness)**: numbered suites A6-1..6 assert
+   server-state absolutes (e.g. "no evt rows after All-events delete") —
+   running them on a shared universe cross-contaminates. Correct runner:
+   ONE fresh universe per suite (`with-stack.sh --fresh <suite>`); all six
+   pass in isolation. NOT app bugs (verified against offending lines).
+3. **USER-REPORTED live bug — dropdown caret next to '+ New event' not sized
+   correctly**: ROOT CAUSE `.button-newevent` carried `margin-bottom: 14px`
+   from its standalone era; inside the flex row the line cross-size became
+   38+14=52px, the main button's border-box excludes its margin (38px) but
+   the caret stretched to the FULL line height (52px) → caret stuck out
+   14px below the button. Fix: spacing moved to `.newevent-group`
+   (margin-bottom: 14px), removed from the button.
+4. **Split-button junction polish (VLM-found, verified by pixel analysis)**:
+   (a) ALL themes: main button's junction-side corners were rounded while
+   the caret's were square → curved notch at the junction. Now radius lives
+   on OUTER corners only (main: TL/BL, caret: TR/BR — 1px gap is the
+   divider). (b) MUI chrome: main rendered 4px (generic group rule beat the
+   20px MUI pill by source order) vs caret 20px → mismatched halves. Now
+   main 20px 0 0 20px + caret 0 20px 20px 0 (MUI demo pill language).
+5. **a11y**: v7 theme chips lack tabindex → event chips now focusable,
+   Enter opens the popover (v6 parity) [crashed-session WIP, verified].
+6. **openEditor Invalid-Date guard**: cleared/stale date input + Enter could
+   throw RangeError in Intl formatting of the WEEKLY label [WIP, verified].
+7. **Escape/backdrop on the recurring-choice modal now routes to the CANCEL
+   path** (reverts a dragged recurring chip) via the overlay stack's
+   registered close [WIP, verified].
+
+### Verification of the dropdown fix
+- `scripts/verify-dropdown2.mjs`: 57/57 — heights equal + top-aligned + group
+  margin 14px + junction radii square + menu anchored (+4px designed gap)
+  across ALL 7 themes; zero errors.
+- VLM audits ×7 themes: heights aligned, junctions seamless, menus anchored,
+  no defects. Pixel analysis of the MUI junction confirmed square junction
+  (full-height colour at the seam, progressive curvature only at the outer
+  pill corners). VLM false-positive at 1x (claimed height mismatch) refuted
+  by 3x zoom + geometry + pixel scan (Commandment: verify before believing).
+
+### Next (user directives queued)
+- 6+ parallel agent LIVE+THEORETICAL security pentest of the deployed Pages
+  client + Cloudflare worker (attacker knows the exact worker source; no
+  security-by-obscurity; password cracking + DDoS OUT OF SCOPE).
+- Then: efficiency + UI-enhancement audit wave.

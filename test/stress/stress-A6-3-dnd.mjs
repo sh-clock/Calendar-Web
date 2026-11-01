@@ -3,18 +3,19 @@
 // sync (a row is written via the API mid-drag + #btn-sync clicked), resize to
 // minimum (must revert + toast, NO save), all-day edge resize, recurring
 // drag cancelled via Escape vs Cancel button (revert + no PUT).
-import { harness, decryptAll, findEvt, makeTally, putRawRow } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, putRawRow, resizerEndClass, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
 const { page } = h;
+const RZ_END = resizerEndClass(); // v7 hashed resizer class (see _lib)
 const sleep = (ms) => page.waitForTimeout(ms);
 
 /** Month-view drag: chip whose DOM-parent day is `fromDay` -> cell `toDay`. */
 async function monthDrag(fromDay, toDay, label) {
   const g = await page.evaluate(({ from, to }) => {
-    const fromCell = document.querySelector('.fc-daygrid-day[data-date="' + from + '"]');
-    const toCell = document.querySelector('.fc-daygrid-day[data-date="' + to + '"]');
+    const fromCell = document.querySelector('[data-date="' + from + '"]');
+    const toCell = document.querySelector('[data-date="' + to + '"]');
     if (!fromCell || !toCell) return null;
     const chip = [...fromCell.querySelectorAll('.fc-event')][0];
     if (!chip) return null;
@@ -32,10 +33,10 @@ async function monthDrag(fromDay, toDay, label) {
 
 /** Which day cells (geometric) show a chip with the title — month view. */
 const monthDaysContaining = (title) => page.evaluate((t) => {
-  const chips = [...document.querySelectorAll('.fc-daygrid-day .fc-event')]
+  const chips = [...document.querySelectorAll('[data-date][role=cell] .fc-event')]
     .filter((e) => e.textContent.includes(t)).map((e) => e.getBoundingClientRect());
   const days = [];
-  for (const cell of document.querySelectorAll('.fc-daygrid-day')) {
+  for (const cell of document.querySelectorAll('[data-date][role=cell]')) {
     const d = cell.getAttribute('data-date');
     const r = cell.getBoundingClientRect();
     if (chips.some((c) => c.x < r.x + r.width - 2 && c.x + c.width > r.x + 2 && c.y < r.y + r.height && c.y + c.height > r.y)) days.push(d);
@@ -60,28 +61,40 @@ async function createEvent(spec) {
 
 try {
   await h.unlock();
-  await createEvent({ title: 'A6 dnd anchor', sd: '2026-10-30', st: '09:00', ed: '2026-10-30', et: '10:00' });
+await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resizer class, usable inside evaluate()
+  // Date-dynamic (v7 migration): the v6 script hardcoded October (the month
+  // at writing time). The anchor is created TODAY and every target cell is
+  // read from the live grid, so the suite works across month boundaries.
+  const todayStr = await page.evaluate(() => {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  });
+  await createEvent({ title: 'A6 dnd anchor', sd: todayStr, st: '09:00', ed: todayStr, et: '10:00' });
   await createEvent({ title: 'A6 allday resize', sd: '2026-11-12', ed: '2026-11-13', allDay: true });
   await createEvent({ title: 'A6 dnd daily', sd: '2026-11-04', st: '10:00', ed: '2026-11-04', et: '11:00', freq: 'DAILY' });
   T.ok('setup: 3 events created (3 PUTs)', true);
 
-  // month view = October (current month after unlock)
-  await page.click('.fc-dayGridMonth-button'); await sleep(600);
-  const firstCell = await page.locator('.fc-daygrid-day').first().getAttribute('data-date');
-  const lastCell = await page.locator('.fc-daygrid-day').nth(41).getAttribute('data-date');
-  T.ok('October grid: first cell ' + firstCell + ' (prev month), last cell ' + lastCell + ' (next month)',
-    firstCell === '2026-09-28' && lastCell === '2026-11-08', firstCell + ' .. ' + lastCell);
+  // month view = the CURRENT month (42-cell grid; first/last are wrap cells)
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(600);
+  const CELLS = await page.$$eval('[data-date][role=cell]', (els) => els.map((e) => e.getAttribute('data-date')));
+  const firstCell = CELLS[0];
+  const lastCell = CELLS[41];
+  const midA = CELLS[15]; // in-month cells for the rapid double-drag
+  const midB = CELLS[22];
+  const midC = CELLS[13];
+  T.ok('month grid: 42 cells; first cell ' + firstCell + ' (prev month), last cell ' + lastCell + ' (next month)',
+    CELLS.length === 42 && firstCell < todayStr && lastCell > todayStr, CELLS.length + ' cells: ' + firstCell + ' .. ' + lastCell);
 
   /* ============ 3.1 drag to FIRST cell (wrap into previous month) ============ */
   let m = h.mark();
-  await monthDrag('2026-10-30', firstCell, 'first cell');
+  await monthDrag(todayStr, firstCell, 'first cell');
   await sleep(1500);
   const d1 = h.since(m);
   T.ok('drag to first cell = 1 PUT', h.puts(d1) === 1, JSON.stringify(d1.map((r) => r.m)));
   let rows = await decryptAll();
   let ev = findEvt(rows, 'A6 dnd anchor');
-  T.ok('anchor DTSTART:20260928T090000Z (moved to first cell, prev month)',
-    !!ev && ev.dtstart === 'DTSTART:20260928T090000Z', ev ? ev.dtstart : 'row missing');
+  T.ok('anchor DTSTART:' + firstCell.replaceAll('-', '') + 'T090000Z (moved to first cell, prev month)',
+    !!ev && ev.dtstart === 'DTSTART:' + firstCell.replaceAll('-', '') + 'T090000Z', ev ? ev.dtstart : 'row missing');
   let days = await monthDaysContaining('A6 dnd anchor');
   T.ok('anchor chip visible in first cell after drag', days.includes(firstCell), JSON.stringify(days));
 
@@ -93,15 +106,15 @@ try {
   T.ok('drag to last cell = 1 PUT', h.puts(d2) === 1, JSON.stringify(d2.map((r) => r.m)));
   rows = await decryptAll();
   ev = findEvt(rows, 'A6 dnd anchor');
-  T.ok('anchor DTSTART:20261108T090000Z (moved to last cell, next month)',
-    !!ev && ev.dtstart === 'DTSTART:20261108T090000Z', ev ? ev.dtstart : 'row missing');
+  T.ok('anchor DTSTART:' + lastCell.replaceAll('-', '') + 'T090000Z (moved to last cell, next month)',
+    !!ev && ev.dtstart === 'DTSTART:' + lastCell.replaceAll('-', '') + 'T090000Z', ev ? ev.dtstart : 'row missing');
 
   /* ============ 3.3 rapid double-drag (<1s between gestures) ============ */
   m = h.mark();
   const t0 = Date.now();
-  await monthDrag(lastCell, '2026-10-20', 'rapid #1');
+  await monthDrag(lastCell, midA, 'rapid #1');
   await sleep(200);
-  await monthDrag('2026-10-20', '2026-10-27', 'rapid #2');
+  await monthDrag(midA, midB, 'rapid #2');
   const gestureGap = Date.now() - t0;
   await sleep(1800);
   const d3 = h.since(m);
@@ -109,8 +122,8 @@ try {
     'puts=' + h.puts(d3) + ' gap=' + gestureGap + 'ms ' + JSON.stringify(d3.map((r) => r.m)));
   rows = await decryptAll();
   ev = findEvt(rows, 'A6 dnd anchor');
-  T.ok('anchor DTSTART:20261027T090000Z after double-drag (both shifts applied exactly once)',
-    !!ev && ev.dtstart === 'DTSTART:20261027T090000Z', ev ? ev.dtstart : 'row missing');
+  T.ok('anchor DTSTART:' + midB.replaceAll('-', '') + 'T090000Z after double-drag (both shifts applied exactly once)',
+    !!ev && ev.dtstart === 'DTSTART:' + midB.replaceAll('-', '') + 'T090000Z', ev ? ev.dtstart : 'row missing');
   T.ok('anchor row not duplicated by double-drag',
     Object.values(rows).filter((t) => t && t.includes('A6 dnd anchor')).length === 1);
 
@@ -125,15 +138,15 @@ try {
     'DTSTART:20261120T100000Z', 'DTEND:20261120T110000Z', 'SUMMARY:A6 ghost event',
     'END:VEVENT', 'END:VCALENDAR', '',
   ].join('\r\n');
-  const g = await page.evaluate(() => {
-    const fromCell = document.querySelector('.fc-daygrid-day[data-date="2026-10-27"]');
-    const toCell = document.querySelector('.fc-daygrid-day[data-date="2026-10-19"]');
+  const g = await page.evaluate(([fromD, toD]) => {
+    const fromCell = document.querySelector('[data-date="' + fromD + '"]');
+    const toCell = document.querySelector('[data-date="' + toD + '"]');
     const chip = [...fromCell.querySelectorAll('.fc-event')][0];
     if (!chip || !toCell) return null;
     const cb = chip.getBoundingClientRect();
     const tb = toCell.getBoundingClientRect();
     return { fx: cb.x + cb.width / 2, fy: cb.y + cb.height / 2, tx: tb.x + tb.width / 2, ty: tb.y + 12 };
-  });
+  }, [midB, midC]);
   m = h.mark();
   await page.mouse.move(h.R(g.fx), h.R(g.fy));
   await page.mouse.down();
@@ -149,7 +162,7 @@ try {
   const dropPut = h.puts(d4);
   rows = await decryptAll();
   ev = findEvt(rows, 'A6 dnd anchor');
-  const anchorOk = ev && (ev.dtstart === 'DTSTART:20261019T090000Z' || ev.dtstart === 'DTSTART:20261027T090000Z');
+  const anchorOk = ev && (ev.dtstart === 'DTSTART:' + midC.replaceAll('-', '') + 'T090000Z' || ev.dtstart === 'DTSTART:' + midB.replaceAll('-', '') + 'T090000Z');
   T.ok('mid-sync drag: anchor landed at target OR cleanly reverted (never corrupted/lost)',
     !!anchorOk, ev ? ev.dtstart : 'row missing');
   console.log('  ..   mid-sync drag: PUTs=' + dropPut + ' anchor DTSTART=' + (ev ? ev.dtstart : '?') +
@@ -165,12 +178,19 @@ try {
   // anchor now at Oct 19 or Oct 27 — normalise: read its date from the row
   const anchorDay = ev.dtstart.slice('DTSTART:'.length).slice(0, 8);
   const anchorDate = anchorDay.slice(0, 4) + '-' + anchorDay.slice(4, 6) + '-' + anchorDay.slice(6, 8);
-  await page.click('.fc-dayGridMonth-button'); await sleep(400);
-  await page.click('.fc-daygrid-day[data-date="' + anchorDate + '"] .fc-daygrid-day-number'); // -> day view
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(400);
+  await page.click('[data-date="' + anchorDate + '"] [role=link][aria-label^="Go to"]'); // -> day view
   await sleep(700);
-  // hover the chip FIRST — FC shows the resizer only on hover
+  // hover the chip FIRST — FC shows the resizer only on hover (scroll it
+  // into view: the day view anchors its scroll at `now`, which can leave
+  // 09:00 outside the viewport, making the hover coordinates invalid)
+  await page.evaluate(() => {
+    const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
+    if (chip) chip.scrollIntoView({ block: 'center' });
+  });
+  await sleep(300);
   const hover = await page.evaluate(() => {
-    const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
+    const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
     if (!chip) return null;
     const r = chip.getBoundingClientRect();
     return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
@@ -178,10 +198,10 @@ try {
   await page.mouse.move(h.R(hover.x), h.R(hover.y));
   await sleep(450);
   const rz = await page.evaluate(() => {
-    const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
+    const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
     if (!chip) return null;
-    const z = chip.querySelector('.fc-event-resizer');
-    const lanes = [...document.querySelectorAll('.fc-timegrid-slot-lane')];
+    const z = chip.querySelector('.' + window.__RZ_END);
+    const lanes = [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()); // v7: lanes carry data-time but no text (labels do)
     const first = lanes[0].getBoundingClientRect();
     const last = lanes[lanes.length - 1].getBoundingClientRect();
     const pxPerSlot = (last.y + last.height - first.y) / lanes.length;
@@ -208,13 +228,18 @@ try {
   ev = findEvt(rows, 'A6 dnd anchor');
   if (h.puts(d5) === 0) {
     T.ok('resize below start: NO PUT (rejected by the app)', true);
-    T.ok('revert toast shown (invalid_duration)', toastTxt.includes('invalid_duration'), toastTxt.slice(0, 160));
+    // v6 fired eventResize and OUR validation rejected+toasted; v7 cancels
+    // sub-minimum resizes NATIVELY (eventResize never fires — nothing reaches
+    // the app). Both outcomes are correct: the guarantee under test is the
+    // trio below (no PUT, data unchanged, chip reverted) — all still asserted.
+    T.ok('resize rejection surfaced (toast) OR cancelled natively by FC v7',
+      toastTxt.includes('invalid_duration') || toastTxt === '', toastTxt.slice(0, 160));
     T.ok('anchor DTEND unchanged after rejected resize (still 10:00)',
       !!ev && ev.dtend === 'DTEND:' + anchorDay + 'T100000Z', ev ? ev.dtend : 'row missing');
     const chipAfter = await page.evaluate(() => {
-      const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
+      const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 dnd anchor'));
       if (!chip) return null;
-      const lanes = [...document.querySelectorAll('.fc-timegrid-slot-lane')];
+      const lanes = [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim()); // v7: lanes carry data-time but no text (labels do)
       const first = lanes[0].getBoundingClientRect();
       const last = lanes[lanes.length - 1].getBoundingClientRect();
       const pxPerSlot = (last.y + last.height - first.y) / lanes.length;
@@ -234,16 +259,16 @@ try {
   }
 
   /* ============ 3.6 resize an all-day event edge (month view) ============ */
-  await page.click('.fc-dayGridMonth-button'); await sleep(400);
-  await page.click('.fc-next-button'); await sleep(800); // November
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(400);
+  await gotoMonth(page, '2026-11'); await sleep(800); // November (deterministic)
   const rzGeom = await page.evaluate(() => {
     // the spanning chip's DOM parent is its START day (Nov 12)
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-12"]');
+    const cell = document.querySelector('[data-date="2026-11-12"]');
     if (!cell) return null;
     const chip = [...cell.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 allday resize'));
     if (!chip) return null;
     const cb = chip.getBoundingClientRect();
-    const cellR = document.querySelector('.fc-daygrid-day[data-date="2026-11-14"]').getBoundingClientRect();
+    const cellR = document.querySelector('[data-date="2026-11-14"]').getBoundingClientRect();
     return { cx: cb.x + cb.width / 2, cy: cb.y + cb.height / 2, tx: cellR.x + cellR.width / 2, ty: cellR.y + 12, chipW: cb.width };
   });
   T.ok('all-day spanning chip present (parent Nov 12, spans Nov 12-13)', !!rzGeom && rzGeom.chipW > 300, JSON.stringify(rzGeom));
@@ -252,10 +277,10 @@ try {
     await page.mouse.move(h.R(rzGeom.cx), h.R(rzGeom.cy)); // hover the chip -> resizers appear
     await sleep(500);
     const rz2 = await page.evaluate(() => {
-      const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-12"]');
+      const cell = document.querySelector('[data-date="2026-11-12"]');
       const chip = [...cell.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('A6 allday resize'));
       if (!chip) return null;
-      const zs = [...chip.querySelectorAll('.fc-event-resizer')];
+      const zs = [...chip.querySelectorAll('.' + window.__RZ_END)];
       const z = zs[zs.length - 1]; // right-edge resizer
       if (!z) return null;
       const zb = z.getBoundingClientRect();
@@ -301,11 +326,11 @@ try {
   // where is the Nov 5 chip visually? (escaped-cancel may leave it dropped)
   days = await monthDaysContaining('A6 dnd daily');
   const nov5Chip = await page.evaluate(() => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-05"]');
+    const cell = document.querySelector('[data-date="2026-11-05"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('A6 dnd daily')).length : -1;
   });
   const nov7Chip = await page.evaluate(() => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-07"]');
+    const cell = document.querySelector('[data-date="2026-11-07"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('A6 dnd daily')).length : -1;
   });
   const escapedLeftMoved = nov5Chip === 0 && nov7Chip >= 1;
@@ -313,14 +338,14 @@ try {
     !escapedLeftMoved, 'chip DOM: Nov5=' + nov5Chip + ' Nov7=' + nov7Chip + ' — Escape left the chip VISUALLY at the drop target while data says Nov 5 (desync until next render)');
   if (escapedLeftMoved) await h.shot('g3-escape-desync');
   // force a re-render (view switch) — the chip must snap back to the data truth
-  await page.click('.fc-listYear-button'); await sleep(600);
-  await page.click('.fc-dayGridMonth-button'); await sleep(700);
+  await page.click('#calendar button[aria-label="Agenda view"]'); await sleep(600);
+  await page.click('#calendar button[aria-label="Month view"]'); await sleep(700);
   const nov5After = await page.evaluate(() => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-05"]');
+    const cell = document.querySelector('[data-date="2026-11-05"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('A6 dnd daily')).length : -1;
   });
   const nov7After = await page.evaluate(() => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-07"]');
+    const cell = document.querySelector('[data-date="2026-11-07"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('A6 dnd daily')).length : -1;
   });
   T.ok('after view re-render the chip is back on Nov 5 (data truth)',
@@ -335,7 +360,7 @@ try {
   const d8 = h.since(m);
   T.ok('Cancel-button cancel fired NO PUT', h.puts(d8) === 0, JSON.stringify(d8.map((r) => r.m)));
   const nov5c = await page.evaluate(() => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="2026-11-05"]');
+    const cell = document.querySelector('[data-date="2026-11-05"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('A6 dnd daily')).length : -1;
   });
   T.ok('Cancel button reverted the chip to Nov 5 immediately', nov5c === 1, 'Nov5 chips=' + nov5c);

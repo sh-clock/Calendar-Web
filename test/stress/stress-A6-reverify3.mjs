@@ -1,7 +1,7 @@
 // reverify3 — disambiguate the Escape-desync: assert the choice modal is
 // ACTUALLY open before dismissing; then Escape; sample chip position at
 // 0/2/5 s. Repeat with backdrop click. Reference: Cancel button.
-import { harness, decryptAll, findEvt, makeTally } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
@@ -19,18 +19,17 @@ try {
   await page.selectOption('select[aria-label="Frequency"]', 'DAILY');
   await page.click('#editor-modal .button-primary');
   await sleep(1200);
-  await page.click('.fc-dayGridMonth-button'); await sleep(600);
-  await page.click('.fc-next-button'); await sleep(600); // November guaranteed
+  await gotoMonth(page, '2026-11'); await sleep(600); // November (deterministic)
 
   const chipCount = (day) => page.evaluate((d) => {
-    const cell = document.querySelector('.fc-daygrid-day[data-date="' + d + '"]');
+    const cell = document.querySelector('[data-date="' + d + '"]');
     return cell ? [...cell.querySelectorAll('.fc-event')].filter((e) => e.textContent.includes('RV3 daily')).length : -1;
   }, day);
 
   async function monthDrag(fromDay, toDay) {
     const g = await page.evaluate(({ from, to }) => {
-      const fromCell = document.querySelector('.fc-daygrid-day[data-date="' + from + '"]');
-      const toCell = document.querySelector('.fc-daygrid-day[data-date="' + to + '"]');
+      const fromCell = document.querySelector('[data-date="' + from + '"]');
+      const toCell = document.querySelector('[data-date="' + to + '"]');
       const chip = fromCell && [...fromCell.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('RV3 daily'));
       if (!chip || !toCell) return null;
       const cb = chip.getBoundingClientRect();
@@ -73,8 +72,8 @@ try {
       console.log('  ..   ' + c.name + ': +5s Nov5=' + src5 + ' ' + target + '=' + tgt5 + ' (still desynced unless 1/1)');
     }
     // restore view truth for the next case if the chip is stuck visually
-    await page.click('.fc-listYear-button'); await sleep(500);
-    await page.click('.fc-dayGridMonth-button'); await sleep(700);
+    await page.click('#calendar button[aria-label="Agenda view"]'); await sleep(500);
+    await page.click('#calendar button[aria-label="Month view"]'); await sleep(700);
   }
 
   const rows = await decryptAll();

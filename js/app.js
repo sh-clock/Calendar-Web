@@ -1489,7 +1489,13 @@ function handleEventClick(info) {
  * (a re-mount of the same element never duplicates the box). */
 function onEventDidMount(arg) {
   const ev = arg.event.extendedProps.ev;
-  if (!ev || !ev.isTask || arg.isMirror) return;
+  if (!ev) return;
+  // Keyboard accessibility: v7 themes do not set tabindex on event chips —
+  // add it so chips are focusable and Enter opens the popover (v6 parity).
+  if (!arg.isMirror && arg.el.getAttribute('tabindex') === null) {
+    arg.el.setAttribute('tabindex', '0');
+  }
+  if (!ev.isTask || arg.isMirror) return;
   const root = arg.el;
   if (root.querySelector(':scope > .fc-task-check, :scope .fc-event-main > .fc-task-check')) return;
   const box = el('span', 'fc-task-check' + (ev.isCompleted ? ' is-completed' : ''), {
@@ -2302,10 +2308,14 @@ function openEditor(form) {
     freqSel.replaceChildren();
     for (const p of FREQ_PRESETS) {
       let label = p.label;
+      // Guard: a mid-edit / cleared date input must never throw here —
+      // Intl formatting an Invalid Date raises RangeError (found by the
+      // A6 UI-robustness stress when Enter landed on a stale input).
       const d = new Date(f.start.date + 'T00:00:00');
-      if (p.key === 'WEEKLY') label += ' ' + WEEKDAY_LONG[(d.getDay() + 6) % 7];
-      if (p.key === 'MONTHLY') label += ' the ' + Number(f.start.date.slice(8));
-      if (p.key === 'YEARLY') label += ' ' + fmtDayMonth.format(d);
+      const dOk = typeof f.start.date === 'string' && f.start.date.length === 10 && !Number.isNaN(d.getTime());
+      if (p.key === 'WEEKLY' && dOk) label += ' ' + WEEKDAY_LONG[(d.getDay() + 6) % 7];
+      if (p.key === 'MONTHLY' && dOk) label += ' the ' + Number(f.start.date.slice(8));
+      if (p.key === 'YEARLY' && dOk) label += ' ' + fmtDayMonth.format(d);
       if (p.key === 'CUSTOM' && editor.custom) label = 'Custom… (' + editor.custom + ')';
       freqSel.appendChild(el('option', null, { value: p.key, text: label }));
     }
@@ -3127,24 +3137,30 @@ async function applyCompletionChange(ev, scope, completed) {
 function openRecurringChoice(title, choose, onCancel) {
   const modal = $('#recur-modal');
   const backdrop = $('#recur-backdrop');
-  const close = () => closeModalSurface(modal, backdrop);
+  // Two close paths: choosing closes neutrally; dismissing without choosing
+  // (Cancel button, Escape, backdrop click) is a CANCEL — drag/resize flows
+  // pass onCancel to revert the chip (F-A1-1/F-A1-2; the same semantics are
+  // now wired through the overlay stack so Escape/backdrop cannot strand a
+  // dragged recurring chip at its drop target with no PUT).
+  const closeChoose = () => closeModalSurface(modal, backdrop);
+  const closeCancel = () => { closeModalSurface(modal, backdrop); if (onCancel) onCancel(); };
   const box = el('div');
   box.appendChild(el('h1', { text: title }));
   const btns = el('div', 'recur-choices');
   const bAll = el('button', 'button button-outline', { type: 'button', text: 'All events' });
-  bAll.addEventListener('click', () => { close(); choose('all'); });
+  bAll.addEventListener('click', () => { closeChoose(); choose('all'); });
   const bOne = el('button', 'button button-outline', { type: 'button', text: 'This event' });
-  bOne.addEventListener('click', () => { close(); choose('exception'); });
+  bOne.addEventListener('click', () => { closeChoose(); choose('exception'); });
   const bCancel = el('button', 'button button-ghost', { type: 'button', text: 'Cancel' });
   // F-A1-1/F-A1-2 (audit wave): Cancel must NOT reach `choose` — the
   // backbone callers (beginDelete/beginEdit) treat their argument as a
   // SCOPE ('all'|'exception') and would execute destructive work for any
   // other string. Drag/resize flows pass onCancel to revert the chip.
-  bCancel.addEventListener('click', () => { close(); if (onCancel) onCancel(); });
+  bCancel.addEventListener('click', closeCancel);
   btns.append(bAll, bOne, bCancel);
   box.appendChild(btns);
   modal.replaceChildren(box);
-  openModalSurface(modal, backdrop, close);
+  openModalSurface(modal, backdrop, closeCancel);
   bAll.focus();
 }
 
@@ -3775,7 +3791,13 @@ function bind() {
   });
   $('#recur-backdrop').addEventListener('click', () => {
     const modal = $('#recur-modal');
-    if (!modal.hidden) closeModalSurface(modal, $('#recur-backdrop'));
+    if (modal.hidden) return;
+    // Route through the overlay stack's registered close: for the recurring
+    // choice modal that is the CANCEL path (reverts a dragged chip). Falls
+    // back to a plain close if the entry is somehow missing.
+    const entry = overlayStack.find((o) => o.node === modal);
+    if (entry) entry.close();
+    else closeModalSurface(modal, $('#recur-backdrop'));
   });
   $('#cal-backdrop').addEventListener('click', () => {
     const modal = $('#cal-modal');

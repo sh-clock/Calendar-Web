@@ -3,6 +3,7 @@
 import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.mjs';
 import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { resizerEndClass } from './_lib.mjs';
 
 const mat = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8'));
 const AUTH_UI = mat.auth_ui_hex;
@@ -11,6 +12,7 @@ const SERVER = 'http://127.0.0.1:8787';
 let pass = 0, fail = 0;
 const ok = (n, c, d) => { if (c) { pass++; console.log('  ok  ' + n); } else { fail++; console.log('  FAIL ' + n + (d ? ' — ' + d : '')); } };
 const R = Math.round;
+const RZ_END = resizerEndClass(); // v7 hashed resizer class (see _lib)
 
 async function decryptAll() {
   const subtle = webcrypto.subtle;
@@ -43,6 +45,7 @@ const mark = () => reqs.length;
 await page.goto('http://127.0.0.1:8080/?server=' + SERVER + '&setup=' + AUTH_UI);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
+await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resizer class, usable inside evaluate()
 await page.click('button[type=submit]');
 await page.waitForSelector('#app:not([hidden])', { timeout: 30000 });
 await page.waitForTimeout(1200);
@@ -57,7 +60,7 @@ await page.waitForTimeout(1400);
 let m = mark();
 let chip = page.locator('.fc-event', { hasText: 'DND target' }).first();
 let b = await chip.boundingBox();
-let first = await page.locator('.fc-daygrid-day').first().boundingBox();
+let first = await page.locator('[data-date][role=cell]').first().boundingBox();
 await page.mouse.move(R(b.x + b.width / 2), R(b.y + b.height / 2));
 await page.mouse.down();
 await page.mouse.move(R(first.x + first.width / 2), R(first.y + 12), { steps: 22 });
@@ -67,7 +70,7 @@ const leadReqs = reqs.slice(m);
 ok('drag to leading cell = 1 PUT', leadReqs.filter(x => x === 'PUT').length === 1, JSON.stringify(leadReqs));
 let rows = await decryptAll();
 let r = Object.values(rows).find(v => v && v.includes('DND target'));
-const leadDate = await page.evaluate(() => document.querySelector('.fc-daygrid-day').getAttribute('data-date'));
+const leadDate = await page.evaluate(() => document.querySelector('[data-date][role=cell]').getAttribute('data-date'));
 ok('event stored at the leading cell date', !!r && r.includes('DTSTART:' + leadDate.replaceAll('-', '')),
   'target=' + leadDate + ' got=' + (r ? (r.match(/DTSTART:[^\r\n]+/) || ['?'])[0] : 'missing'));
 
@@ -75,8 +78,8 @@ ok('event stored at the leading cell date', !!r && r.includes('DTSTART:' + leadD
 m = mark();
 chip = page.locator('.fc-event', { hasText: 'DND target' }).first();
 b = await chip.boundingBox();
-const last = await page.locator('.fc-daygrid-day').last().boundingBox();
-const lastDate = await page.evaluate(() => [...document.querySelectorAll('.fc-daygrid-day')].pop().getAttribute('data-date'));
+const last = await page.locator('[data-date][role=cell]').last().boundingBox();
+const lastDate = await page.evaluate(() => [...document.querySelectorAll('[data-date][role=cell]')].pop().getAttribute('data-date'));
 await page.mouse.move(R(b.x + b.width / 2), R(b.y + b.height / 2));
 await page.mouse.down();
 await page.mouse.move(R(last.x + last.width / 2), R(last.y + 12), { steps: 22 });
@@ -90,7 +93,7 @@ ok('event stored at the trailing cell date', !!r && r.includes('DTSTART:' + last
   'target=' + lastDate + ' got=' + (r ? (r.match(/DTSTART:[^\r\n]+/) || ['?'])[0] : 'missing'));
 
 /* ---- 3. resize to minimum → revert + NO PUT ---- */
-await page.click('.fc-timeGridWeek-button');
+await page.click('#calendar button[aria-label="Week view"]');
 await page.waitForTimeout(600);
 // 'DND target' now lives in the NEXT month (trailing-cell drag) — create a
 // fresh timed event in the CURRENT week for the resize test.
@@ -98,7 +101,7 @@ await page.click('#btn-new-event');
 await page.fill('input[aria-label="Title"]', 'DND resize');
 await page.click('#editor-modal .button-primary');
 await page.waitForTimeout(1400);
-const tchip = page.locator('.fc-timegrid-event', { hasText: 'DND resize' }).first();
+const tchip = page.locator('.fc-event', { hasText: 'DND resize' }).first();
 if ((await tchip.count()) === 0) {
   ok('timed chip present in week view', false, 'not found');
 } else {
@@ -107,9 +110,9 @@ if ((await tchip.count()) === 0) {
   let rz = null;
   for (let i = 0; i < 6 && !rz; i++) {
     rz = await page.evaluate(() => {
-      for (const e of document.querySelectorAll('.fc-timegrid-event')) {
+      for (const e of document.querySelectorAll('.fc-event')) {
         if (e.textContent.includes('DND resize')) {
-          const z = e.querySelector('.fc-event-resizer');
+          const z = e.querySelector('.' + window.__RZ_END);
           if (z && z.getBoundingClientRect().height > 0) return z.getBoundingClientRect().toJSON();
         }
       }

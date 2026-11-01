@@ -2,7 +2,11 @@
 // Creates events via the editor at boundary times, verifies rendering in the
 // correct day/time slots (GEOMETRIC containment — FC multi-day chips span
 // cells from their start-day DOM parent) AND exact DTSTART/DTEND round-trip.
-import { harness, decryptAll, findEvt, makeTally } from './_lib.mjs';
+// MIGRATED to FullCalendar v7 DOM (E2E-MIG-B): day cells [role=cell][data-date],
+// slot lanes = empty [data-time] strips, timed chips = .fc-event inside the
+// tall timegrid columns, navLink day numbers = [role=link] in the cell,
+// toolbar buttons by aria-label.
+import { harness, decryptAll, findEvt, makeTally, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
@@ -35,11 +39,13 @@ async function createEvent(spec) {
 
 /** Day cells (month view) GEOMETRICALLY covered by a chip with the title. */
 const monthDaysContaining = (title) => page.evaluate((t) => {
-  const chips = [...document.querySelectorAll('.fc-daygrid-day .fc-event')]
+  // v7: dayGrid events render in an absolutely-positioned layer (NOT DOM
+  // children of the cells) — collect ALL chips and intersect geometrically.
+  const chips = [...document.querySelectorAll('.fc-event')]
     .filter((e) => e.textContent.includes(t))
     .map((e) => e.getBoundingClientRect());
   const days = [];
-  for (const cell of document.querySelectorAll('.fc-daygrid-day')) {
+  for (const cell of document.querySelectorAll('[role="cell"][data-date]')) {
     const d = cell.getAttribute('data-date');
     const r = cell.getBoundingClientRect();
     if (chips.some((c) => c.x < r.x + r.width - 2 && c.x + c.width > r.x + 2 && c.y < r.y + r.height && c.y + c.height > r.y)) days.push(d);
@@ -47,15 +53,21 @@ const monthDaysContaining = (title) => page.evaluate((t) => {
   return days;
 }, title);
 
-/** Time position of a timed chip in the CURRENT timegrid view, in 30-min slots. */
+/** Time position of a timed chip in the CURRENT timegrid view, in 30-min slots.
+ *  (v7: timed chips are .fc-event elements inside the TALL timegrid columns;
+ *  the 48 empty [data-time] strips are the slot lanes.) */
 const chipGeom = (title) => page.evaluate((t) => {
-  const chip = [...document.querySelectorAll('.fc-timegrid-event')].find((e) => e.textContent.includes(t));
-  if (!chip) return null;
-  const lanes = [...document.querySelectorAll('.fc-timegrid-slot-lane')];
+  const lanes = [...document.querySelectorAll('[data-time]')].filter((e) => !e.textContent.trim());
   if (!lanes.length) return null;
   const first = lanes[0].getBoundingClientRect();
   const last = lanes[lanes.length - 1].getBoundingClientRect();
   const pxPerSlot = (last.y + last.height - first.y) / lanes.length;
+  const isTimed = (el) => {
+    const cell = el.closest('[role="cell"]');
+    return !!cell && !!cell.getAttribute('data-date') && cell.getBoundingClientRect().height > 300;
+  };
+  const chip = [...document.querySelectorAll('.fc-event')].filter(isTimed).find((e) => e.textContent.includes(t));
+  if (!chip) return null;
   const cr = chip.getBoundingClientRect();
   return { topSlots: (cr.y - first.y) / pxPerSlot, heightSlots: cr.height / pxPerSlot, text: chip.textContent.trim() };
 }, title);
@@ -73,9 +85,9 @@ try {
   }
 
   /* ---- month view: day-slot rendering (geometric) ---- */
-  await page.click('.fc-dayGridMonth-button');
+  await page.click('#calendar button[aria-label="Month view"]');
   await page.waitForTimeout(400);
-  await page.click('.fc-next-button'); // October -> November
+  await gotoMonth(page, '2026-11'); // deterministic (clock crossed into Nov — relative nav broke)
   await page.waitForTimeout(700);
 
   const md = {};
@@ -95,9 +107,9 @@ try {
 
   /* ---- day view: precise time-slot geometry (navLinks on day numbers) ---- */
   async function dayViewOf(date) {
-    await page.click('.fc-dayGridMonth-button');
+    await page.click('#calendar button[aria-label="Month view"]');
     await page.waitForTimeout(400);
-    await page.click('.fc-daygrid-day[data-date="' + date + '"] .fc-daygrid-day-number');
+    await page.click('[role="cell"][data-date="' + date + '"] [role="link"]'); // v7 day-number navLink
     await page.waitForTimeout(500);
   }
 
@@ -107,24 +119,24 @@ try {
     g ? 'topSlots=' + g.topSlots.toFixed(2) : 'chip missing');
   T.ok('Nov 4 day view: midnight event clipped to 1 slot (23:30-24:00)', !!g && near(g.heightSlots, 1, 0.8),
     g ? 'heightSlots=' + g.heightSlots.toFixed(2) : 'chip missing');
-  await page.click('.fc-next-button'); await page.waitForTimeout(400); // Nov 5
+  await page.click('#calendar button[aria-label^="Next"]'); await page.waitForTimeout(400); // Nov 5
   g = await chipGeom(E.midnight.title);
   T.ok('Nov 5 day view: midnight continuation top ~00:00 (slot 0)', !!g && near(g.topSlots, 0, 1.2),
     g ? 'topSlots=' + g.topSlots.toFixed(2) : 'chip missing');
 
   await dayViewOf('2026-11-10');
-  const ad1 = await page.locator('.fc-daygrid-event', { hasText: 'A6 allday 1day' }).count();
+  const ad1 = await page.locator('.fc-event', { hasText: 'A6 allday 1day' }).count();
   T.ok('all-day 1-day chip present in Nov 10 day view', ad1 >= 1, 'count=' + ad1);
 
   await dayViewOf('2026-11-12');
-  const ad5 = await page.locator('.fc-daygrid-event', { hasText: 'A6 allday 5day' }).count();
+  const ad5 = await page.locator('.fc-event', { hasText: 'A6 allday 5day' }).count();
   T.ok('all-day 5-day chip present in Nov 12 day view', ad5 >= 1, 'count=' + ad5);
 
   await dayViewOf('2026-11-18');
   g = await chipGeom(E.multi222.title);
   T.ok('Nov 18 day view: 22:00 event top ~slot 44 (22:00)', !!g && near(g.topSlots, 44, 1.2),
     g ? 'topSlots=' + g.topSlots.toFixed(2) : 'chip missing');
-  await page.click('.fc-next-button'); await page.waitForTimeout(400); // Nov 19
+  await page.click('#calendar button[aria-label^="Next"]'); await page.waitForTimeout(400); // Nov 19
   g = await chipGeom(E.multi222.title);
   T.ok('Nov 19 day view: 22-02 continuation top ~0, height ~4 slots (00:00-02:00)',
     !!g && near(g.topSlots, 0, 1.2) && near(g.heightSlots, 4, 0.8),
@@ -176,7 +188,7 @@ try {
 T.ok('no page errors during group 1', h.pageErrors.length === 0, h.pageErrors.join(' | ').slice(0, 400));
 T.ok('no console errors during group 1', h.consoleErrors.length === 0, h.consoleErrors.join(' | ').slice(0, 400));
 
-await page.click('.fc-dayGridMonth-button').catch(() => {});
+await page.click('#calendar button[aria-label="Month view"]').catch(() => {});
 await page.waitForTimeout(400);
 await h.shot('g1-final');
 console.log('\n=== GROUP 1 (EDGE-TIME EVENTS): ' + T.summary() + ' ===');

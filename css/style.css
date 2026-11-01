@@ -126,7 +126,7 @@ input, select, textarea { font: inherit; color: var(--text-norm); }
 .button-danger { color: var(--signal-danger); }
 .button-danger:hover { background: var(--signal-danger-minor-2); }
 .icon-only { padding: 6px 8px; font-size: 16px; line-height: 1; }
-.button-newevent { width: 100%; margin-bottom: 14px; padding: 8px 14px; }
+.button-newevent { width: 100%; padding: 8px 14px; }
 .button-newevent .ic { width: 14px; height: 14px; }
 
 /* ---------- top bar / app shell ---------- */
@@ -826,8 +826,16 @@ html[data-density="compact"] { --width-sidebar: 220px; --header-height: 48px; }
 }
 
 /* ---------- new-event / new-task split (Fossify MainActivity split) ---------- */
-.newevent-group { display: flex; gap: 0; }
-.newevent-group .button-newevent { flex: 1 1 auto; border-radius: var(--border-radius-md); }
+/* The spacing below the split belongs to the GROUP: a margin on the main
+ * button (leftover from its standalone era) inflates the flex line's cross
+ * size — the main button's border-box excludes its margin but the caret
+ * stretches to the full line height, so the caret rendered 14px taller
+ * than the button it is attached to (user-reported on the live site). */
+.newevent-group { display: flex; gap: 0; margin-bottom: 14px; }
+/* Split-button junction: radius on the OUTER corners only — the main
+ * button's right corners and the caret's left corners stay square so the
+ * two halves read as one connected control (the 1px gap is the divider). */
+.newevent-group .button-newevent { flex: 1 1 auto; border-radius: var(--border-radius-md) 0 0 var(--border-radius-md); }
 .newevent-group .button-newtask-caret {
   flex: 0 0 auto;
   margin-left: 1px;
@@ -840,6 +848,15 @@ html[data-density="compact"] { --width-sidebar: 220px; --header-height: 48px; }
   justify-content: center;
 }
 .new-task-menu { z-index: var(--z-floating-frames); }
+/* MUI chrome: both split halves are pill-shaped (radius 20px per the demo
+ * override); the JUNCTION sides stay square so the split reads as one
+ * connected button. (0,3,0) specificity beats the generic group rules. */
+[data-fctheme="mui"] .newevent-group .button-newevent {
+  border-radius: 20px 0 0 20px;
+}
+[data-fctheme="mui"] .newevent-group .button-newtask-caret {
+  border-radius: 0 20px 20px 0;
+}
 
 /* ---------- settings segment wrap (7 themes need multiple rows) ---------- */
 .settings-segment-wrap { flex-wrap: wrap; }
