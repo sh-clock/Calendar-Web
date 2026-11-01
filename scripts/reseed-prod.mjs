@@ -45,11 +45,20 @@ const manifest = async () =>
 // ---- 1. remove everything except the user's original calendar ----
 {
   const rows = await manifest();
+  let keptMain = false;
   for (const r of rows) {
-    if (r.id === 'cmeta:' + MAIN) continue;
+    if (r.id === 'cmeta:' + MAIN) { keptMain = true; continue; }
     await del(r.id);
   }
-  console.log('reset: removed', rows.length - 1, 'rows (kept My calendar)');
+  // A force re-bootstrap wipes EVERY row — the "original" cmeta included.
+  // Recreate it so the MAIN-anchored events below always have their calendar
+  // (the client drops events whose cmeta row is absent).
+  if (!keptMain) {
+    await put('cmeta:' + MAIN, 1, JSON.stringify({ v: 1, name: 'My calendar', color: '#0072BC' }));
+    console.log('recreated calendar: My calendar (' + MAIN + ') — original was wiped by a rotation');
+  } else {
+    console.log('reset: kept My calendar');
+  }
 }
 
 // ---- 2. one Personal calendar ----
