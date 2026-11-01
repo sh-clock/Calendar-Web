@@ -61,12 +61,15 @@ for (const host of ['localhost:8787', '127.0.0.1:8788', '[::1]:8787', 'sub.local
   ok(`fd.2 http://${host} NOT redirected (dev exemption)`, res.status === 200 && seen.length === 1 && seen[0].url === `https://do.internal/rows`);
 }
 
-// ---- fd.3: https passes through; only 4 headers forwarded ----
+// ---- fd.3: bodied PUT passes through; exactly 4 headers forwarded ----
+// (VP5-Q3: use a BODIED non-GET so the streaming path is exercised, and pin
+// the VALUES of all four forwarded headers — not just presence.)
 {
   const { env, seen } = makeEnv();
-  const res = await worker.fetch(new Request('https://calendar-poc.sh-clock.workers.dev/rows', {
+  const res = await worker.fetch(new Request('https://calendar-poc.sh-clock.workers.dev/rows/x%20y', {
+    method: 'PUT',
     headers: {
-      authorization: 'Bearer ' + '11'.repeat(32),
+      authorization: 'Bearer ' + 'ab'.repeat(32),
       'content-type': 'application/json',
       'if-match': '"5"',
       'if-none-match': '"e46"',
@@ -74,11 +77,13 @@ for (const host of ['localhost:8787', '127.0.0.1:8788', '[::1]:8787', 'sub.local
       cookie: 'a=b',
       'x-forwarded-for': '9.9.9.9',
     },
+    body: JSON.stringify({ ver: 1, nonce: 'AAAA', ct: 'AAAAAAAAAAAAAAAAAAAAAA' }),
   }), env);
-  ok('fd.3 DO reached, body untouched', res.status === 200 && seen.length === 1);
+  ok('fd.3 bodied PUT relayed to the DO (original path, query-free)', res.status === 200 && seen.length === 1 && seen[0].url === 'https://do.internal/rows/x%20y');
   const h = seen[0].init.headers;
-  ok('fd.3b exactly the 4 protocol headers forwarded',
-    h.get('authorization') !== null && h.get('content-type') !== null &&
+  ok('fd.3b exactly the 4 protocol headers forwarded (VALUES pinned)',
+    h.get('authorization') === 'Bearer ' + 'ab'.repeat(32) &&
+    h.get('content-type') === 'application/json' &&
     h.get('if-match') === '"5"' && h.get('if-none-match') === '"e46"' &&
     h.get('x-evil') === null && h.get('cookie') === null && h.get('x-forwarded-for') === null);
 }

@@ -211,7 +211,9 @@ console.log('SEC-4 — S5-F4: idle auto-lock');
 console.log('SEC-5 — S7-F3: cache fingerprint pinning');
 /* ============================================================ */
 {
-  // A cache stamped with a FOREIGN fingerprint must never hydrate.
+  // (VP5-Q1: the ORIGINAL version of this test clicked #btn-lock — which
+  // PURGES the cache, so the fp pin was never exercised. Reload instead:
+  // the poisoned cache survives, and the pin must refuse to paint it.)
   const ctx = await freshCtx();
   const page = await ctx.newPage();
   await page.goto(BASE + '/index.html');
@@ -220,25 +222,24 @@ console.log('SEC-5 — S7-F3: cache fingerprint pinning');
   await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
   await page.waitForTimeout(1500);
   await page.evaluate(() => {
-    // Rewrite the cache with a foreign fp + a sentinel event, then lock().
+    // Poison the cache with a FOREIGN fingerprint + a sentinel event.
     const o = JSON.parse(localStorage.getItem('clock_poc_cache_v45'));
     o.fp = 'ffffffff|AAAAAAAA';
     o.evt = [{ id: 'evt:99999999-9999-9999-9999-999999999999:ghost-uid', ver: 1,
       text: JSON.stringify({ v: 1, summary: 'GHOST EVENT', dtstart: '2099-01-01T00:00:00Z', dtend: '2099-01-01T01:00:00Z' }) }];
     localStorage.setItem('clock_poc_cache_v45', JSON.stringify(o));
   });
-  await page.click('#btn-lock');
-  await page.waitForTimeout(300);
-  // Re-unlock: the poisoned cache must be refused by the fp pin.
+  // RELOAD with the poisoned cache still on disk, then re-unlock: the ghost
+  // must NEVER paint (sample the DOM continuously through the unlock).
+  await page.reload();
   await page.fill('#password', 'password');
   await page.click('button[type=submit]');
-  await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
-  await page.waitForTimeout(800);
-  const ghost = await page.evaluate(() => {
-    const c = JSON.parse(localStorage.getItem('clock_poc_cache_v45') || 'null');
-    return c ? c.evt.some((e) => /ghost-uid/.test(e.id)) : 'no-cache';
-  });
-  ok('sec5.1 foreign-fp cache never repainted (sync rewrote it)', ghost === false || ghost === 'no-cache', JSON.stringify(ghost));
+  let ghostSeen = false;
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(150);
+    ghostSeen = ghostSeen || (await page.locator('.fc-event, .fc-list-event', { hasText: 'GHOST' }).count()) > 0;
+  }
+  ok('sec5.1 foreign-fp cache NEVER paints (reload path, fp pin exercised)', ghostSeen === false, 'ghostSeen=' + ghostSeen);
   await ctx.close();
 }
 {
@@ -251,15 +252,13 @@ console.log('SEC-5 — S7-F3: cache fingerprint pinning');
   await page.click('button[type=submit]');
   await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
   await page.waitForTimeout(1500);
+  const realWrapped = await page.evaluate(() => JSON.parse(localStorage.getItem('clock_poc_cfg_v45')).wrapped);
   // Stale the cached cfg: pretend the last cached material was different.
-  await page.evaluate(() => {
+  await page.evaluate((w) => {
     const cfg = JSON.parse(localStorage.getItem('clock_poc_cfg_v45'));
-    cfg.wrapped = BufferStub(cfg.wrapped);
-    function BufferStub(s) { return s.slice(0, -4) + 'AAAA'; } // different bytes
+    cfg.wrapped = w.slice(0, -4) + 'AAAA'; // different bytes
     localStorage.setItem('clock_poc_cfg_v45', JSON.stringify(cfg));
-    // The cache keeps the CURRENT fingerprint — like a browser unlocked
-    // before the rotation and now reconnecting.
-  });
+  }, realWrapped);
   await page.click('#btn-lock');
   await page.waitForTimeout(300);
   // server still has the ORIGINAL material: unlock succeeds; the mismatched
@@ -268,11 +267,13 @@ console.log('SEC-5 — S7-F3: cache fingerprint pinning');
   await page.click('button[type=submit]');
   await page.waitForSelector('#app:not([hidden])', { timeout: 25000 });
   await page.waitForTimeout(600);
-  const r = await page.evaluate(() => ({
+  const r = await page.evaluate((w) => ({
     purgedToast: [...document.querySelectorAll('.toast')].some((t) => /key material changed/.test(t.textContent)),
-    cfgFresh: JSON.parse(localStorage.getItem('clock_poc_cfg_v45')).wrapped === JSON.parse(localStorage.getItem('clock_poc_cfg_v45')).wrapped,
-  }));
-  ok('sec5.2 changed server material → purge toast + cfg refresh', r.purgedToast === true, JSON.stringify(r));
+    // (VP5-Q2: pin the REFRESH, not a self-comparison — LS_CFG must now
+    // carry the server's real wrapped bytes again)
+    cfgRefreshed: JSON.parse(localStorage.getItem('clock_poc_cfg_v45')).wrapped === w,
+  }), realWrapped);
+  ok('sec5.2 changed server material → purge toast + cfg refreshed to server bytes', r.purgedToast === true && r.cfgRefreshed === true, JSON.stringify(r));
   await ctx.close();
 }
 

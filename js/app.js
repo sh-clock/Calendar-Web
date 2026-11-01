@@ -911,7 +911,12 @@ function armAutoLock() {
     if (state.api && !state.busy) {
       lock();
       toast('Auto-locked after 15 minutes of inactivity.', 'ok', 6000);
+    } else if (state.api) {
+      // VP5-Q4: expiry during a busy instant must not disarm the idle lock
+      // for the rest of the session — retry shortly after the busy work.
+      autoLockTimer = setTimeout(armAutoLock, 5000);
     }
+    // locked/login: stay disarmed (armed again on the next unlock)
   }, AUTO_LOCK_MS);
 }
 

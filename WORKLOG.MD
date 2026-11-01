@@ -2577,10 +2577,11 @@ A6-edge 10/10 · A6-dnd 15/15.
 ## SESSION 2026-11-01 (c) — SECURITY PENTEST: 8-agent findings dispositioned + fixed
 
 ### Context
-The crashed session's 8-agent security pentest (S1 network/edge, S2 auth,
+The crashed session's 7-agent security pentest (S1 network/edge, S2 auth,
 S4 concurrency, S5 client, S6 zero-knowledge invariant, S7 crypto, S8
-protocol conformance) had written audit-d/sec-S*-findings.md but crashed
-before disposition. This session verified every finding against the code
+protocol conformance — an S3 slot was planned but never delivered a
+findings file; its scope (client logic) was covered by S5/S8) had written
+audit-d/sec-S*-findings.md but crashed before disposition. This session verified every finding against the code
 (false-positive protocol) and implemented all fixes.
 
 ### Findings inventory (verified) → disposition
@@ -2668,3 +2669,46 @@ leaked material via git-filter-repo + force-push.
 - Verification pentest wave (6+ agents re-attacking the fixed deployment,
   live + theoretical; no DDoS, no password cracking).
 - Then: efficiency + UI enhancement audit wave (user directive).
+
+## SESSION 2026-11-01 (d) — VERIFICATION PENTEST WAVE (VP1-VP6) + residual fixes
+
+Six verification agents re-attacked the hardened deployment (white-box,
+live + theoretical; no DDoS, no password cracking):
+- VP1 (worker re-attack, private stack + unit-drive): 194/194 local+unit,
+  8/8 live — zero severity findings; 5 INFO (parseEtagList NBSP tolerance,
+  comma-tag split, bare 404/412 no-store, sub-second rotation race,
+  308-CORS note). Independently CONFIRMED the RFC 9110 §13.2.2 refutation
+  of the S4 agent's precedence claim.
+- VP2 (crypto/auth): 73/73 own-stack; verified repo/history cleanliness,
+  iters range (22 coercion shapes), rewrap atomicity (12 rewraps ∥ 8 PUTs,
+  no torn triple), fp pinning (13/13). FOUND VP2-N1 [MEDIUM]: the history
+  purge had scrubbed three PUBLIC KAT literals in test/crypto-parity.mjs
+  (deterministic HKDF of the public test AES1) — FIXED (restored
+  byte-verified against the pre-purge backup + fresh regeneration; the
+  transcription error came from the terminal display corrupting hex —
+  values must always be compared via files). crypto-parity 38/38 again.
+- VP3 (client web-surface): executed by the orchestrator after 4
+  subagent-launch timeouts. Loopback bypass matrix 16/16 (all accepted
+  forms stay loopback; *.localhost is RFC 6761 loopback in Chromium);
+  CSP blocks all CSS/img exfil channels; no eval in vendored bundles; all
+  7 themes live under CSP with 0 console errors; frame-bust SECURE in
+  sandboxed AND unsandboxed framings (Chromium blocks cross-origin top
+  navigation; hide-fallback covers it); lock/forget residuals clean.
+- VP4 (live non-destructive probe): 76 scripted checks — 75 pass, 1 own-
+  harness bug; ZERO target-side findings; transport/conditional/boundary/
+  rotation/batch all verified live; manifest integrity preserved.
+- VP5 (battery + test quality): 13/13 suites green; found the sec5.1 test
+  VACUOUS (lock() purges before the fp pin runs — reload path now tests
+  the pin properly) + sec5.2 tautology + fd.3 weak pins + VP5-Q4 auto-lock
+  disarm-on-busy (all FIXED and re-tested: e2e-sec 24/24, front-door-unit
+  14/14 with stronger assertions).
+- VP6 (repo/deployment/CI): workflows valid; deploy copy-list complete;
+  live == origin/main (13/13 assets, byte-identical); history clean
+  (372-blob scan); FOUND VP6-F2 [MEDIUM-latent] .secrets/ not git-ignored
+  (FIXED), VP6-F1 boot-guard missing from CI syntax checks (FIXED),
+  VP6-F3 WORKLOG said 8-agent, actually 7 (corrected; no S3 file ever
+  existed). Operator .secrets chmod 600 (was 755).
+
+Wave verdict: all six domains re-attacked; residual findings fixed and
+re-tested; ZERO open CRITICAL/HIGH/MEDIUM findings. The deployment is
+verified against the white-box attacker model.
