@@ -2,9 +2,7 @@
 // the REAL client parser (core.parseEvtPayload) to see why they don't render.
 import { webcrypto } from 'node:crypto';
 
-const BASE = 'https://calendar-poc.sh-clock.workers.dev';
-const K = Uint8Array.from(Buffer.from('*SCRUBBED*<=', 'hex'));
-const AUTH = '*SCRUBBED*<=';
+import { K_DATA as K, AUTH_UI as AUTH, SERVER as BASE } from './lib-prod-material.mjs'; // sec-S7-F1
 const subtle = webcrypto.subtle;
 const key = await subtle.importKey('raw', K, 'AES-GCM', false, ['decrypt']);
 const b64 = (s) => Uint8Array.from(Buffer.from(s, 'base64'));

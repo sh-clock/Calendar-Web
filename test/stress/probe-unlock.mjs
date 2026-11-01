@@ -11,7 +11,7 @@ page.on('console', (m) => { if (m.type() === 'error') errs.push('CONSOLE ' + m.t
 page.on('requestfailed', (r) => errs.push('REQFAIL ' + r.url().slice(0, 120) + ' ' + (r.failure() || {}).errorText));
 page.on('request', (r) => { const u = String(r.url()); if (u.startsWith(SERVER)) errs.push('REQ ' + r.method() + ' ' + u.replace(SERVER, '')); });
 page.on('response', (r) => { const u = String(r.url()); if (u.startsWith(SERVER)) errs.push('RESP ' + r.status() + ' ' + u.replace(SERVER, '')); });
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(800);
 const early = await page.evaluate(() => ({
   loginHidden: document.querySelector('#login')?.hidden,

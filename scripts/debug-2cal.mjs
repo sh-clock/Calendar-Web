@@ -10,7 +10,7 @@ const browser = await chromium.launch();
 const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
 page.on('pageerror', (e) => console.log('PAGEERROR', String(e).slice(0, 300)));
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

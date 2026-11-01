@@ -3,9 +3,8 @@
 // Usage: node scripts/decrypt-prod.mjs [rowId ...]   (no args = all rows)
 import { webcrypto } from 'node:crypto';
 
-const BASE = 'https://calendar-poc.sh-clock.workers.dev';
-const AUTH_UI = '*SCRUBBED*<=';
-const K_DATA = Uint8Array.from(Buffer.from('*SCRUBBED*<=', 'hex'));
+import { AUTH_UI, K_DATA, SERVER as BASE } from './lib-prod-material.mjs'; // sec-S7-F1
+
 
 const subtle = webcrypto.subtle;
 const b64ToBytes = (s) => Uint8Array.from(Buffer.from(s, 'base64'));

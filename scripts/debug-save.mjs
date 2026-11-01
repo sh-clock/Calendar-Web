@@ -14,7 +14,7 @@ page.on('pageerror', (e) => console.log('PAGEERROR', String(e).slice(0, 300)));
 const reqs = [];
 page.on('request', (r) => { const u = String(r.url()); if (u.startsWith(SERVER)) reqs.push(r.method() + ' ' + u.replace(SERVER, '').slice(0, 60)); });
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

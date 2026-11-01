@@ -42,7 +42,7 @@ const page = await (await browser.newContext({ viewport: { width: 1440, height: 
 const errs = [];
 page.on('pageerror', (e) => errs.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errs.push('[console] ' + m.text()); });
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

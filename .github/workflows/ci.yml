@@ -24,6 +24,19 @@ jobs:
         run: node test/core-tasks.mjs
       - name: Crypto parity KATs (JS client vs worker crypto)
         run: node test/crypto-parity.mjs
+      - name: Front-door unit tests (http->https, HSTS/vary, silent-drop law)
+        run: node test/front-door-unit.mjs
+      - name: Secret-material guard (sec-S7-F1 — no 64-hex literals in shipped code)
+        run: |
+          set -e
+          # A 64-char lowercase-hex run in scripts/, worker/, cli/ or js/ is
+          # live key material 99% of the time — the repo is PUBLIC. Test
+          # fixtures live under test/ and audit-d/ only.
+          if git grep -En '[0-9a-f]{64}' -- scripts/ worker/ cli/ js/ index.html; then
+            echo "::error::64-hex literal found in shipped code — read it from the git-ignored credentials file (scripts/lib-prod-material.mjs)"
+            exit 1
+          fi
+          echo "hex-literal guard OK"
       - name: Syntax check the client entry points
         run: |
           node --check js/app.js

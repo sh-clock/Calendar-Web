@@ -5,7 +5,7 @@ import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.
 
 const BASE = 'http://127.0.0.1:8080';
 const SERVER = 'http://127.0.0.1:8787';
-const AUTH_UI = '*SCRUBBED*<=';
+const AUTH_UI = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8')).auth_ui_hex; // with-stack material (never committed)
 
 const puts = [];
 const pageErrors = [];
@@ -19,7 +19,7 @@ page.on('request', (r) => {
 page.on('pageerror', (e) => pageErrors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('CONSOLE: ' + m.text()); });
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

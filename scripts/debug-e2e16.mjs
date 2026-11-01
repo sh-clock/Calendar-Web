@@ -68,7 +68,7 @@ const puts = (arr) => arr.filter((r) => r.m === 'PUT').length;
 const clearToasts = () => page.evaluate(() => document.querySelectorAll('.toast').forEach((t) => t.remove()));
 
 async function unlock() {
-  await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+  await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
   await page.waitForTimeout(400);
   await page.fill('#password', 'password');
   await page.click('button[type=submit]');

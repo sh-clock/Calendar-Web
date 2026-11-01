@@ -96,7 +96,7 @@ const since = (m) => requests.slice(m);
 const puts = (arr) => arr.filter((r) => r.m === 'PUT').length;
 
 async function unlock() {
-  await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+  await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
   await page.waitForTimeout(400);
   await page.fill('#password', 'password');
   await page.click('button[type=submit]');

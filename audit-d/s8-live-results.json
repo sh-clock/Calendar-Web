@@ -1,0 +1,177 @@
+[
+  {
+    "name": "V1 /version (ui) -> 200 proto 4.3",
+    "ok": true,
+    "detail": "200:{\"proto\":\"4.3\"}"
+  },
+  {
+    "name": "V1 /version content-type json",
+    "ok": true,
+    "detail": "application/json; charset=utf-8"
+  },
+  {
+    "name": "V1 /version NO cache-control/expires",
+    "ok": true,
+    "detail": "{\"cc\":null}"
+  },
+  {
+    "name": "V1 bad-auth /version -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 unknown route (bad token) -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 unknown route (GOOD token) -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 no token /version -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 indistinguishable: bad-auth-known-route vs unknown-route (same status, body, header set)",
+    "ok": true,
+    "detail": "connection,content-length || connection,content-length"
+  },
+  {
+    "name": "V1 no WWW-Authenticate on 404",
+    "ok": true,
+    "detail": "null"
+  },
+  {
+    "name": "V1 no cache-control on 404",
+    "ok": true,
+    "detail": "null"
+  },
+  {
+    "name": "V1 404 content-length 0",
+    "ok": true,
+    "detail": "0"
+  },
+  {
+    "name": "V1 PATCH /config (valid token) -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 HEAD /version (valid token) -> 404",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 OPTIONS allowlisted origin -> 204 + CORS",
+    "ok": true,
+    "detail": "204:https://sh-clock.github.io"
+  },
+  {
+    "name": "V1 OPTIONS allow-methods GET,POST,PUT,DELETE,OPTIONS",
+    "ok": true,
+    "detail": "GET, POST, PUT, DELETE, OPTIONS"
+  },
+  {
+    "name": "V1 OPTIONS evil origin -> 404 empty no CORS",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 OPTIONS no origin -> 404 empty",
+    "ok": true,
+    "detail": "404:0"
+  },
+  {
+    "name": "V1 CORS headers decorate even the silent 404 for allowlisted origin",
+    "ok": true,
+    "detail": "404:https://sh-clock.github.io"
+  },
+  {
+    "name": "V2 /config -> 200 {salt,iters,wrapped,ver} only",
+    "ok": true,
+    "detail": "200:{\"salt\":\"e7c4efca4c020b3b5194f79f96a51d11\",\"iters\":100000,\"wrapped\":\"gtOMiuuJlG5WJR41Tvn0uXGvXx8japyblEYhWungnA0haoeysqa"
+  },
+  {
+    "name": "V2 /config wrapped decodes to 60 bytes (v4.1 §8 \"48B\" text is wrong)",
+    "ok": true,
+    "detail": "60"
+  },
+  {
+    "name": "V2 /config omits private columns",
+    "ok": true,
+    "detail": "salt,iters,wrapped,ver"
+  },
+  {
+    "name": "V2 /config NO cache-control (browser could cache bootstrap params)",
+    "ok": true,
+    "detail": "null"
+  },
+  {
+    "name": "V2 /status -> 200 {\"photo_pending\":N}",
+    "ok": true,
+    "detail": "200:{\"photo_pending\":0}"
+  },
+  {
+    "name": "V2 /rows -> 200 manifest + etag",
+    "ok": true,
+    "detail": "200 rows=15 etag=\"e34\""
+  },
+  {
+    "name": "V2 /rows 200 has NO ETag header (field only in body)",
+    "ok": true,
+    "detail": "null"
+  },
+  {
+    "name": "V2 /rows 200 has NO cache-control",
+    "ok": true,
+    "detail": "null"
+  },
+  {
+    "name": "V2 If-None-Match -> 304 empty + ETag header",
+    "ok": true,
+    "detail": "304 len=0 hdr=\"e34\""
+  },
+  {
+    "name": "V2 GET own not-yet-existing row -> 404 not_found JSON",
+    "ok": true,
+    "detail": "404:{\"error\":\"not_found\"}"
+  },
+  {
+    "name": "V3 INM:* create own row -> 200 echo",
+    "ok": true,
+    "detail": "200:{\"id\":\"evt:sec-S8:probe1\",\"ver\":1,\"nonce\":\"QUFBQUFBQUFBQUFB\",\"ct\":\"QUFBQUFBQUFBQ"
+  },
+  {
+    "name": "V3 INM:* again -> 412 EMPTY",
+    "ok": true,
+    "detail": "412:0"
+  },
+  {
+    "name": "V3 If-Match \"999\" mismatch -> 412 EMPTY",
+    "ok": true,
+    "detail": "412:0"
+  },
+  {
+    "name": "V3 row still ver 1 (no mutation from 412s)",
+    "ok": true,
+    "detail": "200:{\"id\":\"evt:sec-S8:probe1\",\"ver\":1,\"nonce\":\"QUFBQUFBQUFBQUFB\""
+  },
+  {
+    "name": "V3 DELETE own row -> 200 {}",
+    "ok": true,
+    "detail": "200:{}"
+  },
+  {
+    "name": "V3 row gone -> 404 not_found",
+    "ok": true,
+    "detail": "404:{\"error\":\"not_found\"}"
+  },
+  {
+    "name": "V3 idempotent re-delete -> 200 {}",
+    "ok": true,
+    "detail": "200:{}"
+  }
+]

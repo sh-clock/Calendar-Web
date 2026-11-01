@@ -6,9 +6,8 @@
 import { webcrypto } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 
-const BASE = 'https://calendar-poc.sh-clock.workers.dev';
-const K = Uint8Array.from(Buffer.from('*SCRUBBED*<=', 'hex'));
-const AUTH = '*SCRUBBED*<=';
+// sec-S7-F1: material from the operator's git-ignored credentials file.
+import { SERVER as BASE, K_DATA as K, AUTH_UI as AUTH } from './lib-prod-material.mjs';
 const MAIN = 'ff1902f5-fa9e-4734-8090-44262abd0b1b';
 const subtle = webcrypto.subtle;
 const key = await subtle.importKey('raw', K, 'AES-GCM', false, ['encrypt']);
@@ -73,7 +72,9 @@ function vcal(uid, props) {
 }
 
 const mk = (cal, title, props) => {
-  const uid = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + randomUUID().slice(0, 8);
+  // sec-S6-F1: OPAQUE uid — a title slug leaks the summary into the
+  // server-visible row id (manifest/URLs/D1 backup).
+  const uid = randomUUID();
   return { id: 'evt:' + cal + ':' + uid, payload: vcal(uid, props) };
 };
 

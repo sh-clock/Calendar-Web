@@ -284,7 +284,7 @@ async function main() {
     // Fresh universe: force-bootstrap NEW material (different AES1), then PUT
     // every snapshot envelope VERBATIM with preserved vers (D8).
     const snapshot = d1rows.map((r) => ({ id: r.id, ver: r.ver, nonce_hex: r.nonce_hex, ct_hex: r.ct_hex }));
-    const freshMat = buildBootstrapMaterial('restore-drill-password');
+    const freshMat = buildBootstrapMaterial('restore-drill-password', 100000);
     const rb = await api('PUT', '/bootstrap', {
       token: dev.ADMIN_SECRET,
       body: {

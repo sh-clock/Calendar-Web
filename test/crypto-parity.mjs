@@ -108,7 +108,7 @@ const katWrappedB64 = Buffer.from(KAT.wrappedHex, 'hex').toString('base64');
 
 for (let i = 0; i < 3; i++) {
   const pw = 'parity-pw-' + i + '-' + randomBytes(8).toString('hex');
-  const mat = buildBootstrapMaterial(pw);
+  const mat = buildBootstrapMaterial(pw, 100000);
   const b = await deriveKeys(pw, mat.saltHex, mat.iters, mat.wrappedB64);
   const n = deriveClientKeys(pw, mat.saltHex, mat.iters, mat.wrappedB64);
   check(
@@ -121,7 +121,7 @@ for (let i = 0; i < 3; i++) {
 /* ---------------- 5. Envelope interop, both directions ---------------- */
 
 {
-  const mat = buildBootstrapMaterial('interop-pw');
+  const mat = buildBootstrapMaterial('interop-pw', 100000);
   const nodeKeys = deriveClientKeys('interop-pw', mat.saltHex, mat.iters, mat.wrappedB64);
   const browserKeys = await deriveKeys('interop-pw', mat.saltHex, mat.iters, mat.wrappedB64);
   const rowKey = await importRowKey(browserKeys.kData);
@@ -199,7 +199,7 @@ for (let i = 0; i < 3; i++) {
 /* ---------------- 7. Nonce freshness (§6: fresh random per write) ---------------- */
 
 {
-  const mat = buildBootstrapMaterial('nonce-freshness');
+  const mat = buildBootstrapMaterial('nonce-freshness', 100000);
   const keys = await deriveKeys('nonce-freshness', mat.saltHex, mat.iters, mat.wrappedB64);
   const rowKey = await importRowKey(keys.kData);
   const seen = new Set();
@@ -288,8 +288,8 @@ for (let i = 0; i < 3; i++) {
 /* ---------------- 8. Type A rewrap material keeps AES1 ---------------- */
 
 {
-  const mat = buildBootstrapMaterial('old-pw');
-  const re = buildRewrapMaterial(mat.aes1, 'new-pw');
+  const mat = buildBootstrapMaterial('old-pw', 100000);
+  const re = buildRewrapMaterial(mat.aes1, 'new-pw', 100000);
   const after = deriveClientKeys('new-pw', re.saltHex, 100000, re.wrappedB64);
   check('Type A rewrap: new password unwraps the SAME AES1', after.aes1.equals(mat.aes1));
   const browserAfter = await deriveKeys('new-pw', re.saltHex, 100000, re.wrappedB64);

@@ -5,13 +5,12 @@
 import { webcrypto } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 
-const BASE = 'https://calendar-poc.sh-clock.workers.dev';
-const MAT = {
-  kDataHex: '*SCRUBBED*<=',
-  authUiHex: '*SCRUBBED*<=',
-};
-const K = Uint8Array.from(Buffer.from(MAT.kDataHex, 'hex'));
-const AUTH = MAT.authUiHex;
+// sec-S7-F1: the live K_data/AUTH_UI must NEVER be committed — material is
+// loaded from the operator's git-ignored credentials file.
+// sec-S6-F1: seeded UIDs are OPAQUE (random UUIDs) — a slugified event title
+// in a row id leaks the title into server-visible metadata (manifest, URLs,
+// D1 backup ids), breaking the §1 content-blind invariant.
+import { SERVER as BASE, K_DATA as K, AUTH_UI as AUTH } from './lib-prod-material.mjs';
 const subtle = webcrypto.subtle;
 const key = await subtle.importKey('raw', K, 'AES-GCM', false, ['encrypt', 'decrypt']);
 
@@ -121,7 +120,7 @@ function vevent({ uid, dtstart, dtend, rrule, summary, description, location, tr
 
 const spec = [
   {
-    cal: mainUuid, uid: 'welcome-v43-' + randomUUID().slice(0, 8),
+    cal: mainUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Welcome to Calendar v4.3',
     payload: vevent({
       uid: null, // filled below
@@ -133,7 +132,7 @@ const spec = [
     }),
   },
   {
-    cal: mainUuid, uid: 'standup-' + randomUUID().slice(0, 8),
+    cal: mainUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Team standup',
     payload: vevent({
       uid: null,
@@ -146,7 +145,7 @@ const spec = [
     }),
   },
   {
-    cal: personalUuid, uid: 'lunch-' + randomUUID().slice(0, 8),
+    cal: personalUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Lunch with Alex',
     payload: vevent({
       uid: null,
@@ -157,7 +156,7 @@ const spec = [
     }),
   },
   {
-    cal: mainUuid, uid: 'review-' + randomUUID().slice(0, 8),
+    cal: mainUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Project review',
     payload: vevent({
       uid: null,
@@ -169,7 +168,7 @@ const spec = [
     }),
   },
   {
-    cal: personalUuid, uid: 'trip-' + randomUUID().slice(0, 8),
+    cal: personalUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Weekend trip',
     payload: vevent({
       uid: null,
@@ -181,7 +180,7 @@ const spec = [
     }),
   },
   {
-    cal: mainUuid, uid: 'monthly-' + randomUUID().slice(0, 8),
+    cal: mainUuid, uid: randomUUID() /* sec-S6-F1: opaque */,
     title: 'Monthly retrospective',
     payload: vevent({
       uid: null,

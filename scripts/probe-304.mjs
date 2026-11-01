@@ -32,7 +32,7 @@ page.on('pageerror', (e) => ok('no pageerror', false, String(e)));
 page.on('console', (m) => { if (m.type() === 'error') ok('no console error', false, m.text()); });
 
 // unlock
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

@@ -24,7 +24,7 @@ page.on('request', (r) => { if (r.url().startsWith(SERVER)) nets.push(r.method()
 page.on('console', (m) => console.log('[console:' + m.type() + '] ' + m.text()));
 page.on('pageerror', (e) => console.log('[pageerror] ' + e));
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');
 await page.waitForSelector('#app:not([hidden])', { timeout: 30000 });

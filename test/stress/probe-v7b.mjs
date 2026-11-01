@@ -13,7 +13,7 @@ const errs = [];
 page.on('pageerror', (e) => errs.push('PAGEERR ' + String(e).slice(0, 300)));
 page.on('console', (m) => { if (m.type() === 'error') errs.push('CONSOLE ' + m.text().slice(0, 300)); });
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

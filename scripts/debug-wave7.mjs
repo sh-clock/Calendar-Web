@@ -11,7 +11,7 @@ const page = await (await browser.newContext({ viewport: { width: 1440, height: 
 page.on('pageerror', (e) => console.log('PAGEERROR', String(e).slice(0, 200)));
 page.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE', m.text().slice(0, 150)); });
 
-await page.goto(BASE + '/?server=' + SERVER + '&setup=' + mat.auth_ui_hex);
+await page.goto(BASE + '/#server=' + SERVER + '&setup=' + mat.auth_ui_hex);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');

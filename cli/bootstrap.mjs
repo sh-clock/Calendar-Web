@@ -22,7 +22,13 @@
 
 import { randomBytes, pbkdf2Sync, hkdfSync, createCipheriv, createDecipheriv } from 'node:crypto';
 
-export const KDF_ITERS = 100000;
+// sec-S7-F2: default KDF cost for NEW universes is 600 000 (OWASP 2023+
+// guidance for PBKDF2-HMAC-SHA256; ~80 ms native). The server accepts a
+// 100 000..10 000 000 range (100k floor = anti-downgrade wall), so older
+// 100k universes keep working and re-wraps can raise the cost in place.
+export const KDF_ITERS = 600000;
+export const KDF_ITERS_MIN = 100000; // must match worker/src/store.js §2
+export const KDF_ITERS_MAX = 10000000;
 export const WRAPPED_LEN = 60;
 
 const hex = (b) => Buffer.from(b).toString('hex');
@@ -57,9 +63,9 @@ export function subkey(aes1, info) {
   return Buffer.from(hkdfSync('sha256', aes1, Buffer.alloc(0), Buffer.from(info, 'ascii'), 32));
 }
 
-/** Wrap AES1 under KEK(password, salt): nonce(12) || ct(32) || tag(16) = 60B (WORKLOG D2). */
-export function wrapAes1(aes1, password, salt) {
-  const kek = pbkdf2Sync(Buffer.from(String(password), 'utf8'), salt, KDF_ITERS, 32, 'sha256');
+/** Wrap AES1 under KEK(password, salt, iters): nonce(12) || ct(32) || tag(16) = 60B (WORKLOG D2). */
+export function wrapAes1(aes1, password, salt, iters = KDF_ITERS) {
+  const kek = pbkdf2Sync(Buffer.from(String(password), 'utf8'), salt, iters, 32, 'sha256');
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', kek, nonce);
   const ct = Buffer.concat([cipher.update(aes1), cipher.final()]);
@@ -69,14 +75,17 @@ export function wrapAes1(aes1, password, salt) {
   return wrapped;
 }
 
-/** Build all bootstrap material for a password. Returns Buffer/hex fields. */
-export function buildBootstrapMaterial(password) {
+/** Build all bootstrap material for a password. Returns Buffer/hex fields.
+ *  `iters` is overridable so the local test suites keep their fast 100k
+ *  material (inside the server-accepted range) while real universes get
+ *  the 600k default. */
+export function buildBootstrapMaterial(password, iters = KDF_ITERS) {
   const salt = randomBytes(16);
   const aes1 = randomBytes(32); // dummy master key for the PoC (user-designated)
-  const wrapped = wrapAes1(aes1, password, salt);
+  const wrapped = wrapAes1(aes1, password, salt, iters);
   return {
     saltHex: hex(salt),
-    iters: KDF_ITERS,
+    iters,
     wrappedB64: wrapped.toString('base64'),
     aes1,
     aes1Hex: hex(aes1),
@@ -88,10 +97,10 @@ export function buildBootstrapMaterial(password) {
 
 /** §20 Type A rotation material: the SAME AES1 re-wrapped under a NEW
  *  password with a fresh salt. AES1 never changes; no rows are touched. */
-export function buildRewrapMaterial(aes1, newPassword) {
+export function buildRewrapMaterial(aes1, newPassword, iters = KDF_ITERS) {
   const salt = randomBytes(16);
-  const wrapped = wrapAes1(aes1, newPassword, salt);
-  return { saltHex: hex(salt), wrappedB64: wrapped.toString('base64') };
+  const wrapped = wrapAes1(aes1, newPassword, salt, iters);
+  return { saltHex: hex(salt), wrappedB64: wrapped.toString('base64'), iters };
 }
 
 /** Node mirror of the browser unlock path (used by the test suite + verification). */
@@ -281,12 +290,14 @@ async function rewrapMain(args) {
     process.exit(1);
   }
 
-  const re = buildRewrapMaterial(aes1, args.newPassword);
+  const re = buildRewrapMaterial(aes1, args.newPassword, KDF_ITERS);
   const url = args.url.replace(/\/+$/, '');
+  // sec-S7-F2: the rotation also carries the KDF cost (server range-checked)
+  // so a Type-A rewrap can raise a 100k universe to 600k without a wipe.
   const res = await fetch(url + '/bootstrap/rewrap', {
     method: 'PUT',
     headers: { authorization: 'Bearer ' + args.admin, 'content-type': 'application/json' },
-    body: JSON.stringify({ wrapped: re.wrappedB64, salt: re.saltHex }),
+    body: JSON.stringify({ wrapped: re.wrappedB64, salt: re.saltHex, iters: KDF_ITERS }),
   });
   const text = await res.text();
   if (res.status !== 200 || text !== '{}') {
@@ -300,7 +311,7 @@ async function rewrapMain(args) {
     headers: { authorization: 'Bearer ' + stored.auth_ui_hex },
   });
   const cfg = await cfgRes.json().catch(() => null);
-  if (cfgRes.status !== 200 || !cfg || cfg.wrapped !== re.wrappedB64 || cfg.salt !== re.saltHex) {
+  if (cfgRes.status !== 200 || !cfg || cfg.wrapped !== re.wrappedB64 || cfg.salt !== re.saltHex || cfg.iters !== KDF_ITERS) {
     console.error('ERROR: post-rewrap verification failed (GET /config mismatch)');
     process.exit(1);
   }

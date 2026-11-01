@@ -16,8 +16,10 @@
  */
 
 const PROTO_VERSION = '4.3';                       // §22 (v4.3: client stops maintaining cal: buckets; POST /rows:batch added — see protocol.md)
-const KDF_ITERS = 100000;                          // §2
+const KDF_ITERS_MIN = 100000;                      // §2 (sec-S7-F2: a RANGE now — 100k floor keeps the downgrade wall, up to 10M lets an operator re-wrap stronger without a wipe)
+const KDF_ITERS_MAX = 10000000;                    // §2 upper bound (client crypto.js accepts the same range)
 const ROW_CT_MAX = 65536;                          // §2 — ciphertext incl. tag
+const ROW_CT_MIN = 16;                             // §2 (sec-S7-F5: a legal AES-256-GCM ct is >= the 16B tag — sub-tag blobs can only be junk rows)
 const VER_U32_MAX = 4294967295;                    // §2 VER_WIDTH (u32)
 const WRAPPED_LEN = 60;                            // WORKLOG D2: 12 nonce || 32 ct || 16 tag
 const NONCE_LEN = 12;                              // §2 GCM_NONCE_LEN
@@ -105,7 +107,7 @@ function ctEqual(a, b) {
 /* Responses (§5 policy)                                                */
 /* ------------------------------------------------------------------ */
 
-/** L3 silent drop: empty 404, no body, no WWW-Authenticate, no cache headers. */
+/** §5 error policy helpers. */
 function silentDrop() {
   return new Response(null, { status: 404 });
 }
@@ -118,7 +120,10 @@ function forbidden() {
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
+    // sec-S8-F5: no intermediary (shared cache / future CF cache rule /
+    // service worker) may replay a stale /config or /rows 200 — every JSON
+    // response is uncachable. (The silent drop deliberately stays bare per §4.)
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
   });
 }
 
@@ -126,10 +131,32 @@ function badRequest(msg) {
   return json({ error: msg }, 400);
 }
 
-/** §9c: parse an ETag like "5" (quoted decimal ver) → 5, or null if malformed. */
-function parseEtagVer(header) {
-  const m = /^\s*"([0-9]{1,10})"\s*$/.exec(header);
-  return m ? Number(m[1]) : null;
+/** §9c: 412 Precondition Failed (empty body). */
+function preconditionFailed() {
+  return new Response(null, { status: 412 });
+}
+
+/* ------------------------------------------------------------------ */
+/* Conditional-header parsing (RFC 9110 §13.1.1 / §13.1.2)             */
+/* ------------------------------------------------------------------ */
+
+/** Parse If-Match / If-None-Match into {star:true} | {tags:[{weak,tag}]} |
+ *  {malformed:true}. Opaque-tag comparison is EXACT STRING equality on the
+ *  quoted value (entity-tags are opaque — "05" is NOT our "5"); the caller
+ *  chooses strong (If-Match: weak never matches) vs weak (If-None-Match:
+ *  the W/ flag is ignored) comparison per RFC 9110. */
+function parseEtagList(header) {
+  const v = header.trim();
+  if (v === '*') return { star: true };
+  const parts = v.split(',').map((s) => s.trim()).filter((s) => s !== '');
+  if (parts.length === 0) return { malformed: true };
+  const tags = [];
+  for (const p of parts) {
+    const m = /^(W\/)?"([^"]*)"$/.exec(p);
+    if (!m) return { malformed: true };
+    tags.push({ weak: m[1] === 'W/', tag: m[2] });
+  }
+  return { tags };
 }
 
 /* ------------------------------------------------------------------ */
@@ -210,6 +237,27 @@ export class Store {
           'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)'
         );
         sql.exec("INSERT OR IGNORE INTO meta (k, v) VALUES ('epoch', 0)");
+        // sec-S4-2 (atomic epoch): the §9d epoch bump now rides the SAME
+        // SQLite statement as the row mutation via triggers — the crash window
+        // between "row committed" and "epoch committed" (two separate implicit
+        // transactions) could permanently desync the etag from row state.
+        // Trigger semantics map 1:1 onto §9d: fires on INSERT / on an accepted
+        // UPDATE / on a REAL delete only (an idempotent re-delete of a missing
+        // row deletes nothing → no bump); a force-wipe `DELETE FROM rows`
+        // bumps per destroyed row, so sec-S4-1/S8-F1 (stale-304 ghost state
+        // after a wipe) is closed by construction. Verified on workerd DO-SQLite.
+        sql.exec(
+          "CREATE TRIGGER IF NOT EXISTS rows_bump_ins AFTER INSERT ON rows " +
+            "BEGIN UPDATE meta SET v = v + 1 WHERE k = 'epoch'; END"
+        );
+        sql.exec(
+          "CREATE TRIGGER IF NOT EXISTS rows_bump_upd AFTER UPDATE ON rows " +
+            "BEGIN UPDATE meta SET v = v + 1 WHERE k = 'epoch'; END"
+        );
+        sql.exec(
+          "CREATE TRIGGER IF NOT EXISTS rows_bump_del AFTER DELETE ON rows " +
+            "BEGIN UPDATE meta SET v = v + 1 WHERE k = 'epoch'; END"
+        );
       })();
       // Do not pin a rejected promise: a transient SQLite failure must not
       // poison the isolate for every subsequent request.
@@ -226,8 +274,11 @@ export class Store {
       await this.ensureSchema();
       return await this.route(req);
     } catch (e) {
-      // Log the exception message only (never payload/key material — §3).
-      console.error('store error: ' + (e && e.message ? e.message : String(e)));
+      // sec-S6-F4: log a FIXED tag + the exception CLASS only — never the
+      // message (messages can interpolate payload-derived substrings in
+      // future code; the class comes from a fixed runtime vocabulary).
+      // Counts-only ledger (§3); observability stays disabled.
+      console.error('store_error ' + (e && e.name ? e.name : 'Error'));
       return json({ error: 'internal' }, 500);
     }
   }
@@ -350,7 +401,10 @@ export class Store {
     } else {
       if (cls !== 'ui' && cls !== 'clock') return silentDrop();
       if (requireUi && cls !== 'ui') {
-        if (method === 'PUT') await readBodyBounded(req); // drain so the 403 reaches the client cleanly
+        // sec-S2-L1: drain bodied rejections for BOTH PUT and DELETE (the
+        // front door forwards bodies for every non-GET/HEAD method) so the
+        // client receives the 403 instead of a torn connection.
+        if (method === 'PUT' || method === 'DELETE') await readBodyBounded(req);
         return forbidden();
       }
     }
@@ -358,7 +412,8 @@ export class Store {
     // Authenticated-but-malformed (§5): the D9 id size cap maps to 400 like
     // every other field validation — never to a pre-auth silent drop.
     if (id !== null && id.length > ID_MAX) {
-      if (method === 'PUT') await readBodyBounded(req); // drain: the client must receive the 400, not a connection reset
+      // sec-S2-L1: drain bodied rejections (PUT and DELETE alike).
+      if (method === 'PUT' || method === 'DELETE') await readBodyBounded(req);
       return badRequest('bad_id');
     }
 
@@ -380,7 +435,13 @@ export class Store {
     const force = val.force === true;
 
     if (!saltOk) return badRequest('bad_salt');
-    if (!Number.isInteger(val.iters) || val.iters !== KDF_ITERS) return badRequest('bad_iters'); // WORKLOG D7
+    // sec-S7-F2: iters is a RANGE now (floor keeps the anti-downgrade wall —
+    // an admin cannot bootstrap a cheap-to-brute-force universe; the ceiling
+    // matches the client's accepted range). The §8 force wipe bumps the
+    // manifest epoch automatically: the per-row DELETE triggers fire (sec-S4-1).
+    if (!Number.isInteger(val.iters) || val.iters < KDF_ITERS_MIN || val.iters > KDF_ITERS_MAX) {
+      return badRequest('bad_iters');
+    }
     if (!wrapped || wrapped.length !== WRAPPED_LEN) return badRequest('bad_wrapped');            // WORKLOG D2
     if (!authUiOk) return badRequest('bad_auth_ui');
     if (!authClockOk) return badRequest('bad_auth_clock');
@@ -423,21 +484,34 @@ export class Store {
       salt = val.salt;
     }
 
+    // sec-S7-F2: optional iters — a Type-A password rotation can also RAISE
+    // the KDF cost atomically (validated in the §2 range). Every client
+    // already derives with whatever /config reports (crypto.js accepts
+    // 1..10M), so no client change is needed to pick this up.
+    let iters = null;
+    if (val.iters !== undefined) {
+      if (!Number.isInteger(val.iters) || val.iters < KDF_ITERS_MIN || val.iters > KDF_ITERS_MAX) {
+        return badRequest('bad_iters');
+      }
+      iters = val.iters;
+    }
+
     const existing = await this.getConfig();
     if (!existing) return json({ error: 'not_found' }, 404); // WORKLOG D11
 
     const now = Math.floor(Date.now() / 1000);
-    if (salt) {
-      this.ctx.storage.sql.exec(
-        'UPDATE config SET wrapped = ?, salt = ?, ver = ver + 1, updated_at = ? WHERE k = 1',
-        wrapped, salt, now
-      );
-    } else {
-      this.ctx.storage.sql.exec(
-        'UPDATE config SET wrapped = ?, ver = ver + 1, updated_at = ? WHERE k = 1',
-        wrapped, now
-      );
-    }
+    // Compose the SET clause from the present optional fields (fixed strings,
+    // bound values — never interpolated).
+    const sets = ['wrapped = ?'];
+    const binds = [wrapped];
+    if (salt) { sets.push('salt = ?'); binds.push(salt); }
+    if (iters) { sets.push('iters = ?'); binds.push(iters); }
+    sets.push('ver = ver + 1', 'updated_at = ?');
+    binds.push(now);
+    this.ctx.storage.sql.exec(
+      'UPDATE config SET ' + sets.join(', ') + ' WHERE k = 1',
+      ...binds
+    );
     return json({});
   }
 
@@ -466,7 +540,7 @@ export class Store {
 
   /* -------------------- §9: row sync -------------------- */
 
-  /** Current manifest epoch (bumped on every rows mutation). */
+  /** Current manifest epoch (bumped atomically by the rows triggers). */
   readEpoch() {
     const r = this.ctx.storage.sql
       .exec("SELECT v FROM meta WHERE k = 'epoch'")
@@ -474,27 +548,38 @@ export class Store {
     return r.length ? Number(r[0].v) : 0;
   }
 
-  bumpEpoch() {
-    this.ctx.storage.sql.exec("UPDATE meta SET v = v + 1 WHERE k = 'epoch'");
-  }
-
   /**
    * GET /rows — manifest (id, ver) + `etag` (manifest epoch).
    *
-   * §9 conditional read (v4.3 addition, efficiency E1-1): a client that
-   * sends `If-None-Match: "e<epoch>"` and matches gets 304 (empty body)
-   * instead of the full manifest — an idle 60 s poll then costs ~0 bytes
-   * instead of ~94 B/row. Additive and fully interoperable: old servers
-   * ignore the header (plain 200), old clients ignore the new `etag` field
-   * (§22 ignore-unknown-fields). The epoch counts MUTATIONS, not rows, so
-   * deletes are caught too. Still zero-knowledge: the etag leaks only a
-   * mutation counter, no row ids/vers (L1 surface grows by one integer).
+   * §9d conditional read: a client that sends `If-None-Match` and lists the
+   * current epoch etag gets 304 (empty body) instead of the full manifest —
+   * an idle 60 s poll then costs ~0 bytes. Additive and interoperable: old
+   * servers ignore the header (plain 200), old clients ignore the `etag` field
+   * (§22 ignore-unknown-fields). The epoch counts MUTATIONS, not rows (bumped
+   * atomically by the rows triggers — see ensureSchema), so deletes are caught
+   * too. Still zero-knowledge: the etag leaks only a mutation counter (L1).
+   *
+   * sec-S4-5 (RFC 9110 §13.1.2 conformance): weak comparison — `W/"e46"`
+   * matches; a LIST matches if any element matches; `*` is false whenever a
+   * current representation exists (GET /rows always has one → 304 + ETag);
+   * a malformed value falls through to the plain 200 (rule 3: condition true).
    */
   async hManifest(req) {
-    const etag = '"e' + this.readEpoch() + '"';
+    const epoch = this.readEpoch();
+    const etag = '"e' + epoch + '"';
+    const opaque = 'e' + epoch; // entity-tag value without the DQUOTEs
     const inm = req.headers.get('if-none-match');
-    if (inm !== null && inm.trim() === etag) {
-      return new Response(null, { status: 304, headers: { etag } });
+    if (inm !== null) {
+      const p = parseEtagList(inm);
+      let match = false;
+      if (p.star) match = true; // representation always exists → condition false → 304
+      else if (p.tags) match = p.tags.some((t) => t.tag === opaque); // weak compare
+      if (match) {
+        return new Response(null, {
+          status: 304,
+          headers: { etag, 'cache-control': 'no-store' },
+        });
+      }
     }
     const rows = this.ctx.storage.sql.exec('SELECT id, ver FROM rows ORDER BY id').toArray();
     return json({ rows: rows.map((r) => ({ id: r.id, ver: r.ver })), etag });
@@ -568,6 +653,16 @@ export class Store {
    *   incoming.ver <= stored.ver → reject silently-as-rebase, return 200 +
    *                                CURRENT stored envelope
    * New rows accept any ver >= 1 (WORKLOG D8 — §19 restore drill).
+   *
+   * §9c conditional mode (sec-S4-3/S4-5/S8-F6 — now RFC 9110-exact):
+   * evaluated in the §13.2.2 order — If-Match (step 1, STRONG comparison:
+   * `*` = exists-check; a list matches only on exact opaque equality, weak
+   * W/-tagged entries never match; a MISSING row fails every If-Match form
+   * → 412, changed from the old 404) then If-None-Match (step 3, WEAK
+   * comparison: a listed current etag → 412; `*` → 412 iff the row exists;
+   * malformed → condition true → plain RMW per §13.1.2 rule 3). The web
+   * client never sends these headers; DAV clients get RFC semantics.
+   * The worker still only compares the CLEAR ver — never nonce/ct.
    */
   async hPutRow(req, id) {
     const { val, err } = await readJson(req);
@@ -579,39 +674,43 @@ export class Store {
     const nonce = b64Decode(val.nonce);
     if (!nonce || nonce.length !== NONCE_LEN) return badRequest('bad_nonce');
     const ct = b64Decode(val.ct);
-    if (!ct || ct.length > ROW_CT_MAX) return badRequest('bad_ct'); // §21
+    // §21 + sec-S7-F5: 16 B tag floor (a legal AES-GCM ct is never shorter).
+    if (!ct || ct.length < ROW_CT_MIN || ct.length > ROW_CT_MAX) return badRequest('bad_ct');
 
-    // §9c DAV-compat conditional mode: when the client sends standard HTTP
-    // conditional headers (If-Match / If-None-Match), arbitration failures
-    // are reported as REAL status codes (412, and 404 for a missing row with
-    // If-Match) instead of the 200+stored-echo shape the web client uses.
-    // The web client never sends these headers, so its behavior is unchanged;
-    // CalDAV clients (DAVx5 fork) get RFC 9110 §13.1.2 semantics. The worker
-    // still only compares the CLEAR ver — it never inspects nonce/ct.
     const ifMatchHdr = req.headers.get('if-match');
     const ifNoneMatchHdr = req.headers.get('if-none-match');
-    const conditional = ifMatchHdr !== null || ifNoneMatchHdr !== null;
-    const ifMatchVer = ifMatchHdr !== null ? parseEtagVer(ifMatchHdr) : null;
-    if ((ifMatchHdr !== null || ifNoneMatchHdr !== null) &&
-        (ifMatchHdr !== null && ifMatchVer === null)) {
-      return badRequest('bad_if_match'); // malformed If-Match (not a "ver" ETag)
-    }
 
     const existing = this.ctx.storage.sql
       .exec('SELECT ver, nonce, ct FROM rows WHERE id = ?', id)
       .toArray();
     const now = Math.floor(Date.now() / 1000);
 
-    if (conditional) {
-      if (ifMatchHdr !== null && existing.length === 0) {
-        // If-Match on a missing row: 404 (not_found WITH body, §5).
-        return json({ error: 'not_found' }, 404);
+    // ---- RFC 9110 §13.2.2 step 1: If-Match (strong) ----
+    if (ifMatchHdr !== null) {
+      const im = parseEtagList(ifMatchHdr);
+      if (im.malformed) return badRequest('bad_if_match'); // §9c: fail closed
+      let imOk;
+      if (im.star) {
+        imOk = existing.length > 0; // * → true iff the row exists
+      } else {
+        // Strong comparison: current etag (opaque "<ver>") must equal a
+        // listed STRONG tag exactly — W/"5" never matches "5".
+        const cur = existing.length ? String(existing[0].ver) : null;
+        imOk = cur !== null && im.tags.some((t) => !t.weak && t.tag === cur);
       }
-      if (ifMatchHdr !== null && existing.length > 0 && existing[0].ver !== ifMatchVer) {
-        return new Response(null, { status: 412 }); // Precondition Failed
-      }
-      if (ifNoneMatchHdr !== null && ifNoneMatchHdr.trim() === '*' && existing.length > 0) {
-        return new Response(null, { status: 412 }); // Precondition Failed
+      if (!imOk) return preconditionFailed(); // incl. missing row (old code 404'd)
+    }
+
+    // ---- RFC 9110 §13.2.2 step 3: If-None-Match (weak) ----
+    if (ifNoneMatchHdr !== null) {
+      const inm = parseEtagList(ifNoneMatchHdr);
+      // malformed → §13.1.2 rule 3: condition true → proceed (documented §9c)
+      if (inm.star) {
+        if (existing.length > 0) return preconditionFailed(); // create-only guard
+      } else if (inm.tags) {
+        // Weak comparison: the W/ flag is ignored — W/"5" matches "5".
+        const cur = existing.length ? String(existing[0].ver) : null;
+        if (cur !== null && inm.tags.some((t) => t.tag === cur)) return preconditionFailed();
       }
     }
 
@@ -620,7 +719,6 @@ export class Store {
         'INSERT INTO rows (id, ver, nonce, ct, updated_at) VALUES (?, ?, ?, ?, ?)',
         id, ver, nonce, ct, now
       );
-      this.bumpEpoch();
       // Efficiency E1-4: the submitted strings passed the canonical b64Decode,
       // so they are byte-identical to re-encoding the decoded arrays — echo
       // them verbatim instead of paying an O(n) re-encode per accepted row.
@@ -633,7 +731,6 @@ export class Store {
         'UPDATE rows SET ver = ?, nonce = ?, ct = ?, updated_at = ? WHERE id = ?',
         ver, nonce, ct, now, id
       );
-      this.bumpEpoch();
       return json({ id, ver, nonce: val.nonce, ct: val.ct });
     }
 
@@ -646,15 +743,11 @@ export class Store {
     });
   }
 
-  /** DELETE /rows/{id} — idempotent (§9). */
+  /** DELETE /rows/{id} — idempotent (§9). The rows_bump_del trigger bumps
+   *  the manifest epoch ONLY for a real delete (a re-delete of a missing row
+   *  deletes nothing → no bump), exactly §9d. */
   async hDeleteRow(id) {
-    const existed = this.ctx.storage.sql
-      .exec('SELECT COUNT(*) AS n FROM rows WHERE id = ?', id)
-      .toArray();
     this.ctx.storage.sql.exec('DELETE FROM rows WHERE id = ?', id);
-    // §9 conditional read: only a REAL deletion changes the manifest epoch
-    // (an idempotent re-delete of a missing row must not invalidate caches).
-    if (existed.length && Number(existed[0].n) > 0) this.bumpEpoch();
     return json({});
   }
 
@@ -688,11 +781,21 @@ export class Store {
         'auth_ui TEXT NOT NULL, auth_clock TEXT NOT NULL, ver INTEGER NOT NULL, PRIMARY KEY (day))'
     );
 
-    const stmts = rows.map((r) =>
-      db
-        .prepare('INSERT OR REPLACE INTO backup (day, id, ver, nonce, ct) VALUES (?, ?, ?, ?, ?)')
-        .bind(day, r.id, r.ver, toU8(r.nonce), toU8(r.ct))
-    );
+    // sec-S6-F3 (exact-day snapshot): the day bucket is now cleared before
+    // the inserts — rows deleted earlier today no longer linger in tonight's
+    // snapshot (the old INSERT OR REPLACE-only merge could resurrect deleted
+    // events in a same-day restore). DELETE + inserts ride ONE db.batch.
+    const stmts = [
+      db.prepare('DELETE FROM backup WHERE day = ?').bind(day),
+      db.prepare('DELETE FROM config_backup WHERE day = ?').bind(day),
+    ];
+    for (const r of rows) {
+      stmts.push(
+        db
+          .prepare('INSERT OR REPLACE INTO backup (day, id, ver, nonce, ct) VALUES (?, ?, ?, ?, ?)')
+          .bind(day, r.id, r.ver, toU8(r.nonce), toU8(r.ct))
+      );
+    }
     if (cfg) {
       stmts.push(
         db

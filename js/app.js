@@ -335,7 +335,7 @@ function syncCalVisible() {
  * theme plugins register their render hooks at construction) and persists
  * to localStorage. */
 
-const SETTINGS_KEYS = ['theme', 'fcTheme', 'fcPalette', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view'];
+const SETTINGS_KEYS = ['theme', 'fcTheme', 'fcPalette', 'firstDay', 'hour12', 'slotDuration', 'weekNumbers', 'density', 'customDays', 'view', 'autoLock'];
 
 const SETTINGS_DEFAULTS = {
   theme: 'system',            // color scheme: 'light' | 'dark' | 'system'
@@ -348,6 +348,7 @@ const SETTINGS_DEFAULTS = {
   density: 'comfortable',     // 'comfortable' | 'compact'
   customDays: 5,              // custom view days (2..14)
   view: 'dayGridMonth',       // default view on unlock
+  autoLock: true,             // sec-S5-F4: idle auto-lock (15 min) on by default
 };
 
 let settings = { ...SETTINGS_DEFAULTS };
@@ -403,6 +404,7 @@ function loadSettings() {
   if (!['00:15:00', '00:30:00', '01:00:00'].includes(settings.slotDuration)) settings.slotDuration = '00:30:00';
   if (!['comfortable', 'compact'].includes(settings.density)) settings.density = 'comfortable';
   if (![0, 1, 6].includes(settings.firstDay)) settings.firstDay = 1;
+  if (typeof settings.autoLock !== 'boolean') settings.autoLock = true; // sec-S5-F4
 }
 
 function saveSettings() {
@@ -579,6 +581,11 @@ function hydrateLocalCache() {
   try {
     const o = JSON.parse(localStorage.getItem(LS_CACHE) || 'null');
     if (!o || typeof o !== 'object' || o.v !== 1) return false;
+    // sec-S7-F3: the model cache is pinned to the universe it was decrypted
+    // under (cfg fingerprint = salt|wrapped, set at unlock). A cache from
+    // DIFFERENT key material (post-rotation, post-force-wipe) must never
+    // paint — that was the stale-universe ghost-render path.
+    if (!state.cfgFp || o.fp !== state.cfgFp) return false;
     if (Array.isArray(o.cals)) {
       for (const c of o.cals) {
         const meta = core.validateCalendarMeta(c && c.meta);
@@ -612,7 +619,9 @@ function scheduleCacheWrite() {
 }
 function writeLocalCache() {
   try {
-    const o = { v: 1, cals: [], evt: [] };
+    // sec-S7-F3: stamp the cfg fingerprint so hydrateLocalCache can refuse
+    // a cache decrypted under different key material.
+    const o = { v: 1, fp: state.cfgFp || null, cals: [], evt: [] };
     for (const [uuid, c] of state.cals) o.cals.push({ uuid, ver: c.ver, meta: c.meta });
     for (const [id, r] of state.evt) o.evt.push({ id, ver: r.ver, text: core.serializeEvtPayload(r.parsed) });
     localStorage.setItem(LS_CACHE, JSON.stringify(o));
@@ -628,10 +637,28 @@ function purgeLocalCache() {
   try { localStorage.removeItem(LS_CACHE); } catch { /* ignore */ }
 }
 
-/* ---------------- provisioning & boot (unchanged from v4.1 client) ---------------- */
+/* ---------------- provisioning & boot ---------------- */
 
 function serverUrl() {
   return localStorage.getItem(LS_SERVER) || DEFAULT_SERVER_URL;
+}
+
+/** sec-S5-F1: a `server` URL parameter is only honoured for loopback hosts
+ *  (pointing a browser at a local dev stack). A crafted link carrying
+ *  `?server=https://evil.example/` used to silently repoint every unlock
+ *  request — bearer included — at the attacker's server; the URL bar was
+ *  cleaned afterwards, so nothing looked wrong. Remote hosts from a URL are
+ *  now IGNORED with a loud toast; the login form field (a visible, manual
+ *  user action) remains the only way to set a remote server. */
+function isLoopbackServer(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1' ||
+      u.hostname === '[::1]' || u.hostname.endsWith('.localhost');
+  } catch {
+    return false;
+  }
 }
 
 function ingestParams() {
@@ -639,16 +666,30 @@ function ingestParams() {
   const hash = new URLSearchParams(
     location.hash.startsWith('#') ? location.hash.slice(1) : location.hash
   );
-  const setup = hash.get('setup') || params.get('setup');
+  // sec-S5-F2: `setup` is accepted from the URL FRAGMENT only — fragments are
+  // never sent to any server, while a `?setup=` query string lands verbatim in
+  // static-host/CDN/proxy access logs (GitHub Pages → Fastly → corporate
+  // middleboxes all log full request URLs).
+  const setup = hash.get('setup');
   if (setup && /^[0-9a-f]{64}$/.test(setup)) {
     safeSetItem(LS_TOKEN, setup);
     toast('Provisioning code stored in this browser.', 'ok');
   } else if (setup) {
     toast('Ignored invalid provisioning code (must be 64 lowercase hex chars).', 'err');
   }
+  if (params.get('setup')) {
+    toast('Ignored a provisioning code passed in the query string (use a #fragment link — query strings are logged by servers).', 'warn', 9000);
+  }
   const srv = hash.get('server') || params.get('server');
-  if (srv && /^https?:\/\//.test(srv)) safeSetItem(LS_SERVER, srv.replace(/\/+$/, ''));
-  if (setup || srv) history.replaceState(null, '', location.pathname);
+  if (srv) {
+    if (/^https?:\/\//.test(srv) && isLoopbackServer(srv)) {
+      safeSetItem(LS_SERVER, srv.replace(/\/+$/, ''));
+      toast('Server set from link: ' + srv.replace(/\/+$/, '') + ' (local development).', 'ok', 7000);
+    } else if (/^https?:\/\//.test(srv)) {
+      toast('Ignored a server address from the link (' + srv.slice(0, 60) + ') — only local development servers may be set via URL.', 'err', 9000);
+    }
+  }
+  if (setup || srv || params.get('setup')) history.replaceState(null, '', location.pathname);
 }
 
 /* ---------------- unlock (§3) ---------------- */
@@ -664,20 +705,40 @@ async function unlock() {
     $('#login-msg').textContent = 'No provisioning code in this browser — paste one below first.';
     return;
   }
-  setBusy(true, 'Deriving keys (PBKDF2 100000 iterations)…');
+  setBusy(true, 'Deriving keys (PBKDF2)…');
   try {
     const probe = new Api(url, token);
     let cfg;
     let offline = false;
     try {
       cfg = await probe.getConfig();
-      // LOCAL-FIRST: cache the (public, §8-unauthenticated) config row so a
-      // LATER unlock can derive keys and open the cached calendar even
-      // while the server is unreachable.
+      // sec-S7-F3: the LOCAL-FIRST config cache must never go STALE-unnoticed.
+      // If the server's key material changed since we last cached it (Type-A
+      // rewrap, or a force re-bootstrap to a new universe), the cached cfg —
+      // and the decrypted model cache built under it — describe a dead
+      // universe; a revoked password could still "unlock" offline against
+      // the old wrapped blob. Purge both BEFORE derivation so changed
+      // material can never hydrate stale plaintext.
+      let cachedCfg = null;
+      try { cachedCfg = JSON.parse(localStorage.getItem(LS_CFG) || 'null'); } catch { /* ignore */ }
+      if (cachedCfg && typeof cachedCfg === 'object' &&
+          (cachedCfg.salt !== cfg.salt || cachedCfg.wrapped !== cfg.wrapped)) {
+        purgeLocalCache();
+        toast('Server key material changed — local cache cleared.', 'warn', 7000);
+      }
+      // LOCAL-FIRST: cache the (public, §8) config row so a LATER unlock
+      // can derive keys and open the cached calendar even while the server
+      // is unreachable. The fingerprint (salt+wrapped) pins the model cache
+      // to THIS universe — see hydrateLocalCache.
       safeSetItem(LS_CFG, JSON.stringify(cfg));
     } catch (e) {
       // Offline fallback: use the cached config when one exists — the
-      // local cache then renders without any network round-trip.
+      // local cache then renders without any network round-trip. NOTE
+      // (sec-S7-F3, documented trade-off): if the password was rotated
+      // server-side, a stale cached cfg still unwraps the OLD AES1 offline
+      // — bounded by "this browser profile already held that plaintext";
+      // the next ONLINE unlock replaces the cached cfg (above) and purges
+      // the stale model.
       let cached = null;
       try { cached = JSON.parse(localStorage.getItem(LS_CFG) || 'null'); } catch { /* ignore */ }
       const okCfg = cached && typeof cached === 'object' &&
@@ -686,6 +747,10 @@ async function unlock() {
       cfg = cached;
       offline = true;
     }
+    // sec-S7-F3: the cache fingerprint = the cfg's key material (salt+wrapped
+    // uniquely identify the KEK inputs). hydrateLocalCache refuses to paint
+    // a model cached under DIFFERENT material (e.g. after a rotation).
+    state.cfgFp = String(cfg.salt) + '|' + String(cfg.wrapped);
     const { aes1, kData, authUiHex } = await deriveKeys(password, cfg.salt, cfg.iters, cfg.wrapped);
     if (authUiHex !== token) {
       toast('Warning: stored provisioning code does not match the derived AUTH_UI. Using derived token.', 'warn', 8000);
@@ -694,7 +759,7 @@ async function unlock() {
     state.rowKey = await importRowKey(kData);
     state.today = core.localToday();
     if (offline) {
-      toast('Server unreachable — showing your locally cached calendar (read-only until sync succeeds).', 'warn', 8000);
+      toast('Server unreachable — showing your locally cached calendar (read-only until sync succeeds). If your password was recently changed, this view may be stale.', 'warn', 9000);
       state.batchOk = false; // every read would fail anyway; per-row fallback is quiet
     }
     // v4.5 LOCAL-FIRST: hydrate the decrypted model from the local cache
@@ -713,7 +778,14 @@ async function unlock() {
       try {
         const ver = await state.api.getVersion();
         $('#proto-badge').textContent = 'protocol ' + ver.proto;
-        if (ver.proto !== '4.3') {
+        // sec-S8-F3: semver-tolerant gate — the exact-string '4.3' match
+        // degraded EVERY future server (a 4.3.1 worker would silently lose
+        // §9b batch). Batch needs >= 4.3: accept any 4.x with x >= 3 and any
+        // higher major. The gate is a capability hint, not an auth boundary —
+        // a wrong guess degrades to per-row reads, it never blocks.
+        const vm = /^(\d+)\.(\d+)/.exec(String(ver.proto || ''));
+        const batchOkProto = vm && (Number(vm[1]) > 4 || (Number(vm[1]) === 4 && Number(vm[2]) >= 3));
+        if (!batchOkProto) {
           state.batchOk = false;
           toast('Server reports protocol ' + ver.proto + ' (this client targets 4.3). ' +
             'Sync falls back to per-row reads. Deploy the updated worker for batch sync.', 'warn', 9000);
@@ -726,6 +798,7 @@ async function unlock() {
     })();
     $('#password').value = '';
     await showApp();
+    armAutoLock(); // sec-S5-F4: the idle clock starts once the app is up
     if (hadLocal) {
       // Cached data is on screen — reconcile silently (failure-tolerant,
       // toasts handled inside syncAll; autosync keeps retrying every 60 s).
@@ -746,11 +819,13 @@ async function unlock() {
     const msg =
       e instanceof ApiError && e.kind === 'silent'
         ? 'Authentication failed (silent 404): the provisioning code is not valid on this server.'
-        : e && e.message === 'unlock_failed'
-          ? 'Unlock failed: wrong password (or the server config does not match this deployment).'
-          : e && e.message === 'bad_token'
-            ? 'The stored provisioning code is malformed — paste a valid 64-hex code below.'
-            : 'Login failed: ' + (e && e.message ? e.message : String(e)) + srvErr;
+        : e instanceof ApiError && e.kind === 'forbidden'
+          ? 'The server rejected this token class (403): the stored code is a read-only token — re-provision with the AUTH_UI code.'
+          : e && e.message === 'unlock_failed'
+            ? 'Unlock failed: wrong password (or the server config does not match this deployment).'
+            : e && e.message === 'bad_token'
+              ? 'The stored provisioning code is malformed — paste a valid 64-hex code below.'
+              : 'Login failed: ' + (e && e.message ? e.message : String(e)) + srvErr;
     $('#login-msg').textContent = msg;
   } finally {
     setBusy(false);
@@ -771,8 +846,10 @@ async function showApp() {
 function lock() {
   if (state.busy) return;
   closeAllOverlays();
+  disarmAutoLock();
   state.api = null;
   state.rowKey = null;
+  state.cfgFp = null;
   state.cals.clear();
   state.evt.clear();
   state.corrupt.clear();
@@ -813,6 +890,49 @@ function forgetBrowser() {
   refreshLoginUi();
   toast('Provisioning code forgotten on this browser.', 'ok');
 }
+
+/* ---------------- idle auto-lock (sec-S5-F4) ----------------
+ * Nothing ever triggered lock() automatically: an unlocked tab left on
+ * screen (or closed without pressing Lock) kept the full plaintext model
+ * in localStorage indefinitely. After 15 minutes without user activity
+ * the app now locks + purges — the exact lock() the topbar button runs.
+ * Armed on unlock, disarmed by lock(); disabled via the settings toggle.
+ * A loopback-only test hook lets the e2e suite force expiry without
+ * waiting a quarter hour. */
+const AUTO_LOCK_MS = 15 * 60 * 1000;
+let autoLockTimer = null;
+let lastActivity = Date.now();
+
+function armAutoLock() {
+  if (autoLockTimer) clearTimeout(autoLockTimer);
+  if (!settings.autoLock) return;
+  autoLockTimer = setTimeout(() => {
+    autoLockTimer = null;
+    if (state.api && !state.busy) {
+      lock();
+      toast('Auto-locked after 15 minutes of inactivity.', 'ok', 6000);
+    }
+  }, AUTO_LOCK_MS);
+}
+
+function disarmAutoLock() {
+  if (autoLockTimer) clearTimeout(autoLockTimer);
+  autoLockTimer = null;
+}
+
+function noteUserActivity() {
+  const now = Date.now();
+  if (now - lastActivity < 1000) return; // 1 Hz throttle is plenty
+  lastActivity = now;
+  if (settings.autoLock && state.api) armAutoLock();
+}
+
+/** Loopback check for dev/test-only affordances (e2e stacks, __autolockForce). */
+function isLoopbackHost() {
+  return location.hostname === 'localhost' || location.hostname === '127.0.0.1' ||
+    location.hostname === '[::1]' || location.hostname.endsWith('.localhost');
+}
+
 
 /* ---------------- sync: v4.3 read-only manifest diff + §9b batch ---------------- */
 
@@ -3681,6 +3801,19 @@ function openSettingsModal() {
   dnSel.value = settings.density;
   dnSel.addEventListener('change', () => change(() => { settings.density = dnSel.value; }));
   tgb.appendChild(dnSel);
+
+  // sec-S5-F4: idle auto-lock toggle (on by default; 15 min inactivity).
+  const alChk = el('input', null, { type: 'checkbox', id: 'set-autolock' });
+  alChk.checked = settings.autoLock !== false;
+  const alLbl = el('label', { style: 'display:flex;align-items:center;gap:6px;margin-top:8px;' });
+  alLbl.append(alChk, document.createTextNode('Auto-lock after 15 minutes idle'));
+  alChk.addEventListener('change', () =>
+    change(() => {
+      settings.autoLock = alChk.checked;
+      if (!alChk.checked) disarmAutoLock();
+      else if (state.api) armAutoLock();
+    }));
+  tgb.appendChild(alLbl);
   togRow.appendChild(tgb);
   box.appendChild(togRow);
 
@@ -3717,7 +3850,23 @@ function refreshLoginUi() {
   const has = !!raw && /^[0-9a-f]{64}$/.test(raw);
   $('#setup-row').hidden = has;
   $('#lock-note').hidden = has;
-  $('#server').value = serverUrl();
+  const srv = serverUrl();
+  $('#server').value = srv;
+  // sec-S5-F1 residue: a browser whose LS_SERVER was poisoned by a crafted
+  // link BEFORE the loopback restriction keeps pointing at the attacker's
+  // server (the restriction only blocks NEW URL-based repointing). Loudly
+  // flag any non-default, non-loopback stored server before unlock.
+  let note = document.getElementById('server-note');
+  if (!note) {
+    note = el('p', 'hint');
+    note.id = 'server-note';
+    $('#server').after(note);
+  }
+  const foreign = srv !== DEFAULT_SERVER_URL && !isLoopbackServer(srv);
+  note.hidden = !foreign;
+  note.textContent = foreign
+    ? 'Heads-up: this browser is set to a NON-DEFAULT server (' + srv + '). Verify you trust it before unlocking — the API token is sent there.'
+    : '';
 }
 
 function bind() {
@@ -3883,6 +4032,21 @@ function bind() {
       renderAll();
     }
   }, 60000);
+
+  // sec-S5-F4 — idle auto-lock listeners (the machinery lives at module
+  // scope; unlock arms, lock disarms, activity re-arms).
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, noteUserActivity, { passive: true });
+  }
+  if (isLoopbackHost()) {
+    window.__autolockForce = () => {
+      disarmAutoLock();
+      if (state.api && !state.busy) {
+        lock();
+        toast('Auto-locked (forced).', 'ok', 4000);
+      }
+    };
+  }
 
   // 'system' theme: follow the OS preference live.
   const mq = window.matchMedia('(prefers-color-scheme: dark)');

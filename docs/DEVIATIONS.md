@@ -177,3 +177,43 @@ tweak their drag/resize; copy verbatim):
 - **`startDelta` on resize is ignored** — safe while
   `eventResizableFromStart` stays at its default `false` (verified in the
   vendored bundle).
+
+## Security hardening wave (sec-S1..S8, 2026-11-01)
+
+Dispositions of the 8-agent security pentest (audit-d/sec-S*-findings.md);
+every code fix is regression-pinned in test/api-suite.mjs (SEC-* phases),
+test/front-door-unit.mjs, and scripts/e2e-sec.mjs.
+
+### Fixed in code (worker)
+- **S1-1** http→https 308 upgrade (non-loopback only) + HSTS on every response.
+- **S1-2** `Access-Control-Expose-Headers: ETag` (browser can finally read the §9d validator).
+- **S1-3** `Vary: Origin` on ALL responses (incl. undecorated).
+- **S8-F5** `Cache-Control: no-store` on JSON + 304.
+- **S8-F4** front-door try/catch → §4-conformant silent drop (no 500 leak).
+- **S4-1/S4-2/S8-F1** epoch bumps are now SQLite TRIGGERS on the rows table — atomic with the mutation, and a force-wipe invalidates the etag per destroyed row.
+- **S4-3/S4-5/S8-F6** §9c conditional PUT is RFC 9110-exact: If-Match star/list/strong-compare, If-None-Match list/weak-compare, missing-row→412, §13.2.2 evaluation order (both headers evaluated). NOTE: the S4 agent's "If-None-Match is ignored when If-Match is present" claim was REFUTED against the RFC text — §13.2.2 evaluates both.
+- **S7-F2** `iters` is a range (100k floor, 10M ceiling); rewrap accepts optional `iters`; CLI defaults to 600k.
+- **S7-F5** `ct` ≥ 16 bytes (GCM tag floor).
+- **S2-L1** 403/bad_id rejections drain bodied PUT **and** DELETE.
+- **S6-F3** §19 backup day-buckets are exact (cleared before the inserts).
+- **S6-F4** DO error log: fixed `store_error <class>` tag, never the message.
+
+### Fixed in code (client)
+- **S5-F1** `?server=`/`#server=` URL parameter is honoured for LOOPBACK hosts only; remote URLs from links are ignored with a loud toast; a persistent login-form warning flags any stored non-default server (covers browsers poisoned before the fix).
+- **S5-F2** provisioning `setup` token is accepted from the URL FRAGMENT only; `?setup=` is refused (query strings land in CDN/proxy logs).
+- **S5-F3** `<meta>` CSP (`script-src 'self'`; `connect-src` = self + the real worker + loopback dev), `referrer no-referrer`, and a JS frame-buster in js/boot-guard.js (Pages cannot set headers; meta CSP `frame-ancestors` is ignored by spec — the JS guard is the framing mitigation). **Trade-off:** pointing the client at a DIFFERENT remote worker now requires editing the CSP in index.html.
+- **S5-F4** idle auto-lock (15 min, settings toggle, loopback test hook `__autolockForce`).
+- **S7-F3** the local-first cache is pinned to the cfg fingerprint (salt+wrapped); an online cfg change purges the stale model before derivation. Offline unlock against a stale cached cfg remains possible BY DESIGN (local-first); bounded and toast-warned.
+- **S8-F3** version gate is semver-tolerant (4.3.x / 4.4+ keep §9b batch).
+- **S8-F10** dedicated `forbidden` (403) unlock message.
+
+### Fixed in repo/ops
+- **S7-F1 (CRITICAL)** live K_data + AUTH_UI were committed in 8 scripts (anonymously fetchable; token verified live-valid). Stripped — scripts load material from the operator's git-ignored credentials file (scripts/lib-prod-material.mjs, `CALENDAR_SECRETS` env override); the live universe was force-re-bootstrap-rotated (new AES1/salt, 600k iters); git history purged with git-filter-repo + force-push; CI hex-literal guard added.
+- **S6-F1** seeding tools now use opaque `randomUUID()` UIDs (title slugs leaked the SUMMARY into server-visible ids); live rows re-seeded opaque.
+
+### Accepted + documented (no code change)
+- **S2-L2** `GET /config` exposes `wrapped` to the clock class — clock devices need the same KEK inputs (protocol.md §1 "capability handles" note).
+- **S6-F2** AUTH tokens replicated into D1 `config_backup` — same trust domain as the DO (documented §1/§7).
+- **S7-F4** no AUTH-token revocation short of force re-bootstrap (the documented operator drill); §20 Type B unimplemented.
+- **S7-F5 (residual)** cross-ver envelope transplants are undetectable without breaking L1 — accepted (the client flags undecryptable rows corrupt).
+- **S1-5/S1-6/S1-7, S4-4..S4-8, S6-F5/F6, S8-F7..F9** INFO-grade; documented in protocol.md errata where relevant.

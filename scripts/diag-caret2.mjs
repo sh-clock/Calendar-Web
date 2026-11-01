@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 const mat = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8'));
 const browser = await chromium.launch();
 const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
-await page.goto('http://127.0.0.1:8080/?server=http://127.0.0.1:8787&setup=' + mat.auth_ui_hex);
+await page.goto('http://127.0.0.1:8080/#server=http://127.0.0.1:8787&setup=' + mat.auth_ui_hex);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');
 await page.waitForSelector('#app:not([hidden])', { timeout: 30000 });

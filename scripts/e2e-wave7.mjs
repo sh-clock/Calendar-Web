@@ -25,7 +25,7 @@ page.on('pageerror', (e) => pageErrors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') pageErrors.push('CONSOLE: ' + m.text()); });
 
 async function unlock() {
-  await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+  await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
   await page.waitForTimeout(400);
   await page.fill('#password', 'password');
   await page.click('button[type=submit]');

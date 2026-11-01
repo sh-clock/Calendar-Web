@@ -2573,3 +2573,98 @@ A6-edge 10/10 · A6-dnd 15/15.
   client + Cloudflare worker (attacker knows the exact worker source; no
   security-by-obscurity; password cracking + DDoS OUT OF SCOPE).
 - Then: efficiency + UI-enhancement audit wave.
+
+## SESSION 2026-11-01 (c) — SECURITY PENTEST: 8-agent findings dispositioned + fixed
+
+### Context
+The crashed session's 8-agent security pentest (S1 network/edge, S2 auth,
+S4 concurrency, S5 client, S6 zero-knowledge invariant, S7 crypto, S8
+protocol conformance) had written audit-d/sec-S*-findings.md but crashed
+before disposition. This session verified every finding against the code
+(false-positive protocol) and implemented all fixes.
+
+### Findings inventory (verified) → disposition
+CRITICAL S7-F1 live K_data+AUTH_UI committed in 8 scripts (anonymously
+fetchable; token verified live-valid by re-probe) → FIXED (material via
+scripts/lib-prod-material.mjs + universe rotation + history purge + CI guard).
+HIGH S5-F1 ?server= crafted-link bearer exfiltration → FIXED (loopback-only
+URL server param + loud toasts + login-form warning for pre-fix poisoned
+browsers + CSP connect-src as platform backstop). HIGH S6-F1 title-slug
+UIDs leaked 6/13 live event titles into server metadata → FIXED (opaque
+randomUUID uids in seeders; live reseed post-rotation). MEDIUM S1-1 http
+bearer accepted, no HSTS → FIXED (308 upgrade + HSTS). MEDIUM S4-1/S8-F1
+force-wipe leaves stale-304 ghost state → FIXED (epoch triggers). MEDIUM
+S7-F2 PBKDF2 100k pinned → FIXED (range 100k..10M; rewrap iters; CLI 600k).
+MEDIUM S7-F3 offline unlock with revoked password via stale LS_CFG → FIXED
+(cfg-fingerprint cache pinning + online-change purge; offline-stale remains
+by-design, toast-warned, documented). MEDIUM S5-F2 ?setup= in query logs →
+FIXED (fragment-only). MEDIUM S5-F3 no CSP/frame-busting → FIXED (meta CSP
+script-src 'self' + connect-src pinning + referrer no-referrer +
+js/boot-guard.js frame-buster). MEDIUM S8-F2 spec move-order DELETE-first
+data-loss trap → FIXED (protocol.md §9 now documents the implemented
+PUT-first order). LOWs fixed: S1-2 expose-headers ETag, S1-3 vary everywhere,
+S8-F4 front-door catch, S8-F5 no-store, S8-F3 semver version gate, S2-L1
+DELETE drain, S7-F5 ct>=16, S6-F3 exact-day backup, S5-F4 idle auto-lock
+(15 min, setting + __autolockForce hook), S8-F10 forbidden toast, S6-F4
+fixed-tag logging, S4-3/S4-5/S8-F6 RFC 9110-exact conditional semantics.
+INFO/accepted: S2-L2 config-to-clock (design), S6-F2 D1 token replication
+(same trust domain, documented §1), S7-F4 no Type-B revocation (drill
+documented), S1-5/6/7, S4-4/6/7/8, S6-F5/F6, S8-F7/F8/F9 (errata folded
+into protocol.md).
+
+### FALSE POSITIVES refuted during disposition (Commandment: verify first)
+1. S4-3's claim "RFC 9110 §13.2: If-None-Match MUST be ignored when
+   If-Match is present" — the actual §13.2.2 algorithm evaluates BOTH in
+   order (fetched rfc9110.txt and read the section). The current 412-on-both
+   behavior was CORRECT; only the etag-form-If-None-Match-ignored part was
+   real.
+2. "CI workflow triggers corrupted (branches: ain])" — the hex dump shows
+   `branches: [main]` intact; the bash output DISPLAY strips `[m` as an ANSI
+   escape. (Same display artifact bit the prior session's commit 6e5bb91.)
+
+### Implementation notes
+- Epoch atomicity: SQLite AFTER INSERT/UPDATE/DELETE triggers on rows bump
+  meta.epoch — verified supported on workerd DO-SQLite with a scratch probe
+  before committing to the design (e0→e1 on INSERT). Removes the S4-2 crash
+  window AND closes S4-1/S8-F1 by construction (wipe = N real deletes).
+- Conditional parsing: parseEtagList with OPTIONAL W/ group (a first draft
+  missed the `?` — every strong etag parsed as malformed; caught by the
+  api-suite v43d failures and fixed before commit).
+- CSP: script-src 'self' required moving the inline theme-boot IIFE +
+  frame-buster into js/boot-guard.js (external blocking head script).
+  style-src needs 'unsafe-inline' (runtime theme <style> elements).
+  connect-src = self + the real worker + localhost:* (dev stacks);
+  trade-off documented: a DIFFERENT remote worker requires editing the CSP.
+- Tests: api-suite +39 checks (SEC-C/D/H/I phases + r2.1b/b2.6, 202 total);
+  test/front-door-unit.mjs 14 checks (redirect/HSTS/vary/expose/§4-law —
+  not observable through wrangler dev's localhost, so the worker module is
+  imported and driven with a stubbed DO); scripts/e2e-sec.mjs 24 checks
+  (URL-param hardening, fragment-only setup, frame-bust via a real loopback
+  attacker server — route interception trips Chromium's local-network-access
+  classification — CSP fetch/inline-script blocks, auto-lock, cache-fp
+  pinning, semver gate). All 31 test/probe harnesses moved to `#server=`
+  fragment URLs.
+- run-local's restore drill asserted every row decrypts to {events:[]} —
+  SEC-C's {sec:'cond'} payload broke it; SEC-C now uses the standard shape
+  (test bug, not app).
+- Hex guard in CI: git grep 64-hex over scripts/ worker/ cli/ js/ — also
+  caught 3 stale local-material debug scripts (drag-debug, repro-user-flow,
+  measure-week-local) now reading /tmp/local-material.json.
+
+### Battery (all green, post-fix)
+core-unit 176/176 · core-tasks 62/62 · crypto-parity 38/38 ·
+front-door-unit 14/14 · api-suite 202/202 · run-local ALL GREEN ·
+smoke-v7 43/43 · e2e-fc 50/50 · e2e-fc-fixes 25/25 · e2e-sec 24/24 ·
+A6-1..6 46/41/38/31/27/38 · reverify 13/12/10 · edge 10 · dnd 15.
+
+### Deployment (this session)
+Worker redeployed (all §9*/transport fixes), Pages redeployed (CSP +
+boot-guard + client fixes), live universe force-re-bootstrap-rotated (new
+AES1/salt/KEK material at 600k iters, same user test password), demo data
+re-seeded with OPAQUE uids, live E2E verified. Git history purged of the
+leaked material via git-filter-repo + force-push.
+
+### Next
+- Verification pentest wave (6+ agents re-attacking the fixed deployment,
+  live + theoretical; no DDoS, no password cracking).
+- Then: efficiency + UI enhancement audit wave (user directive).

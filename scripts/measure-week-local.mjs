@@ -4,7 +4,7 @@ import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.
 
 const SITE = "http://127.0.0.1:8080/";
 const SERVER = 'http://127.0.0.1:8787';
-const AUTH_UI = '*SCRUBBED*<=';
+const AUTH_UI = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8')).auth_ui_hex; // with-stack material (never committed)
 
 const browser = await chromium.launch();
 const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();

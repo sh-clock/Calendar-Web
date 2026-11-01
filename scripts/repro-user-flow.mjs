@@ -5,7 +5,7 @@ import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.
 
 const BASE = 'http://127.0.0.1:8080';
 const SERVER = 'http://127.0.0.1:8787';
-const AUTH_UI = '*SCRUBBED*<=';
+const AUTH_UI = JSON.parse(readFileSync('/tmp/local-material.json', 'utf8')).auth_ui_hex; // with-stack material (never committed)
 
 const requests = [];
 const consoleErrors = [];
@@ -35,7 +35,7 @@ function dumpReq(label) {
 const repro = { mark: 0 };
 
 async function unlockFlow() {
-  await page.goto(BASE + '/?server=' + SERVER + '&setup=' + AUTH_UI);
+  await page.goto(BASE + '/#server=' + SERVER + '&setup=' + AUTH_UI);
   await page.waitForTimeout(500);
   await page.fill('#password', 'password');
   await page.click('button[type=submit]');

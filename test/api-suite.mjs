@@ -98,13 +98,17 @@ async function silentShape(method, path, opts) {
     etag: r.headers.get('etag'),
     expires: r.headers.get('expires'),
     lastMod: r.headers.get('last-modified'),
+    vary: r.headers.get('vary'),
+    hsts: r.headers.get('strict-transport-security'),
+    acao: r.headers.get('access-control-allow-origin'),
   };
 }
 
 /* ---------------- material ---------------- */
 
-const MAT = buildBootstrapMaterial(PW); // primary test universe
-const MAT2 = buildBootstrapMaterial(PW + '-rotated'); // for Type A rewrap test
+const FAST_ITERS = 100000; // server-accepted floor: keeps the suite's many derives fast
+const MAT = buildBootstrapMaterial(PW, FAST_ITERS); // primary test universe
+const MAT2 = buildBootstrapMaterial(PW + '-rotated', FAST_ITERS); // for Type A rewrap test
 const UNKNOWN_TOKEN = 'f'.repeat(64);
 const b64 = (b) => Buffer.from(b).toString('base64');
 const hx = (b) => Buffer.from(b).toString('hex');
@@ -368,7 +372,7 @@ let CFG;
 {
   // §20 Type A with the SAME AES1 (the spec invariant: "re-wrap AES1 … No data
   // re-encryption anywhere … AES1 unchanged").
-  const re = buildRewrapMaterial(MAT.aes1, PW + '-typea');
+  const re = buildRewrapMaterial(MAT.aes1, PW + '-typea', FAST_ITERS);
   const r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex } });
   check('c12 Type A rewrap (same AES1) -> 200 {}', r.status === 200 && r.text === '{}', r.text);
   const c = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
@@ -542,7 +546,9 @@ console.log('PHASE R2 — size/encoding edges (§21, D9, D16)');
 
 {
   const r = await raw('PUT', '/rows/cal:20990501', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(4)) } });
-  check('r2.1 4-byte ct -> 200 (D16: no minimum)', r.status === 200, r.text);
+  check('r2.1 4-byte ct -> 400 bad_ct (sec-S7-F5: GCM tag floor = 16B)', r.status === 400 && jparse(r.text)?.error === 'bad_ct', r.text);
+  const r1b = await raw('PUT', '/rows/cal:20990511', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(16)) } });
+  check('r2.1b 16-byte ct (bare GCM tag) -> 200', r1b.status === 200, r1b.text);
   const r2 = await raw('PUT', '/rows/cal:20990502', { token: MAT.authUiHex, body: { ver: 1, nonce: b64(randomBytes(12)), ct: b64(randomBytes(17)) } });
   check('r2.2 17-byte ct -> 200', r2.status === 200, r2.text);
   const id257 = 'cal:' + 'a'.repeat(253); // 257 chars total
@@ -840,6 +846,36 @@ console.log('PHASE M — misc shapes');
 }
 
 /* ================================================================ */
+console.log('PHASE SEC-I — §2 KDF iters range + §20 rewrap-with-iters (sec-S7-F2)');
+/* ================================================================ */
+/* Runs BEFORE the B2 destructive wipe on purpose: the out-and-back rotation
+   leaves config.iters at 600k, and B2 then force-bootstraps the universe
+   back to the 100k MAT material. */
+
+{
+  const bootBody = (iters) => ({
+    salt: MAT.saltHex, iters, wrapped: MAT.wrappedB64,
+    auth_ui: MAT.authUiHex, auth_clock: MAT.authClockHex,
+  });
+  let r = await raw('PUT', '/bootstrap', { token: ADMIN, body: bootBody(99999) });
+  check('secI.1 bootstrap iters BELOW floor -> 400 bad_iters', r.status === 400 && jparse(r.text)?.error === 'bad_iters', r.text);
+  r = await raw('PUT', '/bootstrap', { token: ADMIN, body: bootBody(10000001) });
+  check('secI.2 bootstrap iters ABOVE ceiling -> 400 bad_iters', r.status === 400 && jparse(r.text)?.error === 'bad_iters', r.text);
+  r = await raw('PUT', '/bootstrap', { token: ADMIN, body: bootBody(600000) });
+  check('secI.3 bootstrap iters 600000 in range -> passes validation (409 exists)', r.status === 409, r.status + ':' + r.text);
+
+  const re = buildRewrapMaterial(MAT.aes1, PW + '-seci', 600000);
+  r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex, iters: 600000 } });
+  check('secI.4 rewrap WITH iters -> 200 {}', r.status === 200 && r.text === '{}', r.status + ':' + r.text);
+  let cfg = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
+  check('secI.5 config now reports iters 600000 (atomic with the wrap)', cfg.iters === 600000 && cfg.wrapped === re.wrappedB64, JSON.stringify(cfg).slice(0, 90));
+  const keys600 = deriveClientKeys(PW + '-seci', re.saltHex, 600000, re.wrappedB64);
+  check('secI.6 600k derivation unwraps the SAME AES1 (Type A invariant at the new cost)', keys600.aes1.equals(MAT.aes1));
+  r = await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex, iters: 99999 } });
+  check('secI.7 rewrap iters below floor -> 400 bad_iters', r.status === 400 && jparse(r.text)?.error === 'bad_iters', r.text);
+}
+
+/* ================================================================ */
 console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destructive)');
 /* ================================================================ */
 
@@ -851,6 +887,7 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
   }
   const before = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
   check('b2.1 rows seeded before force wipe', before.rows.length >= 2, JSON.stringify(before));
+  const etagBeforeWipe = before.etag;
   const r = await raw('PUT', '/bootstrap', {
     token: ADMIN,
     body: {
@@ -861,6 +898,11 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
   check('b2.2 force re-bootstrap -> 200 {ver:1}', r.status === 200 && jparse(r.text)?.ver === 1, r.text);
   const after = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
   check('b2.3 wipe: manifest EMPTY', after.rows.length === 0, JSON.stringify(after));
+  // sec-S4-1/S8-F1: the destructive wipe MUST invalidate the manifest etag —
+  // a client holding the pre-wipe etag must NOT be answered 304 (the trigger
+  // fires per destroyed row, so the epoch moves even though rows are gone).
+  const stale = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etagBeforeWipe } });
+  check('b2.6 pre-wipe etag no longer 304s (force wipe bumps the epoch)', stale.status === 200 && after.etag !== etagBeforeWipe, stale.status + ':' + after.etag);
   const gone = await raw('GET', '/rows/cal:20261201', { token: MAT.authUiHex });
   check('b2.4 wiped row -> 404 not_found', gone.status === 404 && jparse(gone.text)?.error === 'not_found', gone.text);
   const cfg = jparse((await raw('GET', '/config', { token: MAT.authUiHex })).text);
@@ -886,7 +928,7 @@ console.log('PHASE B2 — §8 force re-bootstrap destructive wipe (final, destru
   }
   // Two rewraps (out and back) bump config.ver to 3 so the D1 config_backup
   // ver copy is non-vacuous for the orchestrator's fidelity check.
-  const re = buildRewrapMaterial(MAT.aes1, PW + '-seed');
+  const re = buildRewrapMaterial(MAT.aes1, PW + '-seed', FAST_ITERS);
   await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: re.wrappedB64, salt: re.saltHex } });
   await raw('PUT', '/bootstrap/rewrap', { token: ADMIN, body: { wrapped: MAT.wrappedB64, salt: MAT.saltHex } });
   const r = await raw('POST', '/internal/backup', { token: INTERNAL });
@@ -1164,6 +1206,130 @@ console.log('PHASE V43D — GET /rows conditional read (protocol.md §9d, v4.3)'
   r = await raw('GET', '/rows', { token: MAT.authClockHex, headers: { 'if-none-match': etag3 } });
   check('v43d.10 CLOCK token conditional read -> 304',
     r.status === 304, r.status + ':' + r.text);
+}
+
+/* ================================================================ */
+console.log('PHASE SEC-C — §9c conditional PUT, RFC 9110-exact (sec-S4-3/S4-5/S8-F6)');
+/* ================================================================ */
+/* §13.2.2 evaluation order: If-Match (step 1, STRONG compare: * = exists,
+   list = exact opaque equality, W/ never matches; a MISSING row fails every
+   form → 412) then If-None-Match (step 3, WEAK compare: listed current etag
+   → 412, * → 412 iff exists, malformed → condition true → plain RMW). */
+
+{
+  const K = deriveClientKeys('password', MAT.saltHex, 100000, MAT.wrappedB64).kData;
+  const b64 = (u8) => Buffer.from(u8).toString('base64');
+  const id = 'cal:seccond1';
+  const put = async (ver, headers) => {
+    const enc = encryptRow(K, id, ver, { events: [] }); // run-local's restore drill asserts the {events} payload shape
+    return raw('PUT', '/rows/' + encodeURIComponent(id), {
+      token: MAT.authUiHex, headers, body: { ver, nonce: b64(enc.nonce), ct: b64(enc.ct) },
+    });
+  };
+  let r = await put(1, {});
+  check('secC.1 create ver 1', r.status === 200 && jparse(r.text)?.ver === 1, r.text);
+  r = await put(2, {});
+  check('secC.2 update ver 2', r.status === 200 && jparse(r.text)?.ver === 2, r.text);
+  r = await put(3, { 'if-match': '"2"' });
+  check('secC.3 If-Match current -> proceeds (ver 3)', r.status === 200 && jparse(r.text)?.ver === 3, r.text);
+  r = await put(4, { 'if-match': '"2"' });
+  check('secC.4 If-Match stale -> 412', r.status === 412 && r.text === '', r.status + ':' + r.text);
+  r = await put(4, { 'if-match': '"3", "9"' });
+  check('secC.5 If-Match LIST matching current -> proceeds (ver 4)', r.status === 200 && jparse(r.text)?.ver === 4, r.text);
+  r = await put(5, { 'if-match': 'W/"4"' });
+  check('secC.6 If-Match weak tag -> 412 (strong compare never matches W/)', r.status === 412, r.status + ':' + r.text);
+  r = await put(5, { 'if-match': '"04"' });
+  check('secC.7 If-Match "04" -> 412 (opaque: "04" is not our "4")', r.status === 412, r.status + ':' + r.text);
+  r = await put(5, { 'if-match': '*' });
+  check('secC.8 If-Match * on EXISTING row -> proceeds (ver 5)', r.status === 200 && jparse(r.text)?.ver === 5, r.text);
+  r = await put(6, { 'if-none-match': '"5"' });
+  check('secC.9 If-None-Match CURRENT etag on PUT -> 412 (was silently ignored)', r.status === 412, r.status + ':' + r.text);
+  r = await put(6, { 'if-none-match': 'W/"5"' });
+  check('secC.10 If-None-Match W/"5" -> 412 (weak compare matches)', r.status === 412, r.status + ':' + r.text);
+  r = await put(6, { 'if-none-match': '"4", "5"' });
+  check('secC.11 If-None-Match LIST containing current -> 412', r.status === 412, r.status + ':' + r.text);
+  r = await put(6, { 'if-none-match': '"4"' });
+  check('secC.12 If-None-Match stale etag -> proceeds (ver 6)', r.status === 200 && jparse(r.text)?.ver === 6, r.text);
+  r = await put(7, { 'if-none-match': '*' });
+  check('secC.13 If-None-Match * on EXISTING row -> 412 (create-only guard)', r.status === 412, r.status + ':' + r.text);
+  r = await put(7, { 'if-none-match': 'garbage' });
+  check('secC.14 malformed If-None-Match -> proceeds per RFC 9110 §13.1.2 rule 3 (ver 7)', r.status === 200 && jparse(r.text)?.ver === 7, r.text);
+  r = await put(8, { 'if-match': '"7"', 'if-none-match': '*' });
+  check('secC.15 If-Match ok + If-None-Match * BOTH evaluated (§13.2.2 steps 1 then 3) -> 412', r.status === 412, r.status + ':' + r.text);
+  r = await put(8, { 'if-match': 'notquoted' });
+  check('secC.16 malformed If-Match -> 400 bad_if_match (fail closed)', r.status === 400 && jparse(r.text)?.error === 'bad_if_match', r.text);
+
+  const mid = 'cal:seccondmissing';
+  const encM = encryptRow(K, mid, 1, { events: [] });
+  const putM = (headers) => raw('PUT', '/rows/' + encodeURIComponent(mid), {
+    token: MAT.authUiHex, headers, body: { ver: 1, nonce: b64(encM.nonce), ct: b64(encM.ct) },
+  });
+  r = await putM({ 'if-match': '"1"' });
+  check('secC.17 If-Match on MISSING row -> 412 (RFC 9110; was 404)', r.status === 412, r.status + ':' + r.text);
+  r = await putM({ 'if-match': '*' });
+  check('secC.18 If-Match * on MISSING row -> 412', r.status === 412, r.status + ':' + r.text);
+  r = await putM({ 'if-none-match': '*' });
+  check('secC.19 If-None-Match * on MISSING row -> 200 create', r.status === 200, r.status + ':' + r.text);
+  await raw('DELETE', '/rows/' + encodeURIComponent(mid), { token: MAT.authUiHex });
+}
+
+/* ================================================================ */
+console.log('PHASE SEC-D — §9d GET /rows conditional forms (weak / list / star)');
+/* ================================================================ */
+
+{
+  const m = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  const etag = m.etag; // quoted form, e.g. "e46"
+  const inner = etag.slice(1, -1); // opaque value e46
+  let r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': 'W/' + etag } });
+  check('secD.1 weak W/' + 'etag -> 304 (weak comparison)', r.status === 304 && r.headers.get('etag') === etag, r.status);
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': etag + ', "e999999"' } });
+  check('secD.2 etag LIST containing current -> 304', r.status === 304, r.status);
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': '*' } });
+  check('secD.3 If-None-Match * -> 304 (representation always exists; RFC 9110 §13.1.2 rule 1)', r.status === 304 && r.headers.get('etag') === etag, r.status);
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': '"e999999"' } });
+  check('secD.4 stale list -> 200 full manifest', r.status === 200, r.status);
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': 'not even quoted' } });
+  check('secD.5 malformed -> 200 (rule 3: condition true)', r.status === 200, r.status);
+}
+
+/* ================================================================ */
+console.log('PHASE SEC-H — response hygiene (sec-S1-1/S1-2/S1-3/S8-F5)');
+/* ================================================================ */
+
+{
+  // JSON APIs are uncachable (sec-S8-F5)
+  let r = await raw('GET', '/config', { token: MAT.authUiHex });
+  check('secH.1 /config carries cache-control: no-store', r.headers.get('cache-control') === 'no-store', r.headers.get('cache-control'));
+  // Every response: vary + HSTS (sec-S1-1/S1-3) — decorated AND undecorated
+  const m = jparse((await raw('GET', '/rows', { token: MAT.authUiHex })).text);
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, headers: { 'if-none-match': m.etag } });
+  check('secH.2 304 carries vary+HSTS+no-store+ETag',
+    r.headers.get('vary') === 'Origin' &&
+    r.headers.get('strict-transport-security') === 'max-age=31536000' &&
+    r.headers.get('cache-control') === 'no-store' &&
+    r.headers.get('etag') === m.etag,
+    JSON.stringify(Object.fromEntries(r.headers.entries())));
+  const s = await silentShape('GET', '/rows', {});
+  check('secH.3 SILENT drop (undecorated) still carries vary+HSTS, no ACAO, no cache-control',
+    s.vary === 'Origin' &&
+    (s.hsts || null) !== null &&
+    s.acao === null &&
+    s.cacheControl === null,
+    JSON.stringify(s));
+  // Decorated responses expose ETag to the browser (sec-S1-2)
+  r = await raw('GET', '/rows', { token: MAT.authUiHex, origin: PAGES_ORIGIN });
+  check('secH.4 decorated response exposes ETag via CORS',
+    r.headers.get('access-control-expose-headers') === 'ETag' &&
+    r.headers.get('access-control-allow-origin') === PAGES_ORIGIN,
+    r.headers.get('access-control-expose-headers'));
+  // 403 drain on DELETE-with-body (sec-S2-L1): the response must be delivered
+  // cleanly (no torn connection), empty body, 403.
+  const bigBody = { ver: 1, nonce: 'AAAA', ct: 'A'.repeat(2100000) }; // ~2.1 MiB JSON
+  r = await raw('DELETE', '/rows/cal:20990701', { token: MAT.authClockHex, body: bigBody });
+  check('secH.5 clock DELETE with 2MiB body -> clean empty 403 (drained)', r.status === 403 && r.text === '', r.status + ':' + (r.text || '').slice(0, 40));
+  r = await raw('GET', '/rows/cal:20990701', { token: MAT.authUiHex });
+  check('secH.6 the drained DELETE never wrote anything', r.status === 404 && jparse(r.text)?.error === 'not_found', r.text);
 }
 
 if (MATERIAL_OUT) {

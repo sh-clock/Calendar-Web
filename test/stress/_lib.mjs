@@ -229,7 +229,7 @@ export async function harness({ viewport = { width: 1440, height: 900 } } = {}) 
 
   /** Unlock, re-bootstrapping the universe once if the token went stale. */
   async function unlock() {
-    await page.goto(BASE + '/?server=' + SERVER + '&setup=' + MAT.auth_ui_hex);
+    await page.goto(BASE + '/#server=' + SERVER + '&setup=' + MAT.auth_ui_hex);
     await page.waitForTimeout(400);
     await page.fill('#password', 'password');
     await page.click('button[type=submit]');
@@ -238,7 +238,7 @@ export async function harness({ viewport = { width: 1440, height: 900 } } = {}) 
     } catch {
       console.log('  ..   unlock failed — universe may have been re-bootstrapped by a parallel agent; re-bootstrapping and retrying');
       rebootstrap();
-      await page.goto(BASE + '/?server=' + SERVER + '&setup=' + MAT.auth_ui_hex);
+      await page.goto(BASE + '/#server=' + SERVER + '&setup=' + MAT.auth_ui_hex);
       await page.waitForTimeout(400);
       await page.fill('#password', 'password');
       await page.click('button[type=submit]');

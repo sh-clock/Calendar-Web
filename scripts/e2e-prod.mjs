@@ -5,7 +5,7 @@ import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.
 
 const SITE = 'https://sh-clock.github.io/Calendar-Web/';
 const SERVER = 'https://calendar-poc.sh-clock.workers.dev';
-const AUTH_UI = '*SCRUBBED*<=';
+import { AUTH_UI } from './lib-prod-material.mjs'; // sec-S7-F1
 
 const requests = [];
 const pageErrors = [];

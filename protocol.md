@@ -32,6 +32,14 @@ concatenates and returns envelopes verbatim without interpreting them.
 The server sees: row ids (see §7 for what ids leak by design), vers,
 envelope byte lengths, and request timing. That is the entire surface.
 
+**Capability handles (sec-S6-F2, clarified):** "zero-knowledge" here means
+*content* zero-knowledge. The server necessarily stores — and backs up to
+D1 (§19) — the derived AUTH_UI/AUTH_CLOCK bearer tokens, because the bearer
+gate must compare them. A server-side compromise (or the account owner)
+can therefore read and write ciphertext envelopes, but never decrypt them.
+Event UIDs are part of that server-visible metadata surface — see the §2
+opacity requirement.
+
 ## 2. Storage model (UNCHANGED from v4.2)
 
 The Durable Object keeps one SQLite table of opaque rows:
@@ -52,6 +60,25 @@ Row id grammar (unchanged):
   exceptions (see docs/PROTOCOL-v4.2.md §5 — still normative).
 - `cal:{yyyymmdd}` — **DEPRECATED day buckets** (see §13c).
 
+**UID opacity (sec-S6-F1, normative):** event `uid`s MUST be
+content-independent (a UUID). Row ids are server-visible metadata (§7):
+manifest, request URLs, D1 `backup.id`. A slugified event title in a uid
+puts the SUMMARY in that metadata — a §1 invariant break. Clients that
+generate ids MUST use `crypto.randomUUID()` (or equivalent CSPRNG output
+carrying no payload-derived bytes).
+
+**Envelope bounds (sec-S7-F5, normative):** `ct` is `16 ≤ len ≤ 65536`
+DECODED bytes — a legal AES-256-GCM ciphertext is never shorter than its
+16-byte tag. Sub-tag blobs are rejected with `400 bad_ct`.
+
+**KDF iterations (sec-S7-F2, normative):** `iters` is server-validated in
+the range **100 000 ≤ iters ≤ 10 000 000**. The floor is the anti-downgrade
+wall (an admin cannot bootstrap a cheap-to-brute-force universe); the
+ceiling matches what clients accept (`js/crypto.js` derives with whatever
+`/config` reports). New universes SHOULD use ≥ 600 000 (OWASP 2023+
+guidance for PBKDF2-HMAC-SHA256); a Type-A rewrap MAY raise `iters` in
+place (§20 note in §9c-below).
+
 ## 3. Auth (UNCHANGED from v4.1 §4)
 
 - `GET /config` returns CLEAR params only: `{salt, iters, wrapped, ver}`.
@@ -70,13 +97,34 @@ Row id grammar (unchanged):
 | `GET /version`           | ui/clock | — | `{"proto":"4.3"}`                      |
 | `GET /config`            | ui/clock | — | clear bootstrap params                 |
 | `GET /status`            | ui/clock | — | `{"photo_pending":0}` (calendar scope) |
-| `GET /rows`              | ui/clock | — | manifest `{rows:[{id,ver}]}`           |
+| `GET /rows`              | ui/clock | — | manifest `{rows:[{id,ver}]}` + `etag`  |
 | `GET /rows/{id}`         | ui/clock | — | envelope or 404 `{error:"not_found"}`  |
-| `POST /rows:batch`       | ui/clock | NEW | §9b                                    || `PUT /rows/{id}`         | ui     | —   | RMW arbitration, §9                    |
+| `POST /rows:batch`       | ui/clock | NEW | §9b                                    |
+| `PUT /rows/{id}`         | ui     | —   | RMW arbitration, §9                    |
 | `DELETE /rows/{id}`      | ui     | —   | idempotent                             |
 | `PUT /bootstrap`         | admin  | —   | §8 (unchanged)                         |
-| `PUT /bootstrap/rewrap`  | admin  | —   | §20 Type A rotation (unchanged)        |
-| `POST /internal/backup`  | internal | — | §19 cron snapshot (unchanged)          |
+| `PUT /bootstrap/rewrap`  | admin  | —   | §20 Type A rotation (iters optional)  |
+| `POST /internal/backup`  | internal | — | §19 cron snapshot                      |
+
+**Transport hygiene (sec-S1/S8 hardening, normative):** every response
+leaving the Worker carries `Vary: Origin` (the CORS-decorated and
+undecorated variants of one URL differ) and
+`Strict-Transport-Security: max-age=31536000`. A cleartext `http:` request
+to a non-loopback host is upgraded with **308** to `https:` before any
+auth/CORS logic runs (loopback is exempt — `wrangler dev` and the local
+stacks are http by design). JSON responses and 304s carry
+`Cache-Control: no-store` (no intermediary may replay a stale `/config` or
+manifest); the silent drop deliberately carries NO freshness headers (§4
+law: body-empty 404 with no `WWW-Authenticate` and no cache directives).
+CORS-decorated responses expose the `ETag` header
+(`Access-Control-Expose-Headers: ETag`) so browser clients can read the
+§9d validator. An internal Worker error is indistinguishable from an
+unknown route (empty 404) at BOTH the front door and the DO.
+
+**§3 erratum (worker logs):** the v4.1 key-ledger line "Worker logs:
+nothing, ever" is implemented as: exception CLASS tags only
+(`store_error TypeError`) plus the backup cron's day/row COUNTS — never
+ids, params, key material, or exception messages.
 
 ### §9b `POST /rows:batch` (NEW in v4.3)
 
@@ -101,13 +149,23 @@ browser-vs-non-browser nuance).
 ### §9d `GET /rows` conditional read (v4.3 addition, efficiency)
 
 `GET /rows` now returns an `etag` field alongside the manifest:
-`{"rows":[{id,ver}…], "etag":"e<epoch>"}`, and answers
-`If-None-Match: "e<epoch>"` with **304** (empty body, `ETag` header set)
-when nothing has mutated since.
+`{"rows":[{id,ver}…], "etag":"e<epoch>"}`, and answers a matching
+`If-None-Match` with **304** (empty body, `ETag` header set) when nothing
+has mutated since.
 
 - The **epoch** is a server-side mutation counter: +1 for every accepted
   row INSERT, accepted UPDATE and REAL delete (an idempotent re-delete of
-  a missing row does not bump it). Row reads never bump it.
+  a missing row does not bump it). Row reads never bump it. The bump rides
+  the SAME SQLite statement as the row mutation (AFTER-INSERT/UPDATE/DELETE
+  triggers on the `rows` table — sec-S4-2), so no crash window can leave
+  the etag stale, and a **force re-bootstrap's wipe bumps it per destroyed
+  row** (sec-S4-1/S8-F1: a client holding a pre-wipe etag is never answered
+  a ghost 304).
+- `If-None-Match` forms (RFC 9110 §13.1.2, weak comparison): the exact
+  quoted `"e<epoch>"`; a `W/`-prefixed weak tag of the same value; a LIST
+  containing any current tag; or `*` (the manifest resource always has a
+  current representation → 304). A malformed value falls through to the
+  plain 200 (§13.1.2 evaluation rule 3: "otherwise, the condition is true").
 - Additive and interoperable in both directions: clients that send no
   `If-None-Match` always get a plain 200; servers without the extension
   ignore the header and answer a plain 200 (old clients ignore the new
@@ -120,26 +178,44 @@ when nothing has mutated since.
   no row ids, no vers, no payload-derived data. The server still
   compares only clear integers.
 
-### §9c PUT conditional mode (NEW in v4.3.1 — DAV compatibility)
+### §9c PUT conditional mode (NEW in v4.3.1 — DAV compatibility, RFC 9110-exact)
 
-Clients MAY send standard HTTP conditional headers with `PUT /rows/{id}`:
+Clients MAY send standard HTTP conditional headers with `PUT /rows/{id}`.
+They are evaluated in the RFC 9110 §13.2.2 order — **If-Match first
+(strong comparison), then If-None-Match (weak comparison)**:
 
-- `If-None-Match: *` — create only; if the row already exists the server
-  answers **412 Precondition Failed** (empty body) instead of the 200 echo.
-- `If-Match: "<ver>"` — update only if the stored `ver` equals the given
-  decimal ETag; on mismatch → **412** (empty body); on a missing row →
-  **404 with the `not_found` body** (§5). On match, the §9 RMW law applies
-  as usual (a `ver` greater than stored is stored and echoed with 200).
-- A malformed `If-Match` (not a quoted decimal ver) → `400 bad_if_match`.
-- Responses in this mode carry no envelope on failure — the client should
-  re-read the row (`GET`/`§9b`) to learn the current state, which is exactly
+- `If-Match: *` — exists-check: proceeds iff the row exists; a missing row
+  → **412** (empty body).
+- `If-Match: "<ver>"` — a list of STRONG entity-tags: proceeds iff one
+  equals the current row etag (the decimal `ver` string) by EXACT opaque
+  equality — `W/"5"` never matches `"5"`, and `"05"` is not `"5"`. A
+  mismatch (or a missing row — no current representation, so nothing can
+  match) → **412** (empty body).
+- `If-None-Match: *` — create-only guard: 412 iff the row already exists.
+- `If-None-Match: "<ver>"` (or a list) — 412 when the CURRENT row etag
+  weak-matches any listed tag (weak comparison: `W/"5"` ≡ `"5"`). This is
+  the DAV lost-update guard.
+- A malformed `If-Match` (not `*` / not a quoted-tag list) →
+  `400 bad_if_match` (fail closed). A malformed `If-None-Match` is
+  IGNORED per §13.1.2 rule 3 ("otherwise, the condition is true") — the
+  PUT proceeds under the plain §9 RMW law.
+- When both headers are present, both are evaluated in order (If-Match
+  step 1, If-None-Match step 3) — a passing If-Match does NOT suppress
+  If-None-Match.
+- On any 412 the response carries no envelope — the client should re-read
+  the row (`GET`/`§9b`) to learn the current state, which is exactly
   CalDAV conflict-handling behavior.
 
-This maps 1:1 onto CalDAV `PUT` with `If-Match`/`If-None-Match` so that
-DAV clients (the DAVx⁵ fork) get RFC 9110 §13.1.2 semantics with real
-status codes. The web client sends no conditional headers and keeps the
-200+echo arbitration of §9. The Worker still compares only the clear
-`ver` — it never inspects `nonce`/`ct` (threat model unchanged).
+`PUT /bootstrap/rewrap` (§20 Type A) additionally accepts an optional
+`iters` field (validated in the §2 range), updated atomically with the new
+`wrapped` — a password rotation can raise the KDF cost without a wipe
+(sec-S7-F2).
+
+This maps onto CalDAV `PUT` with `If-Match`/`If-None-Match` so that DAV
+clients (the DAVx⁵ fork) get RFC 9110 semantics with real status codes.
+The web client sends no conditional headers and keeps the 200+echo
+arbitration of §9. The Worker still compares only the clear `ver` — it
+never inspects `nonce`/`ct` (threat model unchanged).
 
 ### §9 PUT /rows/{id} (UNCHANGED semantics, restated)
 
@@ -151,11 +227,13 @@ status codes. The web client sends no conditional headers and keeps the
   envelope (200). The client detects acceptance by envelope identity
   (nonce equality), not by status code.
 - `ver` is a u32 ≥ 1; `nonce` is 12 bytes base64 (canonical, padded);
-  `ct` ≤ 65536 bytes base64.
-- DELETE+PUT is the calendar-move procedure (evt row ids embed the
-  calendar uuid): `DELETE evt:{oldcal}:{uid}` then
-  `PUT evt:{newcal}:{uid}`. Between the two the event is absent — a
-  concurrent reader may observe the gap; clients reconcile at next sync.
+  `ct` is 16..65536 DECODED bytes, base64 (canonical, padded).
+- **Calendar-move procedure (sec-S8-F2, corrected):** evt row ids embed
+  the calendar uuid, so moving = `PUT evt:{newcal}:{uid}` FIRST, then
+  `DELETE evt:{oldcal}:{uid}`. The create-before-delete order guarantees
+  a PUT failure can never LOSE the event (wave-7 A2); a failed DELETE
+  leaves a visible duplicate that the next sync reconciles. The transient
+  state between the two is a DUPLICATE, not an absence.
 
 ## 5. Client sync strategy (§11 — CHANGED in v4.3, normative)
 
@@ -224,8 +302,17 @@ order — identical to the v4.2 projection (see docs/PROTOCOL-v4.2.md
 ## 7. What the server can infer (by design, unchanged)
 
 Row ids (calendar uuid, event uid, deprecated day), vers and their
-update times, envelope sizes. NOTHING about event content. This is the
-documented v4.1 trade-off; v4.3 does not change it.
+update times, envelope sizes. NOTHING about event content — **provided
+clients honour the §2 UID-opacity requirement** (a content-derived uid
+would leak its derivation input here). This is the documented v4.1
+trade-off; v4.3 does not change it.
+
+**§19 backup semantics (sec-S6-F3):** each daily D1 snapshot is EXACT —
+the day's bucket is cleared before the inserts (deleted-earlier-today rows
+do not linger until tomorrow). A snapshot for day D is the point-in-time
+state of the LAST backup run during D (UTC); the cron fires at 03:00 UTC.
+Private columns (AUTH tokens, wrapped) are replicated — same trust domain
+as the DO itself (§1 capability handles).
 
 ## 8. Compatibility
 

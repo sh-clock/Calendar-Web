@@ -56,8 +56,30 @@ the CORS phases fail.)
 cd worker && npx wrangler deploy            # uses CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
 echo "<hex64>" | npx wrangler secret put ADMIN_SECRET
 echo "<hex64>" | npx wrangler secret put INTERNAL_TOKEN
-node cli/bootstrap.mjs --url https://<worker>.workers.dev --admin <hex64> --password <pw>
+node cli/bootstrap.mjs --url https://<worker>.workers.dev --admin <hex64> --password <pw> --out .secrets/credentials.json
 ```
+
+The `--out` file (mode 0600, git-ignored) is the operator material every
+prod helper script reads — `scripts/*-prod*.mjs` resolve it via the
+`CALENDAR_SECRETS` env var or `/home/z/my-project/.secrets/credentials.json`
+(`scripts/lib-prod-material.mjs`). **Never commit that file**: the security
+wave (sec-S7-F1) had to rotate the universe and purge history after the
+test material was committed. New universes default to 600 000 PBKDF2
+iterations; the server accepts 100 000–10 000 000 (protocol.md §2).
+
+## Provisioning a browser
+
+Provisioning links MUST use the URL **fragment** — the client refuses
+`?setup=` query strings (query URLs are logged by CDNs/proxies; fragments
+never leave the browser):
+
+```
+https://sh-clock.github.io/Calendar-Web/#setup=<AUTH_UI hex64>
+```
+
+`#server=` is likewise accepted only for loopback development servers
+(`http://localhost:…` / `127.0.0.1`) — a crafted link cannot repoint a
+browser at an attacker's server (sec-S5-F1).
 
 ## PoC security disclaimer
 

@@ -11,7 +11,7 @@ const page = await (await browser.newContext({ viewport: { width: 1440, height: 
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-await page.goto('http://127.0.0.1:8080/?server=http://127.0.0.1:8787&setup=' + mat.auth_ui_hex);
+await page.goto('http://127.0.0.1:8080/#server=http://127.0.0.1:8787&setup=' + mat.auth_ui_hex);
 await page.fill('#password', 'password');
 await page.click('button[type=submit]');
 await page.waitForSelector('#app:not([hidden])', { timeout: 30000 });

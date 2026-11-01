@@ -42,7 +42,7 @@ page.on('console', (m) => { if (m.type() === 'error') errs.push('[console] ' + m
 const reqs = [];
 page.on('request', (r) => { const u = String(r.url()); if (u.startsWith(SERVER)) reqs.push(r.method()); });
 const mark = () => reqs.length;
-await page.goto('http://127.0.0.1:8080/?server=' + SERVER + '&setup=' + AUTH_UI);
+await page.goto('http://127.0.0.1:8080/#server=' + SERVER + '&setup=' + AUTH_UI);
 await page.waitForTimeout(400);
 await page.fill('#password', 'password');
 await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resizer class, usable inside evaluate()

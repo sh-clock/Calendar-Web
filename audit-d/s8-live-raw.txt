@@ -1,0 +1,64 @@
+=== TRACE /rows (valid token) ===
+HTTP/2 405 
+server: cloudflare
+date: Sun, 01 Nov 2026 04:39:34 GMT
+content-type: text/html
+content-length: 155
+cf-ray: -
+
+<html>
+<head><title>405 Not Allowed</title></head>
+<body>
+<center><h1>405 Not Allowed</h1></center>
+<hr><center>cloudflare</center>
+</body>
+</html>
+
+=== CONNECT /version (valid token) ===
+HTTP/2 400 
+server: cloudflare
+date: Sun, 01 Nov 2026 04:39:34 GMT
+content-type: text/html
+content-length: 155
+cf-ray: -
+
+<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>cloudflare</center>
+</body>
+</html>
+
+=== CONNECT /nope (NO token) ===
+HTTP/2 400 
+server: cloudflare
+date: Sun, 01 Nov 2026 04:39:34 GMT
+content-type: text/html
+content-length: 155
+cf-ray: -
+
+<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>cloudflare</center>
+</body>
+</html>
+
+=== CONNECT authority-form (no token) ===
+HTTP/2 400 
+server: cloudflare
+date: Sun, 01 Nov 2026 04:39:34 GMT
+content-type: text/html
+content-length: 155
+cf-ray: -
+
+<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>cloudflare</center>
+</body>
+</html>
+

@@ -1,0 +1,22 @@
+[
+  {
+    "n": "F1 POST /internal/backup (internal token) -> 200 {ok,day,rows}",
+    "ok": true,
+    "d": "200:{\"ok\":true,\"day\":\"2026-11-01\",\"rows\":0}"
+  },
+  {
+    "n": "F1 backup response leaks no ids/params",
+    "ok": true,
+    "d": "ok,day,rows"
+  },
+  {
+    "n": "F2 40MiB streamed PUT: fetch threw (connection torn down, as designed)",
+    "ok": true,
+    "d": "TypeError: fetch failed"
+  },
+  {
+    "n": "F3 local manifest has no leftover s8-* rows",
+    "ok": true,
+    "d": "[]"
+  }
+]
