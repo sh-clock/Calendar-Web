@@ -2754,3 +2754,57 @@ audit-eu/EU-findings.md.
 Undo-for-delete (HIGH value), search/filter, task list view (Fossify-style),
 sidebar collapse, memoized cache serialization (E7-2). No worker-side
 efficiency change justified by measurements.
+
+## SESSION 2026-11-02 — operator auth support: post-rotation provisioning code re-issued (live-verified)
+
+### Trigger
+Operator reported "Authentication failed (silent 404): the provisioning code
+is not valid on this server" while using the pre-rotation AUTH_UI (the
+8b2d…-prefixed hex64 — now present only as DEAD KAT vectors in the parked
+davx repo's rowstore tests, katAuthUiHex).
+
+### Diagnosis (live-proven, non-destructive single requests)
+- The sec-S7-F1 remediation force-rotated the live universe (new
+  AES1/salt/KEK material at 600k iters + freshly derived AUTH_UI/AUTH_CLOCK,
+  same test password; demo data re-seeded with opaque uids). The operator's
+  saved provisioning code is therefore dead BY DESIGN.
+- Live probes this session: /config with the OLD token → HTTP 404, 0 bytes
+  (exactly the js/app.js 'silent' branch that renders the operator's error);
+  /config with the CURRENT .secrets/credentials.json auth_ui → HTTP 200
+  (salt/iters/wrapped byte-match); /version authed → 200 {"proto":"4.3"}.
+- New provisioning code + fragment-only URL re-issued to the operator
+  out-of-band (WORKLOG never carries hex material). ADMIN_SECRET /
+  INTERNAL_TOKEN were NOT rotated — never committed to any repo, unchanged
+  since the Oct-30 bootstrap (.secrets/prod.env).
+- If the operator's browser still holds old-universe local cache: the client
+  auto-purges it on the next online unlock (cfg-fingerprint pinning,
+  sec-S7-F3) — no manual cleanup needed.
+
+### Deployment currency re-verified
+- Live Pages assets byte-identical to the working tree (app.js, api.js,
+  crypto.js, index.html, style.css all cmp-identical; E7-3 decryptEnv
+  present in the live bundle).
+- e2e-prod re-run against the LIVE deployment: 15/15 passed, 0 page errors,
+  6 requests total (unlock → seeded render → month/week/day/year → dark →
+  create=1-PUT → delete=1-DELETE → seed intact).
+
+### Hygiene — VP6-F2 scope gap closed (snapshot repo)
+- The sandbox's local auto-snapshot repo (/home/z/my-project/.git — author
+  "Z User <z@container>", NO remote configured; contents never left the
+  machine) had been TRACKING .secrets/credentials.json, .secrets/prod.env
+  and .git-credentials, and .secrets/ file modes had regressed 600→755
+  (cause: post-VP6 rewrite of the files under default umask).
+- FIXED: chmod 600 restored; the three paths untracked from the snapshot
+  repo and added to its .gitignore for future snapshots.
+- Accepted residual (documented): pre-fix blobs remain in that repo's LOCAL
+  history — it has no remote and is not an exfiltration channel; the PUBLIC
+  calendar-web history was purged at rotation. Re-rotate the universe if the
+  sandbox snapshot repo ever gains a remote/push target.
+- Standing note for future waves: any script that rewrites .secrets/ must
+  re-apply chmod 600 (add a perm assertion to the rotation scripts).
+
+### State
+All standing directives are complete through the audit-eu wave (c53024e).
+Queued owner's-call proposals unchanged: Undo-for-delete, search/filter,
+Fossify-style task list view, sidebar collapse, E7-2 memoized cache
+serialization.
