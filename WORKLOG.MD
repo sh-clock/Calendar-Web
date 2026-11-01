@@ -2712,3 +2712,45 @@ live + theoretical; no DDoS, no password cracking):
 Wave verdict: all six domains re-attacked; residual findings fixed and
 re-tested; ZERO open CRITICAL/HIGH/MEDIUM findings. The deployment is
 verified against the white-box attacker model.
+
+## SESSION 2026-11-01 (e) — EFFICIENCY + UI ENHANCEMENT AUDIT WAVE (audit-eu)
+
+The subagent launcher degraded (7 consecutive timeouts) after the VP wave,
+so this wave was executed by the orchestrator inline (probes preserved:
+/home/z/e1-combined.mjs, e1-sync.mjs, e1-cmeta.mjs). Findings file:
+audit-eu/EU-findings.md.
+
+### Measured baseline (200 synthetic events, local stack)
+- Bundle: 1222 KB raw / ~256 KB gz first load (FC all-plugins bundle =
+  exactly the plugin set in use; no custom build proposed — vendored-
+  verbatim posture outweighs the ~50 KB saving).
+- Local-first hydration (reload → first chip): 272-297 ms.
+- Month navigation with 200 chips: ~230 ms/frame. Zero page/console errors.
+- Cache at 200 events: 71.5 KB.
+- Worker: PUT ~5.5 ms/req incl. client crypto; epoch triggers sub-ms
+  (VP1-measured); manifest at 204 rows single-digit ms.
+
+### Implemented
+- **E7-3 parallel batch decryption**: fetchRowsIntoState now decrypts ALL
+  fetched envelopes concurrently (bounded 32) via a new decryptEnv(), then
+  runs the ingestRow state machine SYNCHRONOUSLY in manifest order —
+  semantics preserved exactly (stale guard, A3 dirty/deleted checks, corrupt
+  marking, cmeta double-parse all unchanged; ingestRow split into
+  decryptEnv + sync ingestRow with its one caller updated). A/B at 200
+  events: submit→first-chip 382→326 ms (~15%; the serialized-await share
+  grows with row count). Battery re-verified: smoke 43/43, e2e-fc 50/50,
+  e2e-sec 24/24, A6-5 27/27, reverify3 10/10.
+
+### Test fix (time-of-day flake, NOT a regression)
+- stress-A6-reverify "resizer present on hover" failed at 09:2x local time:
+  the day view auto-scrolls to NOW, so the fixed-hour (09:00) target chip
+  sat 211 px ABOVE the viewport — the same test-geometry species as the
+  recorded e2e-fc §16 lesson (proved: the pre-E7-3 stash failed identically;
+  it passed this morning purely because of the run time). Fixed with §16-
+  style scrollTop surgery (chip centered in the v7 hashed scroller —
+  scrollerClass() helper added to _lib.mjs). reverify 13/13 again.
+
+### Queued proposals (owner's call, next session)
+Undo-for-delete (HIGH value), search/filter, task list view (Fossify-style),
+sidebar collapse, memoized cache serialization (E7-2). No worker-side
+efficiency change justified by measurements.

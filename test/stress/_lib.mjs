@@ -113,6 +113,17 @@ export function resizerEndClass() {
   return _RZ_END;
 }
 
+let _SCROLLER = null;
+/** The v7 hashed timegrid scroller class (fc-<hash>) — the scrollable
+ *  container whose scrollTop positions timed lanes (e2e-fc §16 geometry
+ *  surgery operates on it). */
+export function scrollerClass() {
+  if (_SCROLLER !== null) return _SCROLLER;
+  const src = readFileSync(REPO + '/js/vendor/fullcalendar/v7/all.global.js', 'utf8');
+  _SCROLLER = (/"internalScroller":"(fc-[A-Za-z0-9]+)"/.exec(src) || [])[1] || null;
+  return _SCROLLER;
+}
+
 /* ---------------- in-page v7 DOM helpers ---------------- *
  * Injected through page.evaluate(); keep them self-contained (no closures). */
 

@@ -2,12 +2,13 @@
 // START (zero duration -> invalid_duration path) vs clearly above it; (b)
 // Escape vs backdrop-click vs Cancel on the recurring-choice modal after a
 // month-view drag (does the chip revert?).
-import { harness, decryptAll, findEvt, makeTally, resizerEndClass, gotoMonth } from './_lib.mjs';
+import { harness, decryptAll, findEvt, makeTally, resizerEndClass, scrollerClass, gotoMonth } from './_lib.mjs';
 
 const T = makeTally();
 const h = await harness();
 const { page } = h;
 const RZ_END = resizerEndClass(); // v7 hashed resizer class (see _lib)
+const SCROLLER = scrollerClass(); // v7 hashed timegrid scroller class (see _lib)
 const sleep = (ms) => page.waitForTimeout(ms);
 
 try {
@@ -44,6 +45,24 @@ await page.evaluate((c) => { window.__RZ_END = c; }, RZ_END); // v7 hashed resiz
 
   // hover so resizer appears
   let g = await geomOf();
+  // TIME-OF-DAY-dependent geometry (same species as the recorded e2e-fc §16
+  // lesson): the day view auto-scrolls to "now", so a fixed-hour chip can sit
+  // ABOVE the viewport depending on when the suite runs (a 09:00 chip at
+  // 09:20 local time). Center the chip's lane in the timegrid scroller
+  // BEFORE the hover, or the resizer never mounts (mouse never hovers it).
+  if (g && g.top < 0) {
+    await page.evaluate((sel) => {
+      const scroller = document.querySelector(sel);
+      const chip = [...document.querySelectorAll('.fc-event')].find((e) => e.textContent.includes('RV resize target'));
+      if (!scroller || !chip) return;
+      const r = chip.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      // target: chip center at the scroller's vertical center
+      scroller.scrollTop += r.top + r.height / 2 - (sr.top + sr.height / 2);
+    }, '.' + SCROLLER);
+    await sleep(300);
+    g = await geomOf();
+  }
   await page.mouse.move(h.R(g.left + g.w / 2), h.R(g.top + g.h / 2));
   await sleep(500);
   g = await geomOf();

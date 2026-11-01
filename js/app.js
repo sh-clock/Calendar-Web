@@ -959,7 +959,21 @@ async function fetchRow(id) {
  * just-completed local RMW (stale manifest snapshot racing a mutation) must
  * NOT roll the local state back. Rows the user mutated are also protected by
  * the dirty set at the syncAll cleanup below. */
-async function ingestRow(id, ver, nonce, ct) {
+/** Decrypt one envelope (E7-3): separated from the state machine so a sync
+ *  can decrypt MANY rows concurrently — the sequential await per row was the
+ *  first-sync bottleneck at scale (200 rows ≈ seconds of serialized
+ *  round-trips through WebCrypto). Returns {payload} or {decryptFailed}. */
+async function decryptEnv(id, ver, nonce, ct) {
+  try {
+    return { payload: await decryptRow(state.rowKey, id, ver, nonce, ct) };
+  } catch {
+    return { decryptFailed: true };
+  }
+}
+
+/** Synchronous ingest state machine (unchanged semantics, minus the await):
+ *  stale-guard → decrypt result → parse/validate → set evt/cals/corrupt. */
+function ingestRow(id, ver, dec) {
   const localEvt = state.evt.get(id);
   if (localEvt && Number.isInteger(ver) && localEvt.ver >= ver && !state.corrupt.has(id)) {
     return; // stale envelope — keep the fresher local state
@@ -971,15 +985,13 @@ async function ingestRow(id, ver, nonce, ct) {
       return;
     }
   }
-  let payload;
-  try {
-    payload = await decryptRow(state.rowKey, id, ver, nonce, ct);
-  } catch {
+  if (dec.decryptFailed) {
     state.corrupt.set(id, { reason: 'decrypt_failed', ver });
     state.evt.delete(id);
     if (cu) state.cals.delete(cu);
     return;
   }
+  const payload = dec.payload;
   if (core.parseEvtId(id)) {
     const parsed = core.parseEvtPayload(payload);
     if (!parsed) {
@@ -1039,6 +1051,19 @@ async function fetchRowsIntoState(ids, syncGen) {
       }
     }));
   }
+  // E7-3: decrypt ALL fetched rows CONCURRENTLY (bounded, 32 at a time) —
+  // the state machine below then runs in manifest order, exactly as before.
+  // Stale envelopes are decrypted too (the fetch list is already ver-diffed;
+  // the stale guard still discards them before any state change).
+  const DECRYPT_CONC = 32;
+  const decrypted = new Map();
+  for (let i = 0; i < envelopes.length; i += DECRYPT_CONC) {
+    const chunk = envelopes.slice(i, i + DECRYPT_CONC);
+    await Promise.all(chunk.map(async (env) => {
+      if (!env || !env.id || env.skip || env.missing) return;
+      decrypted.set(env.id, await decryptEnv(env.id, env.ver, env.nonce, env.ct));
+    }));
+  }
   for (const env of envelopes) {
     if (!env || !env.id || env.skip) continue;
     if (env.missing) {
@@ -1058,7 +1083,9 @@ async function fetchRowsIntoState(ids, syncGen) {
     // A3: a row deleted locally this session must not be resurrected by a
     // stale batch response (the server confirms the delete next sync).
     if (state.deletedLocally.has(env.id)) continue;
-    await ingestRow(env.id, env.ver, env.nonce, env.ct);
+    const dec = decrypted.get(env.id);
+    if (!dec) continue; // never decrypted (skipped above) — defensive
+    ingestRow(env.id, env.ver, dec);
   }
 }
 
